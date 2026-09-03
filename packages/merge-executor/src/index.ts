@@ -18,7 +18,7 @@ import { pathToFileURL } from "node:url";
 import { INTEGRATOR_OUTPUT_KIND, MERGE_INTEGRATOR_KIND, MERGE_INTEGRATOR_SCHEMA_VERSION, serializeMergeResult } from "@anneal/db/merge-integrator";
 
 import {
-  AgentOsResponseError,
+  CompletionRejectedError,
   CompletionTransportError,
   makeAgentOsClient,
   MechanicalContractMismatchError,
@@ -60,18 +60,20 @@ export const runClaim = async (
 ): Promise<void> => {
   const agentos = makeAgentOsClient(config, fetchImpl);
   let runLog = log;
+  let redactCompletionEvidence = makeRedactor();
   const complete = async (
     completion: { succeeded: boolean; outcome: Awaited<ReturnType<typeof execute>> | null; failureReason?: string },
   ): Promise<boolean> => {
     try {
-      await agentos.complete(claimed, completion);
+      await agentos.complete(claimed, completion, redactCompletionEvidence);
       return true;
     } catch (error: unknown) {
-      if (error instanceof AgentOsResponseError) {
+      if (error instanceof CompletionRejectedError) {
         runLog.error(`mechanical completion rejected with HTTP ${error.status}: ${error.responseBody}`, {
           runId: claimed.run.id,
           status: error.status,
           responseBody: error.responseBody,
+          ...(error.activityError === null ? {} : { activityError: error.activityError }),
         });
         return false;
       }
@@ -79,7 +81,8 @@ export const runClaim = async (
         runLog.error("mechanical completion failed after network retry", { runId: claimed.run.id, error: error.cause });
         return false;
       }
-      throw error;
+      runLog.error("mechanical completion failed without retry", { runId: claimed.run.id, error });
+      return false;
     }
   };
   const chainIndex = claimed.task.chainIndex ?? null;
@@ -137,6 +140,7 @@ export const runClaim = async (
 
     runLog = log.withSecrets(minted.token);
     const redactInstallationToken = makeRedactor(minted.token);
+    redactCompletionEvidence = redactInstallationToken;
     // The installation token is run-scoped: construct the GitHub surface only
     // after this Run's successful mint, and never retain it outside this call.
     const github = (overrides.makeGitHub ?? makeGitHubClient)({

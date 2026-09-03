@@ -392,6 +392,56 @@ test("a completion network failure is retried exactly once", async () => {
   assert.equal(completionAttempts, 2);
 });
 
+test("a non-network completion exception is not retried", async () => {
+  let completionAttempts = 0;
+  const fetchImpl: typeof fetch = async (input) => {
+    if (String(input).endsWith("/complete")) {
+      completionAttempts += 1;
+      throw new Error("programming failure in fetch adapter");
+    }
+    return compatibleAgentOsResponse(input);
+  };
+
+  await assert.rejects(
+    makeAgentOsClient(config, fetchImpl).complete(claimed("no-programming-retry"), {
+      succeeded: true,
+      outcome: { outcome: "stopped", condition: "unresolved-mergeability", evidence: "fixture" },
+    }),
+    /programming failure/u,
+  );
+  assert.equal(completionAttempts, 1);
+});
+
+test("completion rejection evidence redacts the run-scoped installation token", async () => {
+  const installationToken = `installation_${"Z".repeat(32)}`;
+  const requests: Array<{ url: string; body: string }> = [];
+  const lines: string[] = [];
+  const capturedLog = makeLog(makeRedactor(), {
+    log: (line: string) => lines.push(line),
+    warn: (line: string) => lines.push(line),
+    error: (line: string) => lines.push(line),
+  });
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = String(input);
+    requests.push({ url, body: String(init?.body ?? "") });
+    if (url.endsWith("/complete")) {
+      return new Response(JSON.stringify({ error: `rejected ${installationToken}` }), { status: 400 });
+    }
+    return compatibleAgentOsResponse(input);
+  };
+
+  await runClaim(config, "/private/app.pem", claimed("redacted-rejection"), capturedLog, fetchImpl, {
+    mintToken: async () => ({ ok: true, token: installationToken, expiresAt: new Date(Date.now() + 60 * 60_000) }),
+    makeGitHub: (() => ({})) as never,
+    executeDecision: async () => ({ outcome: "stopped", condition: "unresolved-mergeability", evidence: "fixture" }),
+  });
+
+  assert.equal(requests.some(({ body }) => body.includes(installationToken)), false);
+  assert.equal(lines.some((line) => line.includes(installationToken)), false);
+  assert.ok(requests.some(({ body }) => body.includes("[redacted-merge-credential]")));
+  assert.ok(lines.some((line) => line.includes("[redacted-merge-credential]")));
+});
+
 test("the daemon still starts when it is reached through a symlinked release directory", () => {
   // The operator runbook installs versioned releases and starts the daemon
   // through a `current` -> releases/<oid> symlink. ESM resolves that before it

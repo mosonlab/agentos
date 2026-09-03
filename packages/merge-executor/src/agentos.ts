@@ -61,6 +61,26 @@ export class MechanicalContractMismatchError extends Error {
   }
 }
 
+export class AgentOsTransportError extends Error {
+  override readonly name = "AgentOsTransportError";
+
+  constructor(override readonly cause: unknown) {
+    super("Anneal API request failed without an HTTP response");
+  }
+}
+
+export class CompletionRejectedError extends Error {
+  override readonly name = "CompletionRejectedError";
+
+  constructor(
+    readonly status: number,
+    readonly responseBody: string,
+    readonly activityError: unknown | null,
+  ) {
+    super(`Anneal completion rejected with HTTP ${status}: ${responseBody}`);
+  }
+}
+
 export class CompletionTransportError extends Error {
   override readonly name = "CompletionTransportError";
 
@@ -74,17 +94,26 @@ const jsonHeaders = (token: string): Record<string, string> => ({
   "Content-Type": "application/json",
 });
 
+const isFetchTransportError = (error: unknown): boolean => error instanceof TypeError
+  || error instanceof DOMException && (error.name === "AbortError" || error.name === "TimeoutError");
+
 export const makeAgentOsClient = (config: ExecutorConfig, fetchImpl: typeof fetch = fetch) => {
   const request = async (
     path: string,
     init: { method: string; token: string; body?: unknown },
   ): Promise<Response> => {
-    const response = await fetchImpl(`${config.apiUrl}${path}`, {
-      method: init.method,
-      headers: jsonHeaders(init.token),
-      ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
-      signal: AbortSignal.timeout(config.apiTimeoutMs),
-    });
+    let response: Response;
+    try {
+      response = await fetchImpl(`${config.apiUrl}${path}`, {
+        method: init.method,
+        headers: jsonHeaders(init.token),
+        ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
+        signal: AbortSignal.timeout(config.apiTimeoutMs),
+      });
+    } catch (error: unknown) {
+      if (isFetchTransportError(error)) throw new AgentOsTransportError(error);
+      throw error;
+    }
     if (!response.ok && response.status !== 204) {
       throw new AgentOsResponseError(response.status, await response.text());
     }
@@ -236,6 +265,7 @@ export const makeAgentOsClient = (config: ExecutorConfig, fetchImpl: typeof fetc
   const complete = async (
     claimed: MechanicalClaim,
     completion: { succeeded: boolean; outcome: MergeOutcome | null; failureReason?: string },
+    redact: (value: unknown) => string = (value) => String(value),
   ): Promise<void> => {
     const body = {
       runnerId: config.runnerId,
@@ -260,33 +290,36 @@ export const makeAgentOsClient = (config: ExecutorConfig, fetchImpl: typeof fetc
         body,
       });
     };
-    const recordRejection = async (error: AgentOsResponseError): Promise<void> => {
+    const rejectCompletion = async (error: AgentOsResponseError): Promise<never> => {
+      const responseBody = redact(error.responseBody);
+      let activityError: unknown | null = null;
       await writeActivity(
         claimed,
-        `Mechanical completion rejected with HTTP ${error.status}: ${error.responseBody}`,
+        `Mechanical completion rejected with HTTP ${error.status}: ${responseBody}`,
         {
           kind: "mergeExecutor.completionRejected",
           schemaVersion: 1,
           status: error.status,
-          responseBody: error.responseBody,
+          responseBody,
         },
-      );
+      ).catch((error: unknown) => { activityError = error; });
+      throw new CompletionRejectedError(error.status, responseBody, activityError);
     };
     try {
       await attempt();
     } catch (firstError: unknown) {
       if (firstError instanceof AgentOsResponseError) {
-        await recordRejection(firstError).catch(() => undefined);
-        throw firstError;
+        await rejectCompletion(firstError);
       }
+      if (!(firstError instanceof AgentOsTransportError)) throw firstError;
       try {
         await attempt();
       } catch (secondError: unknown) {
         if (secondError instanceof AgentOsResponseError) {
-          await recordRejection(secondError).catch(() => undefined);
-          throw secondError;
+          await rejectCompletion(secondError);
         }
-        throw new CompletionTransportError(secondError);
+        if (secondError instanceof AgentOsTransportError) throw new CompletionTransportError(secondError.cause);
+        throw secondError;
       }
     }
   };
