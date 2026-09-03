@@ -123,6 +123,7 @@ const instantiate = async (
   }, {
     repoId: seed.repo.id,
     variables: {},
+    name: `${template} chain`,
     autoStart,
     ...(afterTaskId ? { afterTaskId } : {}),
   });
@@ -400,6 +401,7 @@ test("completion wins the predecessor mutex and a later instantiate is refused w
     }, {
       repoId: seed.repo.id,
       variables: {},
+      name: "completion race successor",
       autoStart: false,
       afterTaskId: predecessorTask.id,
     });

@@ -52,6 +52,7 @@ export PROJECT_SLUG=demo-project
 export REPO_NAME=demo
 export REPO_REMOTE=https://github.com/acme/demo.git
 export BRANCH_NAME=feature/demo
+export CHAIN_NAME="Demo: open the first pull request"
 ```
 
 ## Create the Project
@@ -139,15 +140,22 @@ TEMPLATE_ID=$(curl --fail-with-body -sS -X GET "$BASE_URL/projects/$PROJECT_ID/t
 test -n "$TEMPLATE_ID" -a "$TEMPLATE_ID" != null
 ```
 
-Instantiate it with the created Repo and the branch to change. `autoStart: true`
-queues the first step so the pull-request workflow begins immediately.
+Instantiate it with the created Repo and the branch to change. Choose
+`CHAIN_NAME` as the operator-facing title for this chain: it must be one line
+of at most 120 characters. `autoStart: true` queues the first step so the
+pull-request workflow begins immediately.
 
 ```sh
+INSTANTIATE_BODY=$(jq -n \
+  --arg repoId "$REPO_ID" \
+  --arg branchName "$BRANCH_NAME" \
+  --arg name "$CHAIN_NAME" \
+  '{"repoId":$repoId,"variables":{"branchName":$branchName},"name":$name,"autoStart":true}')
 curl --fail-with-body -sS -X POST \
   "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/instantiate" \
   -H "Authorization: Bearer $OPERATOR_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"repoId":"'"$REPO_ID"'","variables":{"branchName":"'"$BRANCH_NAME"'"},"autoStart":true}'
+  -d "$INSTANTIATE_BODY"
 ```
 
 The response contains the chain and task ids. Follow the task's pull-request

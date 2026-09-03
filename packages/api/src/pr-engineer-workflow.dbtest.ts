@@ -115,7 +115,7 @@ const instantiate = async (
 ) => request(
   "POST",
   `/projects/${projectId}/task-templates/${templateId}/instantiate`,
-  { repoId, variables, autoStart, description },
+  { repoId, variables, name: "PR workflow chain", autoStart, description },
 );
 
 test("the bootstrapped PR workflow refuses implementation routing and otherwise enforces its variable contract", async () => {

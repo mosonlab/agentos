@@ -53,11 +53,15 @@ const fire = (
 
 test("webhook happy path creates the operator-equivalent chain, first run, and webhook activities", async () => {
   const { template } = await seedWebhook();
+  await db.taskTemplate.update({ where: { id: template.id }, data: { name: "Ticket\nQueue" } });
   const response = await fire(template.id, { issue: { title: "Fix race" } });
   assert.equal(response.status, 201);
   const result = await response.json() as { chainId: string; taskIds: string[] };
   assert.equal(result.taskIds.length, 1);
   assert.equal(await db.run.count({ where: { taskId: result.taskIds[0]! } }), 1);
+  const triggerFire = await db.triggerFire.findFirstOrThrow({ where: { chainId: result.chainId } });
+  const task = await db.task.findUniqueOrThrow({ where: { id: result.taskIds[0]! } });
+  assert.ok(task.name.startsWith(`Ticket Queue: ${triggerFire.id}: `));
   const activity = await db.taskActivity.findFirstOrThrow({ where: { taskId: result.taskIds[0]! } });
   assert.equal(activity.actorType, "webhook");
   assert.match(JSON.stringify(activity.metadata), /webhookTemplateId/);

@@ -303,7 +303,7 @@ test("clone, replace, instantiate, and activate an edited fan-out chain end to e
   const instantiated = await operatorRequest(
     `/projects/${seed.project.id}/task-templates/${cloned.body.id}/instantiate`,
     "POST",
-    { repoId: seed.repo.id, variables, autoStart: true },
+    { repoId: seed.repo.id, variables, name: "authored fan-out", autoStart: true },
   );
   assert.equal(instantiated.status, 201, JSON.stringify(instantiated.body));
 
@@ -315,7 +315,7 @@ test("clone, replace, instantiate, and activate an edited fan-out chain end to e
   assert.deepEqual(
     tasks.map((task) => ({ name: task.name, layer: task.chainLayer, assigneeAgentId: task.assigneeAgentId })),
     graph.map((step) => ({
-      name: `authored-fan-out: ${step.name}`,
+      name: `authored fan-out: ${step.name}`,
       layer: step.layer,
       assigneeAgentId: step.assigneeAgentId,
     })),

@@ -86,6 +86,24 @@ const selectTemplate = async (
   await page.settle();
 };
 
+const fillTitle = async (
+  page: Awaited<ReturnType<typeof mountPage>>,
+  value: string,
+): Promise<void> => {
+  const label = [...page.container.querySelectorAll("label")]
+    .find((candidate) => candidate.textContent?.trim() === en("newTask.field.title.label"));
+  assert.ok(label, "the title field should be present");
+  const input = label.parentElement?.querySelector("input") as HTMLInputElement | null;
+  assert.ok(input, "the title field should contain an input");
+  const setter = Object.getOwnPropertyDescriptor(page.dom.window.HTMLInputElement.prototype, "value")?.set;
+  assert.ok(setter, "the title input should expose its value setter");
+  await act(async () => {
+    setter.call(input, value);
+    input.dispatchEvent(new page.dom.window.Event("input", { bubbles: true }));
+  });
+  await page.settle();
+};
+
 const mount = async (templates: TaskTemplate[] = [compound, direct, plain]) => {
   const posts: Array<Record<string, unknown>> = [];
   const page = await mountPage(
@@ -132,10 +150,40 @@ test("template gate checkboxes show only present slots and use project defaults"
   }
 });
 
+test("template instantiate requires a title and sends it in the request", async () => {
+  const empty = await mount();
+  try {
+    await switchToTemplateMode(empty.page);
+    const create = [...empty.page.container.querySelectorAll("button")]
+      .find((candidate) => candidate.textContent?.trim() === en("newTask.create")) as HTMLButtonElement | undefined;
+    assert.ok(create, "the create button should be present");
+    assert.equal(create.disabled, true, "an empty template title cannot be submitted");
+    assert.equal(empty.posts.length, 0);
+  } finally {
+    await empty.page.dispose();
+  }
+
+  const named = await mount();
+  try {
+    await switchToTemplateMode(named.page);
+    await fillTitle(named.page, "Ship the named chain");
+    const create = [...named.page.container.querySelectorAll("button")]
+      .find((candidate) => candidate.textContent?.trim() === en("newTask.create")) as HTMLButtonElement | undefined;
+    assert.ok(create, "the create button should be present");
+    assert.equal(create.disabled, false, "a non-blank template title can be submitted");
+    await named.page.press(en("newTask.create"));
+    assert.equal(named.posts.length, 1);
+    assert.equal(named.posts[0]?.name, "Ship the named chain");
+  } finally {
+    await named.page.dispose();
+  }
+});
+
 test("instantiate sends only changed gate keys and drops gates when a change is restored", async () => {
   const first = await mount();
   try {
     await switchToTemplateMode(first.page);
+    await fillTitle(first.page, "Gate defaults");
     await first.page.press(en("newTask.create"));
     assert.equal("gates" in (first.posts[0] ?? {}), false);
   } finally {
@@ -145,6 +193,7 @@ test("instantiate sends only changed gate keys and drops gates when a change is 
   const changed = await mount();
   try {
     await switchToTemplateMode(changed.page);
+    await fillTitle(changed.page, "Gate changes");
     await changed.page.press(en("newTask.gates.spec"));
     await changed.page.press(en("newTask.create"));
     assert.deepEqual(changed.posts[0]?.gates, { spec: false });
@@ -155,6 +204,7 @@ test("instantiate sends only changed gate keys and drops gates when a change is 
   const restored = await mount();
   try {
     await switchToTemplateMode(restored.page);
+    await fillTitle(restored.page, "Gate restore");
     await restored.page.press(en("newTask.gates.spec"));
     await restored.page.press(en("newTask.gates.spec"));
     await restored.page.press(en("newTask.create"));

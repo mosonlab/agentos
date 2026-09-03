@@ -99,6 +99,7 @@ const queueCanonicalStep = async (
   const chain = await instantiateTemplate(db, template.projectId, template.id, {
     repoId,
     variables: { branchName: `blind-claim-step-${stepIndex}` },
+    name: `blind-claim-step-${stepIndex}`,
     description: SPECIFICATION_BRIEF,
     autoStart: true,
   });
