@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { FAILURE_ENVELOPE_VERSION, FailureClass, type FailureEnvelope } from "@anneal/db";
 
-import { classifyEnvelope, failureIsRetryable } from "./execution.js";
+import { classifyEnvelope, failureIsRetryable, isTextMatchedTransientProviderFailure } from "./execution.js";
 
 const envelope = (overrides: Partial<FailureEnvelope> = {}): FailureEnvelope => ({
   version: FAILURE_ENVELOPE_VERSION,
@@ -71,6 +71,59 @@ test("auth in the agent's output is content; auth on the provider error is a ver
 test("auth outranks transience so a lockout is not retried into", () => {
   const verdict = classifyEnvelope(envelope({ providerError: "connection lost after authentication_failed" }));
   assert.equal(verdict.failureClass, FailureClass.AUTH_REQUIRED);
+  assert.equal(verdict.retryable, false);
+});
+
+test("a clean EXECUTE exit after a provider fetch failure is refunded", () => {
+  const verdict = classifyEnvelope(envelope({
+    exitCode: 0,
+    stderrSummary: "fetch failed",
+  }));
+  assert.equal(verdict.failureClass, FailureClass.TRANSIENT_PROVIDER);
+  assert.equal(verdict.retryable, true);
+  assert.equal(verdict.externalFailure, true);
+});
+
+test("typed EXECUTE transience alone does not become a textual refund", () => {
+  const evidence = envelope({ transient: true, stderrSummary: "runner network marker" });
+  const verdict = classifyEnvelope(evidence);
+  assert.equal(verdict.failureClass, FailureClass.TRANSIENT_PROVIDER);
+  assert.equal(verdict.retryable, true);
+  assert.equal(verdict.externalFailure, false);
+  assert.equal(isTextMatchedTransientProviderFailure(evidence, verdict.failureClass), false);
+});
+
+test("the pi auth check failure is an authentication requirement", () => {
+  const verdict = classifyEnvelope(envelope({
+    phase: "PROVISION",
+    providerError: "not-authenticated: the CLI's own login check did not pass (exit 2)",
+  }));
+  assert.equal(verdict.failureClass, FailureClass.AUTH_REQUIRED);
+  assert.equal(verdict.retryable, false);
+  assert.equal(verdict.externalFailure, true);
+});
+
+test("gh's GraphQL transport EOF is retryable delivery transience", () => {
+  const verdict = classifyEnvelope(envelope({
+    phase: "DELIVER",
+    providerError: 'gh failed (1): Post "https://api.github.com/graphql": EOF',
+  }));
+  assert.equal(verdict.failureClass, FailureClass.TRANSIENT_PROVIDER);
+  assert.equal(verdict.retryable, true);
+  assert.equal(verdict.externalFailure, true);
+});
+
+test("provider overload wording is retryable transience", () => {
+  const verdict = classifyEnvelope(envelope({
+    providerError: "Our servers are currently overloaded. Please try again later.",
+  }));
+  assert.equal(verdict.failureClass, FailureClass.TRANSIENT_PROVIDER);
+  assert.equal(verdict.retryable, true);
+});
+
+test("an unrelated stack-trace line is not a provider outage", () => {
+  const verdict = classifyEnvelope(envelope({ stderrSummary: "node:events:526:24" }));
+  assert.equal(verdict.failureClass, FailureClass.TASK_FAILED);
   assert.equal(verdict.retryable, false);
 });
 
