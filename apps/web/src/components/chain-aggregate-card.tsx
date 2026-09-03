@@ -37,6 +37,10 @@ const chainName = (aggregate: ChainAggregate): string => aggregate.chainName ?? 
 
 const routeFor = (representativeTaskId: string): string => `/tasks/${representativeTaskId}`;
 
+type BoardTaskWithStrandedSalvage = BoardTask & {
+  strandedSalvageBranches?: Array<unknown>;
+};
+
 const menu = (
   aggregate: ChainAggregate,
   representativeTaskId: string,
@@ -77,6 +81,13 @@ export const ChainAggregateCard = ({ aggregate, members = [], representativeTask
   const predecessor = aggregate.activation.predecessor;
   const hold = aggregate.activation.hold;
   const activeRepair = aggregate.activeRepair;
+  // Chain members are collapsed into one visible board card. Preserve the
+  // salvage signal by counting the member-level projection entries rather than
+  // making the aggregate contract duplicate per-task evidence.
+  const strandedSalvageCount = members.reduce(
+    (count, member) => count + ((member as BoardTaskWithStrandedSalvage).strandedSalvageBranches?.length ?? 0),
+    0,
+  );
   const cost = usageCostAmount(aggregate.totalCost);
   const handlers: ChainAggregateActions = actions ?? {
     onActivate: () => undefined,
@@ -96,6 +107,9 @@ export const ChainAggregateCard = ({ aggregate, members = [], representativeTask
         </Pill>
       : null;
   const metaRows: ReactNode[] = [
+      ...(strandedSalvageCount === 0 ? [] : [<span data-card-stranded-salvage="">
+        <Pill tone="amber">{t("tasks.card.strandedSalvage", { n: strandedSalvageCount })}</Pill>
+      </span>]),
       // Position and the step it names are one fact, so they are one line. The
       // filtering the frontier row used to offer lives in the row menu, which is
       // where the card's other actions already are.

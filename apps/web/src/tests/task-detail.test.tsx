@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { pullRequestLabel } from "../lib/format";
-import { StartabilityChecklist, StepOutput, TaskPrompt, branchUrl } from "../pages/TaskDetail";
+import { StartabilityChecklist, StepOutput, StrandedSalvageList, TaskPrompt, branchUrl } from "../pages/TaskDetail";
 import { partitionTaskPrompt } from "../lib/task-prompt";
 import type { TaskStartability, TaskStepOutput } from "../lib/types";
 import prompts from "./fixtures/tc-ux-v1-prompts.json";
@@ -89,6 +89,20 @@ test("the branch link is built for GitHub remotes only", () => {
   assert.equal(branchUrl("https://gitlab.com/o/r.git", "feat/x"), null);
   assert.equal(branchUrl(null, "feat/x"), null);
   assert.equal(branchUrl("https://github.com/o/r", null), null);
+});
+
+test("the task detail lists stranded salvage branches with their LOST Run number", () => {
+  const markup = renderToStaticMarkup(<StrandedSalvageList
+    branches={[{ branch: "agentos/t1/run-1", lostRunNumber: 1 }]}
+    remoteUrl="https://github.com/o/r"
+  />);
+  assert.match(markup, /data-task-stranded-salvage=""/u);
+  assert.match(markup, /agentos\/t1\/run-1/u);
+  assert.match(markup, /LOST Run #1/u);
+  assert.match(markup, /href="https:\/\/github\.com\/o\/r\/tree\/agentos\/t1\/run-1"/u);
+
+  const empty = renderToStaticMarkup(<StrandedSalvageList branches={[]} remoteUrl="https://github.com/o/r" />);
+  assert.equal(empty, "", "an ordinary task must not get an empty salvage card");
 });
 
 test("the pull-request label is the number, falling back to the whole URL", () => {

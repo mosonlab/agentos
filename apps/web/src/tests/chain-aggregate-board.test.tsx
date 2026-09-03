@@ -148,6 +148,20 @@ test("aggregate card exposes progress, frontier, activation/lock state, and no d
   assert.doesNotMatch(waitingMarkup, />Activate<\/button>/);
 });
 
+test("an aggregate board card carries the stranded salvage count from its members", () => {
+  const projection = aggregate();
+  const member = task({
+    id: "step-with-salvage",
+    strandedSalvageBranches: [{ branch: "agentos/task-1/run-1", lostRunNumber: 1 }],
+  } as Partial<BoardTask>);
+  const markup = renderToStaticMarkup(<ChainAggregateCard aggregate={projection} members={[member]} />);
+  assert.match(markup, /data-card-stranded-salvage=""/u);
+  assert.match(visibleText(markup), /Salvage 1/u);
+
+  const ordinary = renderToStaticMarkup(<ChainAggregateCard aggregate={projection} members={[task()]} />);
+  assert.doesNotMatch(ordinary, /data-card-stranded-salvage=""/u);
+});
+
 test("the hold pill and Resume follow the persisted hold, running or held", () => {
   const running = renderToStaticMarkup(<ChainAggregateCard aggregate={aggregate()} />);
   assert.match(running, />Stop after current step<\/button>/u);
