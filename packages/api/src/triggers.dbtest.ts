@@ -93,6 +93,14 @@ test("Fire now on a fully-defaulted trigger creates one chain, one queued run, o
   assert.equal(fires[0]!.source, "MANUAL");
   assert.equal(fires[0]!.chainId, body.chainId);
   assert.equal(fires[0]!.dedupeKey, null);
+  assert.equal(fires[0]!.id, body.fireId);
+  const firedTasks = await db.task.findMany({
+    where: { chainId: body.chainId },
+    include: { templateStep: { select: { name: true } } },
+    orderBy: { chainIndex: "asc" },
+  });
+  assert.ok(firedTasks.every((task) => task.name.startsWith(`${template.name}: ${body.fireId}: `)));
+  assert.ok(firedTasks.every((task) => task.name !== `${template.name}: ${task.templateStep?.name}`));
   // The chain is operator-made; only webhook-born chains carry the WEBHOOK source.
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: body.taskIds[0]! } })).source, "MANUAL");
 });

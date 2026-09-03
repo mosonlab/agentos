@@ -148,6 +148,7 @@ test("valid step override copies only the targeted assignee and leaves template 
   const created = await request(seed.project.id, seed.template.id, {
     repoId: seed.repo.id,
     variables: {},
+    name: "override chain",
     autoStart: false,
     stepOverrides: { "2": { assigneeAgentId: seed.replacement.id } },
   });
@@ -173,6 +174,7 @@ test("valid step override copies only the targeted assignee and leaves template 
   const control = await request(seed.project.id, seed.template.id, {
     repoId: seed.repo.id,
     variables: {},
+    name: "control chain",
     autoStart: false,
   });
   assert.equal(control.status, 201, JSON.stringify(control.body));
@@ -208,7 +210,7 @@ test("valid step override copies only the targeted assignee and leaves template 
   assert.equal(await db.run.count({ where: { task: { chainId: created.body.chainId } } }), 0);
 
   const noOp = await request(seed.project.id, seed.template.id, {
-    repoId: seed.repo.id, variables: {}, stepOverrides: { "2": { assigneeAgentId: seed.canonicalTwo.id } },
+    repoId: seed.repo.id, variables: {}, name: "no-op override", stepOverrides: { "2": { assigneeAgentId: seed.canonicalTwo.id } },
   });
   assert.equal(noOp.status, 201, JSON.stringify(noOp.body));
   const noOpTask = await db.task.findFirstOrThrow({ where: { chainId: noOp.body.chainId, chainIndex: 2 } });
@@ -230,6 +232,7 @@ test("cross-project template-default assignees on integrator steps are refused a
   const result = await request(seed.project.id, seed.template.id, {
     repoId: seed.repo.id,
     variables: {},
+    name: "foreign default refusal",
   });
 
   assert.equal(result.status, 400, JSON.stringify(result.body));
@@ -244,16 +247,16 @@ test("cross-project template-default assignees on integrator steps are refused a
 test("schema and materializer refusals return stable codes and leave no partial rows", async () => {
   const seed = await fixture("refusals");
   const cases: Array<{ body: unknown; code: string }> = [
-    { body: { repoId: seed.repo.id, variables: {}, stepOverrides: { "0": { assigneeAgentId: seed.replacement.id } } }, code: "step_override_invalid_key" },
-    { body: { repoId: seed.repo.id, variables: {}, stepOverrides: { "09": { assigneeAgentId: seed.replacement.id } } }, code: "step_override_invalid_key" },
-    { body: { repoId: seed.repo.id, variables: {}, stepOverrides: { "1.5": { assigneeAgentId: seed.replacement.id } } }, code: "step_override_invalid_key" },
-    { body: { repoId: seed.repo.id, variables: {}, stepOverrides: { "99": { assigneeAgentId: seed.replacement.id } } }, code: "step_override_unknown_step" },
-    { body: { repoId: seed.repo.id, variables: {}, stepOverrides: { "3": { assigneeAgentId: seed.replacement.id } } }, code: "step_override_step_not_agent" },
-    { body: { repoId: seed.repo.id, variables: {}, stepOverrides: { "2": { assigneeAgentId: seed.foreign.id } } }, code: "step_override_agent_not_found" },
-    { body: { repoId: seed.repo.id, variables: {}, stepOverrides: { "2": { assigneeAgentId: seed.archived.id } } }, code: "step_override_agent_archived" },
-    { body: { repoId: seed.repo.id, variables: {}, stepOverrides: { "2": { assigneeAgentId: seed.noGrant.id } } }, code: "step_override_missing_repo_grant" },
+    { body: { repoId: seed.repo.id, variables: {}, name: "invalid zero key", stepOverrides: { "0": { assigneeAgentId: seed.replacement.id } } }, code: "step_override_invalid_key" },
+    { body: { repoId: seed.repo.id, variables: {}, name: "invalid leading key", stepOverrides: { "09": { assigneeAgentId: seed.replacement.id } } }, code: "step_override_invalid_key" },
+    { body: { repoId: seed.repo.id, variables: {}, name: "invalid decimal key", stepOverrides: { "1.5": { assigneeAgentId: seed.replacement.id } } }, code: "step_override_invalid_key" },
+    { body: { repoId: seed.repo.id, variables: {}, name: "unknown step key", stepOverrides: { "99": { assigneeAgentId: seed.replacement.id } } }, code: "step_override_unknown_step" },
+    { body: { repoId: seed.repo.id, variables: {}, name: "human step override", stepOverrides: { "3": { assigneeAgentId: seed.replacement.id } } }, code: "step_override_step_not_agent" },
+    { body: { repoId: seed.repo.id, variables: {}, name: "foreign override agent", stepOverrides: { "2": { assigneeAgentId: seed.foreign.id } } }, code: "step_override_agent_not_found" },
+    { body: { repoId: seed.repo.id, variables: {}, name: "archived override agent", stepOverrides: { "2": { assigneeAgentId: seed.archived.id } } }, code: "step_override_agent_archived" },
+    { body: { repoId: seed.repo.id, variables: {}, name: "ungranted override agent", stepOverrides: { "2": { assigneeAgentId: seed.noGrant.id } } }, code: "step_override_missing_repo_grant" },
     {
-      body: { repoId: seed.repo.id, variables: {}, stepOverrides: Object.fromEntries(
+      body: { repoId: seed.repo.id, variables: {}, name: "too many overrides", stepOverrides: Object.fromEntries(
         Array.from({ length: 65 }, (_, index) => [String(index + 1), { assigneeAgentId: seed.replacement.id }]),
       ) },
       code: "step_override_too_many",
@@ -269,8 +272,8 @@ test("schema and materializer refusals return stable codes and leave no partial 
     assert.equal(await db.triggerFire.count(), 0, `${code}: no TriggerFire rows`);
   }
   for (const body of [
-    { repoId: seed.repo.id, variables: {}, stepOverrides: { "2": { assigneeAgentId: seed.replacement.id, extra: true } } },
-    { repoId: seed.repo.id, variables: {}, stepOverrides: { "2": "agent-id" } },
+    { repoId: seed.repo.id, variables: {}, name: "extra override field", stepOverrides: { "2": { assigneeAgentId: seed.replacement.id, extra: true } } },
+    { repoId: seed.repo.id, variables: {}, name: "malformed override", stepOverrides: { "2": "agent-id" } },
   ]) {
     const result = await request(seed.project.id, seed.template.id, body);
     assert.equal(result.status, 400, JSON.stringify(result.body));
@@ -281,7 +284,7 @@ test("schema and materializer refusals return stable codes and leave no partial 
 test("the override agent is re-read under its Agent-row mutex before any Task exists", { timeout: 30_000 }, async () => {
   const seed = await fixture("archive-race");
   const result = await archiveUnderHeldLock(seed.replacement.id, () => request(seed.project.id, seed.template.id, {
-    repoId: seed.repo.id, variables: {}, stepOverrides: { "2": { assigneeAgentId: seed.replacement.id } },
+    repoId: seed.repo.id, variables: {}, name: "archive override race", stepOverrides: { "2": { assigneeAgentId: seed.replacement.id } },
   }));
   assert.equal(result.status, 400, JSON.stringify(result.body));
   assert.equal(result.body.code, "step_override_agent_archived");
@@ -295,7 +298,7 @@ test("an effective-assignee rename is revalidated under the Agent-row mutex befo
   const result = await renameUnderHeldLock(seed.replacement.id, "merge-integrator", () => request(
     seed.project.id,
     seed.template.id,
-    { repoId: seed.repo.id, variables: {}, stepOverrides: { "2": { assigneeAgentId: seed.replacement.id } } },
+    { repoId: seed.repo.id, variables: {}, name: "rename override race", stepOverrides: { "2": { assigneeAgentId: seed.replacement.id } } },
   ));
   assert.equal(result.status, 400, JSON.stringify(result.body));
   assert.equal(result.body.code, "step_override_integrator_binding");
@@ -339,7 +342,7 @@ test("integrator and pinned compound implementation bindings are checked after o
     [{ "12": { assigneeAgentId: seed.replacement.id } }, "step_override_integrator_binding"],
     [{ "5": { assigneeAgentId: seed.replacement.id } }, "step_override_compound_implementation"],
   ] as const) {
-    const result = await request(seed.project.id, template.id, { repoId: seed.repo.id, variables: {}, stepOverrides });
+    const result = await request(seed.project.id, template.id, { repoId: seed.repo.id, variables: {}, name: `binding override ${code}`, stepOverrides });
     assert.equal(result.status, 400, `${code}: ${JSON.stringify(result.body)}`);
     assert.equal(result.body.code, code, JSON.stringify(result.body));
     assert.equal(await db.task.count(), 0);

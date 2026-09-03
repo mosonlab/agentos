@@ -143,7 +143,7 @@ test("compound, direct, and pull-request instantiation resolve the gate matrix a
     const result = await request(
       `/projects/${seed.project.id}/task-templates/${seed.compound.id}/instantiate`,
       "POST",
-      { repoId: seed.repo.id, variables: variablesFor(seed.compound, "compound"), autoStart: false, ...(gates === undefined ? {} : { gates }) },
+      { repoId: seed.repo.id, variables: variablesFor(seed.compound, "compound"), name: "compound gate matrix", autoStart: false, ...(gates === undefined ? {} : { gates }) },
     );
     assert.equal(result.status, 201, JSON.stringify(result.body));
     const tasks = await tasksFor(result.body.chainId);
@@ -156,7 +156,7 @@ test("compound, direct, and pull-request instantiation resolve the gate matrix a
   const direct = await request(
     `/projects/${seed.project.id}/task-templates/${seed.direct.id}/instantiate`,
     "POST",
-    { repoId: seed.repo.id, variables: variablesFor(seed.direct, "direct"), autoStart: false },
+    { repoId: seed.repo.id, variables: variablesFor(seed.direct, "direct"), name: "direct gate matrix", autoStart: false },
   );
   assert.equal(direct.status, 201, JSON.stringify(direct.body));
   const directTasks = await tasksFor(direct.body.chainId);
@@ -167,7 +167,7 @@ test("compound, direct, and pull-request instantiation resolve the gate matrix a
   const directSpec = await request(
     `/projects/${seed.project.id}/task-templates/${seed.direct.id}/instantiate`,
     "POST",
-    { repoId: seed.repo.id, variables: variablesFor(seed.direct, "direct-absent"), gates: { spec: true } },
+    { repoId: seed.repo.id, variables: variablesFor(seed.direct, "direct-absent"), name: "direct absent gate", gates: { spec: true } },
   );
   assert.equal(directSpec.status, 400, JSON.stringify(directSpec.body));
   assert.equal(directSpec.body.code, "gates_spec_step_absent");
@@ -177,7 +177,7 @@ test("compound, direct, and pull-request instantiation resolve the gate matrix a
   const bothAbsent = await request(
     `/projects/${seed.project.id}/task-templates/${seed.pullRequest.id}/instantiate`,
     "POST",
-    { repoId: seed.repo.id, variables: variablesFor(seed.pullRequest, "both-absent"), gates: { spec: true, merge: true } },
+    { repoId: seed.repo.id, variables: variablesFor(seed.pullRequest, "both-absent"), name: "both absent gates", gates: { spec: true, merge: true } },
   );
   assert.equal(bothAbsent.status, 400, JSON.stringify(bothAbsent.body));
   assert.equal(bothAbsent.body.code, "gates_spec_step_absent");
@@ -187,7 +187,7 @@ test("compound, direct, and pull-request instantiation resolve the gate matrix a
   const mergeAbsent = await request(
     `/projects/${seed.project.id}/task-templates/${seed.pullRequest.id}/instantiate`,
     "POST",
-    { repoId: seed.repo.id, variables: variablesFor(seed.pullRequest, "merge-absent"), gates: { merge: true } },
+    { repoId: seed.repo.id, variables: variablesFor(seed.pullRequest, "merge-absent"), name: "merge absent gate", gates: { merge: true } },
   );
   assert.equal(mergeAbsent.status, 400, JSON.stringify(mergeAbsent.body));
   assert.equal(mergeAbsent.body.code, "gates_merge_step_absent");
@@ -197,7 +197,7 @@ test("compound, direct, and pull-request instantiation resolve the gate matrix a
   const unknownGate = await request(
     `/projects/${seed.project.id}/task-templates/${seed.compound.id}/instantiate`,
     "POST",
-    { repoId: seed.repo.id, variables: variablesFor(seed.compound, "unknown"), gates: { spec: true, unknown: false } },
+    { repoId: seed.repo.id, variables: variablesFor(seed.compound, "unknown"), name: "unknown gate", gates: { spec: true, unknown: false } },
   );
   assert.equal(unknownGate.status, 400, JSON.stringify(unknownGate.body));
   assert.equal(await db.task.count(), beforeAbsent);
@@ -209,14 +209,14 @@ test("instantiated gate values are snapshots and the specification gate uses the
   const first = await request(
     `/projects/${seed.project.id}/task-templates/${seed.compound.id}/instantiate`,
     "POST",
-    { repoId: seed.repo.id, variables: variablesFor(seed.compound, "snapshot-a"), autoStart: false },
+    { repoId: seed.repo.id, variables: variablesFor(seed.compound, "snapshot-a"), name: "gate snapshot A", autoStart: false },
   );
   assert.equal(first.status, 201, JSON.stringify(first.body));
   await db.project.update({ where: { id: seed.project.id }, data: { specGateDefault: true, mergeGateDefault: true } });
   const second = await request(
     `/projects/${seed.project.id}/task-templates/${seed.compound.id}/instantiate`,
     "POST",
-    { repoId: seed.repo.id, variables: variablesFor(seed.compound, "snapshot-b"), autoStart: false },
+    { repoId: seed.repo.id, variables: variablesFor(seed.compound, "snapshot-b"), name: "gate snapshot B", autoStart: false },
   );
   assert.equal(second.status, 201, JSON.stringify(second.body));
   const firstTasks = await tasksFor(first.body.chainId);
@@ -228,7 +228,7 @@ test("instantiated gate values are snapshots and the specification gate uses the
   const gated = await request(
     `/projects/${seed.project.id}/task-templates/${seed.compound.id}/instantiate`,
     "POST",
-    { repoId: seed.repo.id, variables: variablesFor(seed.compound, "spec-lifecycle"), autoStart: true, gates: { spec: true, merge: false } },
+    { repoId: seed.repo.id, variables: variablesFor(seed.compound, "spec-lifecycle"), name: "spec gate lifecycle", autoStart: true, gates: { spec: true, merge: false } },
   );
   assert.equal(gated.status, 201, JSON.stringify(gated.body));
   const specTask = (await tasksFor(gated.body.chainId)).find((task) => task.templateStep?.stepIndex === 1)!;
@@ -280,7 +280,7 @@ test("rejecting an instantiated specification gate requeues that step and spends
   const gated = await request(
     `/projects/${seed.project.id}/task-templates/${seed.compound.id}/instantiate`,
     "POST",
-    { repoId: seed.repo.id, variables: variablesFor(seed.compound, "spec-reject"), autoStart: true, gates: { spec: true } },
+    { repoId: seed.repo.id, variables: variablesFor(seed.compound, "spec-reject"), name: "spec gate rejection", autoStart: true, gates: { spec: true } },
   );
   assert.equal(gated.status, 201, JSON.stringify(gated.body));
   const specTask = (await tasksFor(gated.body.chainId)).find((task) => task.templateStep?.stepIndex === 1)!;
@@ -323,7 +323,7 @@ test("an explicitly ungated instantiated specification step follows the autonomo
   const ungated = await request(
     `/projects/${seed.project.id}/task-templates/${seed.compound.id}/instantiate`,
     "POST",
-    { repoId: seed.repo.id, variables: variablesFor(seed.compound, "spec-autonomous"), autoStart: true, gates: { spec: false } },
+    { repoId: seed.repo.id, variables: variablesFor(seed.compound, "spec-autonomous"), name: "spec gate autonomous", autoStart: true, gates: { spec: false } },
   );
   assert.equal(ungated.status, 201, JSON.stringify(ungated.body));
   const specTask = (await tasksFor(ungated.body.chainId)).find((task) => task.templateStep?.stepIndex === 1)!;

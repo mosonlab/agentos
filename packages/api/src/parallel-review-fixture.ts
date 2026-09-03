@@ -186,6 +186,7 @@ const createParallelReviewHarness = ({
     const chain = await instantiateTemplate(getDb(), installation.projectId, installation.directTemplateId, {
       repoId: installation.repoId,
       variables: { branchName },
+      name: "parallel direct",
       description: brief,
       autoStart: true,
     });
@@ -220,6 +221,7 @@ const createParallelReviewHarness = ({
     const chain = await instantiateTemplate(getDb(), installation.projectId, installation.directTemplateId, {
       repoId: installation.repoId,
       variables: { branchName },
+      name: "parallel bound direct",
       description: brief,
       afterTaskId: predecessor.id,
     });
@@ -248,6 +250,7 @@ const createParallelReviewHarness = ({
     const chain = await instantiateTemplate(getDb(), installation.projectId, installation.fullTemplateId, {
       repoId: installation.repoId,
       variables: { branchName },
+      name: "parallel full review",
       description: SPECIFICATION_BRIEF,
       autoStart: false,
     });

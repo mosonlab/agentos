@@ -497,6 +497,7 @@ test("an unreadable review candidate is parked without blocking an unrelated cla
   const unrelatedChain = await instantiateTemplate(db, fixture.projectId, fixture.directTemplateId, {
     repoId: fixture.repoId,
     variables: { branchName: `parallel/unrelated-${Date.now()}` },
+    name: "parallel unrelated",
     description: "unrelated implementation brief",
     autoStart: true,
   });

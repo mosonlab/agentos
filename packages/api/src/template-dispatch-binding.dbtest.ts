@@ -171,6 +171,7 @@ const instantiate = async (seed: Fixture, autoStart = false) => {
   const result = await request(seed.project.id, seed.template.id, {
     repoId: seed.repo.id,
     variables: {},
+    name: "dispatch chain",
     autoStart,
   });
   assert.equal(result.status, 201, JSON.stringify(result.body));
@@ -218,6 +219,7 @@ test("afterTaskId binds only the first of the chain's tasks and writes both audi
   const response = await request(seed.project.id, seed.template.id, {
     repoId: seed.repo.id,
     variables: {},
+    name: "bound successor",
     afterTaskId: predecessor.id,
   });
   assert.equal(response.status, 201, JSON.stringify(response.body));
@@ -265,6 +267,7 @@ test("a direct brief routes any valid same-project Agent name and preserves ever
   const routed = await request(seed.project.id, seed.template.id, {
     repoId: seed.repo.id,
     variables: {},
+    name: "routed implementation",
     description: "Implement the brief.\n\nRoute: implementation=project_specific.implementer - explicit fixture route.",
   });
   assert.equal(routed.status, 201, JSON.stringify(routed.body));
@@ -284,6 +287,7 @@ test("a direct brief routes any valid same-project Agent name and preserves ever
     const response = await request(seed.project.id, seed.template.id, {
       repoId: seed.repo.id,
       variables: {},
+      name: `route ${refusal.name}`,
       description: `Implement the brief.\n\nRoute: implementation=${refusal.name}`,
     });
     assert.equal(response.status, 400, `${refusal.code}: ${JSON.stringify(response.body)}`);
@@ -304,6 +308,7 @@ test("a Route Agent renamed under a held lock keeps its original identity across
     {
       repoId: seed.repo.id,
       variables: {},
+      name: "renamed route",
       description: "Implement the brief.\n\nRoute: implementation=rename.route_agent",
     },
   ));
@@ -320,6 +325,7 @@ test("status PATCH cannot move an unresolved bound first task away from TODO", a
     const binding = await request(seed.project.id, seed.template.id, {
       repoId: seed.repo.id,
       variables: {},
+      name: `bound ${status}`,
       afterTaskId: predecessor.id,
     });
     assert.equal(binding.status, 201, JSON.stringify(binding.body));
@@ -349,6 +355,7 @@ test("afterTaskId plus autoStart is a schema refusal before any database write",
   const result = await request(seed.project.id, seed.template.id, {
     repoId: seed.repo.id,
     variables: {},
+    name: "auto-start conflict",
     afterTaskId: predecessor.id,
     autoStart: true,
   });
@@ -408,6 +415,7 @@ test("after-task refusals are typed and leave no partial chain rows", async () =
     const result = await request(seed.project.id, seed.template.id, {
       repoId: seed.repo.id,
       variables: {},
+      name: `refusal ${code}`,
       afterTaskId: id,
     });
     assert.equal(result.status, 400, `${code}: ${JSON.stringify(result.body)}`);
@@ -422,6 +430,7 @@ test("a predecessor can be bound once and the occupied pointer refusal preserves
   const first = await request(seed.project.id, seed.template.id, {
     repoId: seed.repo.id,
     variables: {},
+    name: "first bound successor",
     afterTaskId: predecessor.id,
   });
   assert.equal(first.status, 201, JSON.stringify(first.body));
@@ -430,6 +439,7 @@ test("a predecessor can be bound once and the occupied pointer refusal preserves
   const second = await request(seed.project.id, seed.template.id, {
     repoId: seed.repo.id,
     variables: {},
+    name: "second bound successor",
     afterTaskId: predecessor.id,
   });
   assert.equal(second.status, 400, JSON.stringify(second.body));
@@ -444,7 +454,7 @@ test("a predecessor can be bound once and the occupied pointer refusal preserves
 test("concurrent binds serialize on the predecessor chain and create one successor", { timeout: 30_000 }, async () => {
   const seed = await fixture("concurrent-binding");
   const predecessor = (await instantiate(seed)).at(-1)!;
-  const body = { repoId: seed.repo.id, variables: {}, afterTaskId: predecessor.id };
+  const body = { repoId: seed.repo.id, variables: {}, name: "concurrent successor", afterTaskId: predecessor.id };
   const results = await Promise.all([
     request(seed.project.id, seed.template.id, body),
     request(seed.project.id, seed.template.id, body),

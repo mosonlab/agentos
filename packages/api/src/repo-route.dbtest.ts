@@ -193,6 +193,7 @@ test("the A1 bootstrap template instantiates from the true-path Repo without sep
   const instantiated = await call(app, "POST", `/projects/${projectId}/task-templates/${templates[0]!.id}/instantiate`, {
     repoId: repoResult.body.repo.id,
     variables: { branchName: "feature/repo-onboarding" },
+    name: "repo onboarding",
   });
   assert.equal(instantiated.status, 201, JSON.stringify(instantiated.body));
   assert.equal(instantiated.body.tasks.length > 0, true);

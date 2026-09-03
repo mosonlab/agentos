@@ -232,7 +232,7 @@ test("instantiating the canonical feature template copies every layer and writes
     $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
   } as unknown as PrismaClient;
   const result = await instantiateTemplate(db, "project-1", "template-1", {
-    repoId: "repo-1", variables: { branchName: "feature/twelve-steps" }, autoStart: true, description: "Build it",
+    repoId: "repo-1", variables: { branchName: "feature/twelve-steps" }, autoStart: true, name: "Build it", description: "Build it",
   });
   assert.equal(result.tasks.length, 12);
   assert.equal(new Set(created.map((task) => task.chainId)).size, 1);
@@ -274,7 +274,7 @@ test("instantiating the canonical feature template copies every layer and writes
   );
 
   const inert = await instantiateTemplate(db, "project-1", "template-1", {
-    repoId: "repo-1", variables: { branchName: "feature/inert-chain" }, description: "Build it later",
+    repoId: "repo-1", variables: { branchName: "feature/inert-chain" }, name: "Build it later", description: "Build it later",
   });
   assert.equal(inert.tasks.length, 12);
   assert.equal(runs.length, 1, "omitting autoStart defaults to an inert chain with no queued run");
@@ -322,7 +322,7 @@ test("the lower-level materializer rejects blank variables and invalid branches 
     ["bad\nbranch", "template_branch_invalid"],
   ] as const) {
     await assertTemplateRefusal(
-      () => instantiateTemplate(db, "project-1", "template-1", { repoId: "repo-1", variables: { branchName }, autoStart: false }),
+      () => instantiateTemplate(db, "project-1", "template-1", { repoId: "repo-1", variables: { branchName }, name: "branch validation", autoStart: false }),
       code,
     );
   }
@@ -361,7 +361,7 @@ test("template base reference failures expose stable 400 refusal codes", async (
       }),
     } as unknown as PrismaClient;
     await assertTemplateRefusal(
-      () => instantiateTemplate(db, "project-1", "template-1", { repoId: "repo-1", variables: {} }),
+      () => instantiateTemplate(db, "project-1", "template-1", { repoId: "repo-1", variables: {}, name: "base validation" }),
       code,
     );
   }
@@ -411,7 +411,7 @@ test("an agent archived after the step check still loses to the locked re-read",
     }),
   } as unknown as PrismaClient;
   await assertTemplateRefusal(
-    () => instantiateTemplate(db, "project-1", "template-1", { repoId: "repo-1", variables: {}, autoStart: false }),
+    () => instantiateTemplate(db, "project-1", "template-1", { repoId: "repo-1", variables: {}, name: "archive race", autoStart: false }),
     "template_step_agent_archived",
   );
   assert.equal(taskCreates, 0, "no chain row is written once the lock says archived");
@@ -477,7 +477,7 @@ test("a serializable conflict raised by the raw Agent lock is retried, not surfa
     },
   } as unknown as PrismaClient;
   await assertTemplateRefusal(
-    () => instantiateTemplate(db, "project-1", "template-1", { repoId: "repo-1", variables: {}, autoStart: false }),
+    () => instantiateTemplate(db, "project-1", "template-1", { repoId: "repo-1", variables: {}, name: "lock race", autoStart: false }),
     "template_step_agent_archived",
   );
   assert.equal(agentLockConflicts, 1, "the conflict is injected on the Agent-row lock");
@@ -522,7 +522,7 @@ test("template instantiation rejects an archived step agent and names the step",
     }),
   } as unknown as PrismaClient;
   await assertTemplateRefusal(
-    () => instantiateTemplate(db, "project-1", "template-1", { repoId: "repo-1", variables: {}, autoStart: false }),
+    () => instantiateTemplate(db, "project-1", "template-1", { repoId: "repo-1", variables: {}, name: "archived agent", autoStart: false }),
     "template_step_agent_archived",
   );
 });
@@ -581,7 +581,7 @@ test("step overrides copy only the effective assignee and lock canonical plus ov
   } as unknown as PrismaClient;
 
   const result = await instantiateTemplate(db, "project-1", "template-1", {
-    repoId: "repo-1", variables: {}, stepOverrides: { "2": { assigneeAgentId: replacement.id } },
+    repoId: "repo-1", variables: {}, name: "override test", stepOverrides: { "2": { assigneeAgentId: replacement.id } },
   });
   assert.equal(result.tasks.length, 2);
   assert.deepEqual(created.map((task) => task.assigneeAgentId), ["agent-1", replacement.id]);
@@ -605,7 +605,7 @@ test("step override structural refusals happen before template reads and carry s
     [Object.fromEntries(Array.from({ length: 65 }, (_, index) => [String(index + 1), { assigneeAgentId: "agent" }])), "step_override_too_many"],
   ] as const) {
     await assertTemplateRefusal(
-      () => instantiateTemplate(db, "project-1", "template-1", { repoId: "repo-1", variables: {}, stepOverrides }),
+      () => instantiateTemplate(db, "project-1", "template-1", { repoId: "repo-1", variables: {}, name: "override validation", stepOverrides }),
       code,
     );
   }
@@ -688,6 +688,7 @@ test("direct Route overrides implementation while non-direct templates refuse Ro
   const result = await instantiateTemplate(db, "project-1", "template-1", {
     repoId: "repo-1",
     variables: {},
+    name: "routed implementation",
     description: "Build it\nRoute: implementation=senior-dev\n",
   });
 
@@ -701,6 +702,7 @@ test("direct Route overrides implementation while non-direct templates refuse Ro
     () => instantiateTemplate(db, "project-1", "template-1", {
       repoId: "repo-1",
       variables: {},
+      name: "route conflict",
       description: "Build it\nRoute: implementation=senior-dev\n",
       stepOverrides: { "2": { assigneeAgentId: routed.id } },
     }),
@@ -712,6 +714,7 @@ test("direct Route overrides implementation while non-direct templates refuse Ro
     () => instantiateTemplate(db, "project-1", "template-1", {
       repoId: "repo-1",
       variables: {},
+      name: "route renamed",
       description: "Build it\nRoute: implementation=senior-dev\n",
     }),
     "implementation_route_agent_renamed",
@@ -722,6 +725,7 @@ test("direct Route overrides implementation while non-direct templates refuse Ro
     () => instantiateTemplate(db, "project-1", "template-1", {
       repoId: "repo-1",
       variables: {},
+      name: "route malformed",
       description: "Build it\nRoute: senior-dev - missing the implementation= key\n",
     }),
     "implementation_route_malformed",
@@ -736,6 +740,7 @@ test("direct Route overrides implementation while non-direct templates refuse Ro
         () => instantiateTemplate(db, "project-1", "template-1", {
           repoId: "repo-1",
           variables: {},
+          name: "unsupported route",
           description: `Route: implementation=${route}`,
         }),
         "implementation_route_template_unsupported",
@@ -745,6 +750,7 @@ test("direct Route overrides implementation while non-direct templates refuse Ro
     const malformedTolerated = await instantiateTemplate(db, "project-1", "template-1", {
       repoId: "repo-1",
       variables: {},
+      name: "malformed route prose",
       description: "Route: senior-dev - Route-looking prose is not parsed here",
     });
     assert.equal(malformedTolerated.tasks.length, 3, `${nonDirectName} must ignore malformed Route prose`);
@@ -815,6 +821,7 @@ test("canonical unbound direct instantiation retains the seven-task prompt snaps
   const result = await instantiateTemplate(db, "project-1", "template-direct", {
     repoId: "repo-1",
     variables: { branchName: "snapshot-branch" },
+    name: "snapshot chain",
     description: "Snapshot brief.",
   });
   assert.equal(result.tasks.length, 7);
@@ -822,13 +829,13 @@ test("canonical unbound direct instantiation retains the seven-task prompt snaps
     name: row.name,
     descriptionSha256: createHash("sha256").update(String(row.description)).digest("hex"),
   })), [
-    { name: "direct-engineer-workflow: Implementation", descriptionSha256: "45327aeb86fc7e98a76ef4052278cee29ceb38a601aeb65225024b87708225d0" },
-    { name: "direct-engineer-workflow: Code review (Sol)", descriptionSha256: "cea58637cbbf2616a41db1864a7d22fa9c20472b61e673a2d8b1312fb1691d2a" },
-    { name: "direct-engineer-workflow: Code review (Opus blind)", descriptionSha256: "af02f099a6e2b6b10f3ea2b31b8bcfd06a057cd91b134c16a3df552690fc979b" },
-    { name: "direct-engineer-workflow: Apply review fixes", descriptionSha256: "ba850c7de0ee4d19abe6e6f32d22ffa8e1731abe52cbb61d0ea00996c037e5ad" },
-    { name: "direct-engineer-workflow: Regression verification", descriptionSha256: "29e3eb38fc11883aa8405110745ece9a3811cbe3796ff60824dad3e1939638e8" },
-    { name: "direct-engineer-workflow: Merge authorization", descriptionSha256: "6cc850c691d3334a0ba8e4b26b24acdc3c7ab70c4b8cbac1fccb65ee708a7da7" },
-    { name: "direct-engineer-workflow: Merge execution", descriptionSha256: "6f3ee10eef0967fec9bfdb09a73ab8b9f5e07aa3e4548e48d1174e2a90602a53" },
+    { name: "snapshot chain: Implementation", descriptionSha256: "45327aeb86fc7e98a76ef4052278cee29ceb38a601aeb65225024b87708225d0" },
+    { name: "snapshot chain: Code review (Sol)", descriptionSha256: "cea58637cbbf2616a41db1864a7d22fa9c20472b61e673a2d8b1312fb1691d2a" },
+    { name: "snapshot chain: Code review (Opus blind)", descriptionSha256: "af02f099a6e2b6b10f3ea2b31b8bcfd06a057cd91b134c16a3df552690fc979b" },
+    { name: "snapshot chain: Apply review fixes", descriptionSha256: "ba850c7de0ee4d19abe6e6f32d22ffa8e1731abe52cbb61d0ea00996c037e5ad" },
+    { name: "snapshot chain: Regression verification", descriptionSha256: "29e3eb38fc11883aa8405110745ece9a3811cbe3796ff60824dad3e1939638e8" },
+    { name: "snapshot chain: Merge authorization", descriptionSha256: "6cc850c691d3334a0ba8e4b26b24acdc3c7ab70c4b8cbac1fccb65ee708a7da7" },
+    { name: "snapshot chain: Merge execution", descriptionSha256: "6f3ee10eef0967fec9bfdb09a73ab8b9f5e07aa3e4548e48d1174e2a90602a53" },
   ]);
 });
 
@@ -901,7 +908,7 @@ test("instantiation resolves only the two gate slots from overrides then project
     projectDefaults.mergeGateDefault = defaults.mergeGateDefault;
     created.length = 0;
     return instantiateTemplate(db, "project-1", template.id, {
-      repoId: "repo-1", variables: {}, autoStart: false, gates,
+      repoId: "repo-1", variables: {}, autoStart: false, name: "gate matrix", gates,
     });
   };
 
@@ -968,7 +975,7 @@ test("instantiate refuses absent gate slots before creating any task and checks 
   ]) {
     created.length = 0;
     await assertTemplateRefusal(
-      () => instantiateTemplate(db, "project-1", template.id, { repoId: "repo-1", variables: {}, gates }),
+      () => instantiateTemplate(db, "project-1", template.id, { repoId: "repo-1", variables: {}, name: "absent gate", gates }),
       code,
     );
     assert.equal(created.length, 0, `${slot} refusal must not partially materialize a chain`);

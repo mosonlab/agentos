@@ -382,7 +382,7 @@ test("T6: a template chain still uses agentos/<chainId>, and a branchName overri
       stepIndex: index, layer: index, name: `Step ${index}`, assigneeType: "AGENT" as const, assigneeAgentId: seed.agent.id, prompt: `do ${index}`,
     })) },
   } });
-  const chain = await instantiateTemplate(db, seed.project.id, template.id, { repoId: seed.repo.id, variables: {}, autoStart: true });
+  const chain = await instantiateTemplate(db, seed.project.id, template.id, { repoId: seed.repo.id, variables: {}, autoStart: true, name: "T6 chain" });
   const firstRun = await db.run.findFirstOrThrow({ where: { taskId: chain.tasks[0]!.id } });
   assert.equal(firstRun.branch, `agentos/${chain.chainId}`, "the derived chain name must not leak into template chains");
   assert.equal(firstRun.targetBranch, seed.repo.defaultBranch);
@@ -401,7 +401,7 @@ test("T6: a template chain still uses agentos/<chainId>, and a branchName overri
     })) },
   } });
   const custom = await instantiateTemplate(db, seed.project.id, overridable.id, {
-    repoId: seed.repo.id, variables: { branchName: "custom/branch" }, autoStart: true,
+    repoId: seed.repo.id, variables: { branchName: "custom/branch" }, autoStart: true, name: "T6 custom branch",
   });
   const customRun = await db.run.findFirstOrThrow({ where: { taskId: custom.tasks[0]!.id } });
   assert.equal(customRun.branch, "custom/branch");
@@ -417,7 +417,7 @@ test("T6b: a deferred template start preserves its custom head and successor bas
     })) },
   } });
   const chain = await instantiateTemplate(db, seed.project.id, template.id, {
-    repoId: seed.repo.id, variables: { branchName: "custom/deferred" }, autoStart: false,
+    repoId: seed.repo.id, variables: { branchName: "custom/deferred" }, autoStart: false, name: "T6b deferred",
   });
   assert.equal(await db.run.count({ where: { task: { chainId: chain.chainId } } }), 0);
 
@@ -623,7 +623,7 @@ test("an operator-retried template step publishes its declared head from the lat
     })) },
   } });
   const chain = await instantiateTemplate(db, seed.project.id, template.id, {
-    repoId: seed.repo.id, variables: {}, autoStart: true,
+    repoId: seed.repo.id, variables: {}, autoStart: true, name: "operator template salvage",
   });
   const task = chain.tasks[0]!;
   const declared = `agentos/${chain.chainId}`;
@@ -651,7 +651,7 @@ test("a successor first run clones the predecessor's salvage publication", async
     })) },
   } });
   const chain = await instantiateTemplate(db, seed.project.id, template.id, {
-    repoId: seed.repo.id, variables: {}, autoStart: true,
+    repoId: seed.repo.id, variables: {}, autoStart: true, name: "successor salvage",
   });
   const first = chain.tasks[0]!;
   const second = chain.tasks[1]!;
@@ -849,7 +849,7 @@ test("T13b: an upgrade-state template retry returns to its chain head", async ()
     })) },
   } });
   const chain = await instantiateTemplate(db, seed.project.id, template.id, {
-    repoId: seed.repo.id, variables: {}, autoStart: true,
+    repoId: seed.repo.id, variables: {}, autoStart: true, name: "template retry",
   });
   const chainBranch = `agentos/${chain.chainId}`;
   const firstTask = chain.tasks[0]!;
@@ -989,7 +989,7 @@ test("T18: an instantiated template copies each step's flag onto its task", asyn
       prompt: `do ${index}`, opensPullRequest: index !== 1,
     })) },
   } });
-  const chain = await instantiateTemplate(db, seed.project.id, template.id, { repoId: seed.repo.id, variables: {}, autoStart: true });
+  const chain = await instantiateTemplate(db, seed.project.id, template.id, { repoId: seed.repo.id, variables: {}, autoStart: true, name: "T18 flag copy" });
   const tasks = await db.task.findMany({ where: { chainId: chain.chainId }, orderBy: { chainIndex: "asc" } });
   assert.deepEqual(tasks.map((task) => task.opensPullRequest), [true, false, true]);
 });
@@ -1205,7 +1205,7 @@ test("T20: a template step's PR flag reaches the task it instantiates", async ()
       opensPullRequest: index === 0,
     })) },
   } });
-  const chain = await instantiateTemplate(db, seed.project.id, template.id, { repoId: seed.repo.id, variables: {}, autoStart: true });
+  const chain = await instantiateTemplate(db, seed.project.id, template.id, { repoId: seed.repo.id, variables: {}, autoStart: true, name: "T20 PR flag" });
   const tasks = await db.task.findMany({ where: { chainId: chain.chainId }, orderBy: { chainIndex: "asc" } });
   assert.deepEqual(tasks.map((task) => task.opensPullRequest), [true, false]);
 });
@@ -1246,6 +1246,7 @@ test("T21: a claimed database chain run is the exact provenance recorded by its 
     const chain = await instantiateTemplate(db, seeded.project.id, template.id, {
       repoId: seeded.repo.id,
       variables: {},
+      name: "chain provenance",
       autoStart: true,
     });
     const queued = await db.run.findFirstOrThrow({ where: { taskId: chain.tasks[0]!.id, status: "QUEUED" } });

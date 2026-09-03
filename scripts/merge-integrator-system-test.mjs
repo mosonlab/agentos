@@ -187,6 +187,7 @@ const driveToGate = async (api, github, config) => {
   ));
   const created = await api("POST", `/projects/${config.projectId}/task-templates/${config.templateId}/instantiate`, {
     variables: { branchName: `merge-system-test-${Date.now()}` },
+    name: `Merge system test ${Date.now()}`,
     autoStart: true,
   });
   if (created.status !== 200 && created.status !== 201) record.fail(`instantiate returned HTTP ${created.status}`);

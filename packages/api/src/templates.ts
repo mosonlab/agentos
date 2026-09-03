@@ -34,7 +34,7 @@ export type InstantiateTemplateInput = {
   variables: Record<string, string>;
   /** Creating a chain is inert unless its caller explicitly requests a run. */
   autoStart?: boolean;
-  name?: string | undefined;
+  name: string;
   description?: string | undefined;
   /** Existing terminal task whose completion will dispatch this chain. */
   afterTaskId?: string | undefined;
@@ -143,6 +143,30 @@ const templateRefusal = (
   message: string,
 ): TemplateInstantiationRefusal => new TemplateInstantiationRefusal(code, message);
 
+const templateNameLineBreak = /[\r\n\u2028\u2029]/u;
+
+/** Validate and normalize the operator-chosen identity of an instantiated chain. */
+export const validateTemplateInstantiationName = (name: string | undefined): string => {
+  if (name === undefined || name.trim().length === 0) {
+    throw templateRefusal("instantiate_name_required", "Instantiation name is required");
+  }
+  if (templateNameLineBreak.test(name)) {
+    throw templateRefusal("instantiate_name_invalid", "Instantiation name must be one line");
+  }
+  const trimmed = name.trim();
+  if (trimmed.length > 120) {
+    throw templateRefusal("instantiate_name_invalid", "Instantiation name must be at most 120 characters");
+  }
+  return trimmed;
+};
+
+/** Generate the explicit chain name used for a trigger-created fire. */
+export const triggerInstantiationName = (templateName: string, fireId: string): string => {
+  const suffix = `: ${fireId}`;
+  const available = Math.max(0, 120 - suffix.length);
+  return `${templateName.trim().slice(0, available).trimEnd()}${suffix}`;
+};
+
 /**
  * Read the project defaults while holding the same row mutex used by project
  * PATCH. The delegate guard keeps the small unit-test doubles that predate
@@ -235,9 +259,10 @@ export const instantiateTemplate = async (
     source?: TaskSource;
     /** When set, one ledger row is written inside the same transaction, so a
      *  fire that never produced a chain never produced a fire either. */
-    fire?: { source: TriggerFireSource; dedupeKey?: string | null };
+    fire?: { id?: string; source: TriggerFireSource; dedupeKey?: string | null };
   } = {},
 ) => {
+  const chainName = validateTemplateInstantiationName(input.name);
   if (input.afterTaskId && input.autoStart) {
     throw templateRefusal(
       "dispatch_conflicts_with_auto_start",
@@ -623,7 +648,7 @@ export const instantiateTemplate = async (
             repoId: repo.id,
             templateId: template.id,
             templateStepId: step.id,
-            name: `${input.name ?? template.name}: ${step.name}`,
+            name: `${chainName}: ${step.name}`,
             description: context,
             assigneeType: step.assigneeType,
             assigneeAgentId: effective.assigneeAgentId,
@@ -681,6 +706,7 @@ export const instantiateTemplate = async (
         }
         const fire = options.fire
           ? await tx.triggerFire.create({ data: {
+            ...(options.fire.id === undefined ? {} : { id: options.fire.id }),
             templateId: template.id,
             chainId,
             source: options.fire.source,
