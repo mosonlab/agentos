@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import {
   AssigneeType,
@@ -22,7 +22,12 @@ import { chainKey, chainProgressByChain } from "../chain.js";
 import { isValidBranchName } from "../branch-name.js";
 import { authenticateWebhook, resolvePayloadVariables, usableDefault } from "../hooks.js";
 import { cloneTemplate, replaceTemplateSteps } from "../template-authoring.js";
-import { instantiateTemplate, isUsableTemplateVariable } from "../templates.js";
+import {
+  instantiateTemplate,
+  isUsableTemplateVariable,
+  triggerInstantiationName,
+  validateTemplateInstantiationName,
+} from "../templates.js";
 import { withoutUndefined } from "../without-undefined.js";
 import {
   id,
@@ -42,7 +47,9 @@ const instantiateTemplateInput = z.object({
   variables: z.record(z.string(), z.string().refine(isUsableTemplateVariable, "Template variables must not be blank")),
   autoStart: z.boolean().default(false),
   afterTaskId: id.optional(),
-  name: z.string().trim().min(1).max(200).optional(),
+  // Name-specific refusal codes are part of the instantiate contract, so the
+  // shared Zod error path must not consume missing/blank/overlong values.
+  name: z.string().optional(),
   description: z.string().max(50_000).optional(),
   stepOverrides: stepOverridesInput.optional(),
   gates: gatesInput.optional(),
@@ -134,13 +141,15 @@ export const registerTemplateRoutes = (app: RouteApp, { db }: RouteDeps): (() =>
     }
     const resolved = resolvePayloadVariables(template, payload as Record<string, unknown>);
     if ("unresolved" in resolved) return context.json({ error: "Unresolved template variables", unresolved: resolved.unresolved }, 400);
+    const fireId = randomUUID();
     const result = await instantiateTemplate(db, template.projectId, template.id, {
       repoId: template.webhookRepoId!, variables: resolved.variables, autoStart: true,
+      name: triggerInstantiationName(template.name, fireId),
     }, {
       actorType: "webhook",
       activityMetadata: { webhookTemplateId: template.id, firedAt: new Date().toISOString() },
       source: TaskSource.WEBHOOK,
-      fire: { source: TriggerFireSource.WEBHOOK, dedupeKey },
+      fire: { id: fireId, source: TriggerFireSource.WEBHOOK, dedupeKey },
     });
     return context.json({ chainId: result.chainId, taskIds: result.tasks.map((task) => task.id) }, 201);
   });
@@ -203,11 +212,12 @@ export const registerTemplateRoutes = (app: RouteApp, { db }: RouteDeps): (() =>
       }));
     });
     app.post("/projects/:projectId/task-templates/:templateId/instantiate", async (context) => {
+      const body = await readJson(context.req.raw, instantiateTemplateInput);
       return context.json(await instantiateTemplate(
         db,
         id.parse(context.req.param("projectId")),
         id.parse(context.req.param("templateId")),
-        await readJson(context.req.raw, instantiateTemplateInput),
+        { ...body, name: validateTemplateInstantiationName(body.name) },
       ), 201);
     });
 
@@ -399,13 +409,15 @@ export const registerTemplateRoutes = (app: RouteApp, { db }: RouteDeps): (() =>
       if (unresolved.length > 0) {
         return context.json({ error: `Unresolved template variables: ${unresolved.join(", ")}`, unresolved }, 400);
       }
+      const fireId = randomUUID();
       const result = await instantiateTemplate(db, trigger.projectId, trigger.id, {
         repoId: trigger.webhookRepoId!, variables, autoStart: true,
+        name: triggerInstantiationName(trigger.name, fireId),
       }, {
         actorType: "operator",
         activityMetadata: { manualFireTemplateId: trigger.id, firedAt: new Date().toISOString() },
         source: TaskSource.MANUAL,
-        fire: { source: TriggerFireSource.MANUAL },
+        fire: { id: fireId, source: TriggerFireSource.MANUAL },
       });
       return context.json({ chainId: result.chainId, taskIds: result.tasks.map((task) => task.id), fireId: result.fireId }, 201);
     });

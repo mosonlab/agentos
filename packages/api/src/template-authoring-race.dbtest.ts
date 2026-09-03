@@ -190,6 +190,7 @@ const instantiateRequest = async (seeded: Seed): Promise<JsonResponse> => {
       body: JSON.stringify({
         repoId: seeded.repo.id,
         variables: { branchName: "race/branch" },
+        name: "template authoring race",
         autoStart: false,
       }),
     },

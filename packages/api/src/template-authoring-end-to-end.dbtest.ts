@@ -303,7 +303,7 @@ test("clone, replace, instantiate, and activate an edited fan-out chain end to e
   const instantiated = await operatorRequest(
     `/projects/${seed.project.id}/task-templates/${cloned.body.id}/instantiate`,
     "POST",
-    { repoId: seed.repo.id, variables, autoStart: true },
+    { repoId: seed.repo.id, variables, name: "authored fan-out", autoStart: true },
   );
   assert.equal(instantiated.status, 201, JSON.stringify(instantiated.body));
 
