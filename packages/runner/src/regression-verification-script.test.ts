@@ -254,7 +254,7 @@ test("the mechanical handoff requires no session or fencing credentials", () => 
   assert.equal(seeded.env.AGENTOS_FENCING_TOKEN, undefined);
 });
 
-test("an unreachable target fails prepare and finalize without persisting output", () => {
+test("an unreachable target fails prepare and finalize with a block record", () => {
   const prepareFixture = fixture();
   git(prepareFixture.work, "remote", "set-url", "origin", join(prepareFixture.root, "missing.git"));
   const prepared = run(prepareFixture, "prepare");
@@ -262,7 +262,7 @@ test("an unreachable target fails prepare and finalize without persisting output
   assert.match(prepared.stderr, /target fetch failed \(exit \d+\): .*does not appear to be a git repository/su);
   assert.doesNotMatch(prepared.stderr, /retrying attempt/u);
   assert.doesNotMatch(prepared.stdout, /refresh-conflict/u);
-  assert.equal(existsSync(prepareFixture.output), false);
+  assert.equal(existsSync(prepareFixture.output), true);
 
   const finalizeFixture = fixture();
   assert.equal(run(finalizeFixture, "prepare").status, 0);
@@ -271,7 +271,7 @@ test("an unreachable target fails prepare and finalize without persisting output
   assert.notEqual(finalized.status, 0);
   assert.match(finalized.stderr, /target fetch failed \(exit \d+\): .*does not appear to be a git repository/su);
   assert.doesNotMatch(finalized.stdout, /refresh-conflict/u);
-  assert.equal(existsSync(finalizeFixture.output), false);
+  assert.equal(existsSync(finalizeFixture.output), true);
 });
 
 test("a transient target fetch failure is retried instead of failing the Run", () => {
@@ -284,12 +284,30 @@ test("a transient target fetch failure is retried instead of failing the Run", (
   assert.equal(readFileSync(seeded.fetchLog, "utf8").trim().split("\n").length, 4);
 });
 
-test("a transient target fetch failure that outlasts the budget reports the git error", () => {
+test("a target fetch failure leaves a machine-readable block record", () => {
   const seeded = fixture();
   seeded.env.REGRESSION_FIXTURE_FETCH_FAILURES = "6";
   const prepared = run(seeded, "prepare");
   assert.notEqual(prepared.status, 0);
   assert.match(prepared.stderr, /target fetch failed after 6 attempts: .*SSL_ERROR_SYSCALL/u);
+  assert.equal(existsSync(seeded.output), true);
+  const block = JSON.parse(readFileSync(seeded.output, "utf8")) as Record<string, unknown>;
+  assert.equal(block.schemaVersion, 1);
+  assert.equal(block.runId, "run-1");
+  assert.equal(block.kind, "regression-verification-v2");
+  assert.equal(block.reason, "target-fetch-failed");
+  assert.equal(
+    block.stderr,
+    "fatal: unable to access: LibreSSL SSL_connect: SSL_ERROR_SYSCALL in connection to github.com:443",
+  );
+});
+
+test("a successful target fetch leaves no block record", () => {
+  const seeded = fixture();
+
+  const prepared = run(seeded, "prepare");
+
+  assert.equal(prepared.status, 0, prepared.stderr);
   assert.equal(existsSync(seeded.output), false);
 });
 
