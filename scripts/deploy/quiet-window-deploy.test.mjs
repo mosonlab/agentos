@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   cpSync,
@@ -425,6 +426,33 @@ test("an unusable poll interval refuses before any mode work", async () => {
       && error.detail === "QUIET_WINDOW_POLL_SECONDS-must-be-a-positive-integer",
   );
   assert.deepEqual(state.calls, []);
+});
+
+test("deploy preflight refuses an environment without GITHUB_READ_TOKEN", () => {
+  const root = mkdtempSync(join(tmpdir(), "anneal-deploy-github-token-missing-"));
+  try {
+    mkdirSync(join(root, "shared"), { recursive: true });
+    writeFileSync(join(root, "shared/.env"), "DATABASE_URL=postgresql://fixture\nFEISHU_DEFAULT_CHAT_ID=fixture\n", { mode: 0o600 });
+    const environment = {
+      ...process.env,
+      AGENTOS_REPOSITORY_ROOT: root,
+    };
+    delete environment.DATABASE_URL;
+    delete environment.FEISHU_DEFAULT_CHAT_ID;
+    delete environment.GITHUB_READ_TOKEN;
+
+    const result = spawnSync(
+      process.execPath,
+      [fileURLToPath(new URL("./quiet-window-deploy.mjs", import.meta.url)), "--dry-run"],
+      { cwd: REPOSITORY_ROOT, env: environment, encoding: "utf8" },
+    );
+
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 1);
+    assert.match(result.stdout, /STOP environment-unreadable detail=GITHUB_READ_TOKEN-missing/u);
+  } finally {
+    removeTree(root);
+  }
 });
 
 const RETRYABLE_ESCALATION_REASONS = new Set([
