@@ -158,8 +158,10 @@ AGENTOS_WORKSPACE_PATH="$(git rev-parse --show-toplevel)" AGENTOS_GATE_SERVER=pr
 
 The dispatcher accounts for `remote-1`, `remote-1-2`, `remote-2`, and, when
 local dispatch is enabled, `local-1` through `local-N` under
-`~/.cache/gate-dispatch/`, outside any repository because the slots belong to
-the machines. A direct `merge-gate.sh` bypasses that accounting. A direct
+`$AGENTOS_RUNNER_HOME/.cache/gate-dispatch/` when
+`AGENTOS_RUNNER_HOME` is set, or `${XDG_CACHE_HOME:-$HOME/.cache}/gate-dispatch/`
+otherwise, outside any repository because the slots belong to the runner
+account. A direct `merge-gate.sh` bypasses that accounting. A direct
 `remote-gate.sh` bypasses the local lock too, but it cannot exceed worker
 capacity: every installed `run-gate.sh` contends for the worker-wide
 `~/gate/.full-gate.lock` and, only on a capacity-two host,
@@ -167,6 +169,14 @@ capacity: every installed `run-gate.sh` contends for the worker-wide
 lifetime. If an SSH connection drops while its remote process survives, that
 process keeps its worker slot and a later invocation waits instead of exceeding
 the configured capacity.
+
+Local slots are accounted per runner account: the account that owns
+`AGENTOS_RUNNER_HOME` owns the shared slot directory. On a host with one
+account and many runners, `RUNNER_GATE_LOCAL_SLOTS` is the host ceiling. On a
+host with one account per runner, it is a per-runner ceiling and the host
+ceiling is the sum of those per-runner counts. Outside a runner,
+`AGENTOS_RUNNER_HOME` is unset and the slot directory continues to resolve
+from `XDG_CACHE_HOME` or `HOME` as before.
 
 A lock is a file created with `ln`, holding the pid of the dispatcher that owns
 it. That shape is deliberate and `packages/runner/runtime-tools/gate-worker/lib.sh` explains it:
@@ -324,6 +334,12 @@ Task secrets cannot override either runner-owned choice. If
 `RUNNER_GATE_SERVER`
 provides no remote capacity to a canonical regression step, but a configured
 local count can still provide an explicit local-only path.
+
+For a host running multiple runners, the first deployment should prefer a
+remote worker configured with `RUNNER_GATE_SERVER` over local capacity. This
+keeps the gate workload on the explicitly provisioned worker and avoids
+mistaking per-account local capacity for a host-wide limit when runner accounts
+are split across the host.
 
 ```
 Host primary-worker
