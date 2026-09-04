@@ -5,10 +5,12 @@ import { isCodexReconnectStatus } from "@anneal/db";
 
 import type { ClaimedTask } from "../api.js";
 import type { RunnerConfig, RunnerKind } from "../config.js";
+import { isTransientNetworkError } from "../network-retry.js";
 import type { AgentScratch } from "../workspace.js";
 import {
   asRecord,
   capturePreflight,
+  classifyRuntimeError,
   createAdapterState,
   emitAdapterEvent,
   eventErrorMessage,
@@ -23,6 +25,7 @@ import {
   stringField,
   type AdapterDeclaration,
   type AdapterState,
+  type ExitEvidence,
   type PreflightResult,
   type PreflightSpec,
   type ResumeSpec,
@@ -32,6 +35,43 @@ import {
 import { provisionIsolatedSessionConfig, type SessionConfigOptions } from "./session-config.js";
 
 export const CODEX_STARTER_MODEL = "gpt-5.6-sol:medium";
+
+const CODEX_BARE_DISCONNECT = /^stream disconnected before completion:[^\r\n]+$/iu;
+const isCodexBareDisconnect = (message: string | null): boolean => CODEX_BARE_DISCONNECT.test(message?.trim() ?? "");
+
+const NON_RESUMABLE_FAILURE_CLASSES = new Set([
+  "BINARY_NOT_FOUND",
+  "AUTH_REQUIRED",
+  "TOOL_FAILED",
+  "RATE_LIMITED",
+  "CANCELLED_OR_TIMED_OUT",
+]);
+
+/**
+ * Decide whether a dead Codex child can be continued in the same Run.
+ *
+ * Reconnect progress is reported through Codex's `error` event, but a plain
+ * reconnect message is only provisional. The adapter carries the history of
+ * non-reconnect provider errors separately so a later reconnect status cannot
+ * hide an earlier terminal provider error.
+ */
+export const isCodexInRunResumeCandidate = (
+  evidence: ExitEvidence,
+  providerConversationId: string | null,
+): boolean => {
+  if (evidence.terminalEventSeen
+    || evidence.signal !== null
+    || evidence.terminationReason !== null
+    || providerConversationId === null
+    || evidence.sawNonReconnectProviderError) return false;
+
+  if (NON_RESUMABLE_FAILURE_CLASSES.has(classifyRuntimeError(evidence).failureClass)) return false;
+
+  const reconnectStatus = isCodexReconnectStatus(evidence.providerError);
+  const bareDisconnect = isCodexBareDisconnect(evidence.providerError);
+  const transientNetwork = isTransientNetworkError(`${evidence.providerError ?? ""}\n${evidence.stderr}`);
+  return reconnectStatus || bareDisconnect || transientNetwork;
+};
 
 export const codexNativeSubagentProfile = (run: ClaimedTask["run"], runner: RunnerKind): {
   model: string;
@@ -172,7 +212,15 @@ export const parseCodexEvent = (
     // the stream is disconnected, but do not make it an irreversible verdict:
     // a later turn.completed proves the reconnect recovered. Every other error
     // remains latched, including an unrecognised error with no message.
-    if (!isCodexReconnectStatus(message)) state.sawError = true;
+    if (!isCodexReconnectStatus(message)) {
+      state.sawError = true;
+      // The final bare disconnect is the resumable terminal form of the
+      // reconnect status, not a separate provider rejection.
+      if (!isCodexBareDisconnect(message)) {
+        state.sawNonReconnectProviderError = true;
+        state.firstNonReconnectProviderError ??= message;
+      }
+    }
     state.providerError = message ?? state.providerError;
     emitAdapterEvent(state, sink, "ADAPTER_ERROR", event);
   } else if (type === "turn.completed") {
@@ -277,4 +325,5 @@ export const codexDeclaration: AdapterDeclaration = Object.freeze({
   providerEventPersistence: () => true,
   parseEvent: parseCodexEvent,
   preflight,
+  isInRunResumeCandidate: isCodexInRunResumeCandidate,
 });

@@ -4,6 +4,7 @@ import {
   agentExecutionSucceeded,
   PR_TEMPLATE_NAME,
   type BudgetGate,
+  type PersistedRunOutput,
   type PrHandoffOutput,
   type RunOutcome,
   type RunOutputEvidence,
@@ -56,7 +57,8 @@ import {
   runnerExceptionEnvelope,
   summarizeEvidence,
 } from "./envelope.js";
-import { createRunLease, deliverUnderLease, type RunLease } from "./run-lease.js";
+import { transientBackoff } from "./network-retry.js";
+import { createRunLease, deliverUnderLease, type RunLease, type RunLeaseClock } from "./run-lease.js";
 import { openSessionConfig, type SessionConfigLease } from "./session-config-lease.js";
 import { readRegressionOutputHandoff, type RegressionOutputHandoffBlock } from "./regression-output-handoff.js";
 import { readTaskOutputReceipt } from "./task-output-receipt.js";
@@ -107,6 +109,18 @@ const missingOutputRemediationInput = (outputKind: string): string => [
   "If the write is rejected, correct the body and retry. Then call task_status and finish only after its outputEvidence reports satisfaction case 'delivered' for this Run.",
 ].join("\n");
 
+export const PROVIDER_RESUME_MAX_ATTEMPTS = 3;
+export const PROVIDER_RESUME_MIN_LEASE_TTL_MS = 15_000;
+export const PROVIDER_RESUME_MIN_WALLTIME_MS = 15_000;
+export const PROVIDER_RESUME_BACKOFF_CEILING_MS = 7_000;
+
+export const providerDisconnectResumeInput = (): string => [
+  "The provider stream dropped before the task reached its terminal event.",
+  "Continue this conversation in the same Anneal Run and workspace.",
+  "Do not redo or revert already-completed work or files that have already been written.",
+  "Carry on from where the interrupted turn stopped and finish the task normally.",
+].join("\n");
+
 const sameWorkspaceSnapshot = (left: WorkspaceSnapshot, right: WorkspaceSnapshot): boolean =>
   JSON.stringify(left) === JSON.stringify(right);
 
@@ -127,6 +141,40 @@ const exitEvidencePayload = (evidence: ExitEvidence): Record<string, unknown> =>
   stdoutTail: summarizeEvidence(evidence.stdout),
   stderrTail: summarizeEvidence(evidence.stderr),
 });
+
+type RegressionHandoff = Awaited<ReturnType<typeof readRegressionOutputHandoff>>;
+
+type AbsentTerminalProduct = { case: "absent"; reason: "none" | "wrong-output-kind" | "output-head-mismatch" };
+type RegressionTerminalProduct = { case: "regression-handoff"; handoff: SessionTaskOutput };
+type DeliveredTerminalProduct = { case: "delivered-output"; output: PersistedRunOutput };
+
+/** The shared, side-effect-free detection used by both established settling paths. */
+function detectDurableTerminalProduct(input: {
+  regressionHandoff: Exclude<RegressionHandoff, null>;
+  outputEvidence: null;
+  capturedHeadSha: undefined;
+}): RegressionTerminalProduct | AbsentTerminalProduct;
+function detectDurableTerminalProduct(input: {
+  regressionHandoff: null;
+  outputEvidence: RunOutputEvidence | null;
+  capturedHeadSha: string | undefined;
+}): DeliveredTerminalProduct | AbsentTerminalProduct;
+function detectDurableTerminalProduct(input: {
+  regressionHandoff: RegressionHandoff;
+  outputEvidence: RunOutputEvidence | null;
+  capturedHeadSha: string | undefined;
+}): RegressionTerminalProduct | DeliveredTerminalProduct | AbsentTerminalProduct {
+  if (input.regressionHandoff !== null && !("reason" in input.regressionHandoff)) {
+    return { case: "regression-handoff", handoff: input.regressionHandoff };
+  }
+  const satisfaction = input.outputEvidence?.satisfaction;
+  if (satisfaction?.case !== "delivered") return { case: "absent", reason: "none" };
+  if (satisfaction.output.kind !== "result") return { case: "absent", reason: "wrong-output-kind" };
+  if (input.capturedHeadSha === undefined || satisfaction.output.commitSha !== input.capturedHeadSha) {
+    return { case: "absent", reason: "output-head-mismatch" };
+  }
+  return { case: "delivered-output", output: satisfaction.output };
+}
 
 const cleanup = async (
   config: RunnerConfig,
@@ -153,6 +201,8 @@ const preflightEvidence = (message: string): ExitEvidence => ({
   terminalSuccess: false,
   finalOutput: null,
   providerError: null,
+  sawNonReconnectProviderError: false,
+  firstNonReconnectProviderError: null,
   terminationReason: null,
   stdout: "",
   stderr: message,
@@ -166,6 +216,9 @@ export type ExecuteClaimDependencies = {
   /** The CLI the run is executed through. Defaults to the claim's runner kind. */
   adapter?: CliAdapter;
   controlPlane?: ControlPlane;
+  /** Test seams for the fixed in-Run provider-resume timing policy. */
+  providerResumeBackoff?: (attempt: number) => Promise<void>;
+  runLeaseClock?: RunLeaseClock;
 };
 
 export const executeClaim = async (
@@ -225,7 +278,9 @@ export const executeClaim = async (
     }
     return worktreeContainmentViolations.length > 0 ? { worktreeContainmentViolations } : {};
   };
-  const claimStartedAt = new Date();
+  const now = dependencies.runLeaseClock?.now ?? Date.now;
+  const runLeaseClock = dependencies.runLeaseClock;
+  const claimStartedAt = new Date(now());
   const runLease = createRunLease<RuntimeHandle>({
     heartbeatIntervalMs: config.heartbeatIntervalMs,
     leaseSeconds: config.leaseSeconds,
@@ -241,10 +296,17 @@ export const executeClaim = async (
       console.error(`Unable to drain fenced Run ${claim.run.id}: ${errorMessage(error)}`);
     },
     onRenewalError: (error) => { console.error("Run Lease renewal failed", error); },
+    ...(runLeaseClock ? { clock: runLeaseClock } : {}),
   });
   let seq = claim.nextEventSeq;
   let pendingEvents: SessionEventPayload[] = [];
   let eventFlushPromise: Promise<void> | null = null;
+  let providerConversationId = claim.resume?.providerConversationId ?? null;
+  const rememberProviderConversationId = (): string | null => {
+    const reported = handle?.providerConversationId;
+    if (reported) providerConversationId = reported;
+    return providerConversationId;
+  };
   const sink = (event: AdapterEvent): void => {
     pendingEvents.push({
       seq: seq++,
@@ -264,7 +326,7 @@ export const executeClaim = async (
         // therefore remains the head of the queue for the next flush attempt,
         // while the single worker prevents a later batch overtaking it.
         const batch = pendingEvents.slice(0, 250);
-        await session.emit(batch, handle?.providerConversationId);
+        await session.emit(batch, rememberProviderConversationId());
         pendingEvents.splice(0, batch.length);
       }
     })().finally(() => { eventFlushPromise = null; });
@@ -293,11 +355,38 @@ export const executeClaim = async (
         await observeEventFlush(error);
       }
       if (pendingEvents.length === 0 || !openLease.held) break;
-      const remainingMs = openLease.deadline - Date.now();
+      const remainingMs = openLease.deadline - now();
       if (remainingMs <= 0) throw lastError ?? new Error("Event delivery lease expired with events still pending");
       // Reuse the lease's heartbeat cadence instead of introducing a separate
       // retry budget. Its renewal loop continues independently during the wait.
       await new Promise<void>((resolve) => setTimeout(resolve, Math.min(config.heartbeatIntervalMs, remainingMs)));
+    }
+  };
+
+  const probeDurableTerminalProduct = async (): Promise<"present" | "absent" | "inconclusive"> => {
+    if (!workspace) return "inconclusive";
+    let regressionHandoff: RegressionHandoff = null;
+    try {
+      regressionHandoff = await readRegressionOutputHandoff(config, claim, workspace);
+      if (regressionHandoff !== null
+        && detectDurableTerminalProduct({ regressionHandoff, outputEvidence: null, capturedHeadSha: undefined }).case
+          === "regression-handoff") {
+        return "present";
+      }
+    } catch {
+      // An unreadable handoff could be a durable product. Refuse a relaunch and
+      // let the established regression path below own diagnostics and outcome.
+      return "inconclusive";
+    }
+    try {
+      const capturedHeadSha = (await captureWorkspaceResult(config, workspace)).headSha;
+      const outputEvidence = await session.outputStatus();
+      return detectDurableTerminalProduct({ regressionHandoff: null, outputEvidence, capturedHeadSha }).case
+        === "delivered-output" ? "present" : "absent";
+    } catch {
+      // An inconclusive status read is not evidence that no product exists.
+      // Fail closed and let the established delivery path retry and report it.
+      return "inconclusive";
     }
   };
 
@@ -428,20 +517,28 @@ export const executeClaim = async (
     handle = launchedHandle;
     phase = "EXECUTE";
     const executionStartedAt = handle.startedAt;
+    let executionLastProgressEventAt = handle.lastProgressEventAt;
     await runLease.enterPhase({
       name: "execute",
       evidence: async () => {
         if (!handle) throw new Error("Execute heartbeat requires a provider handle");
         const heartbeatHandle = handle;
         const snapshot = await adapter.heartbeat(heartbeatHandle);
+        // A new adapter state uses its own startedAt as lastProgressEventAt.
+        // That spawn timestamp is not provider progress and must not reset a
+        // stall window carried from the previous child.
+        if (snapshot.lastProgressEventAt > heartbeatHandle.startedAt
+          && snapshot.lastProgressEventAt > executionLastProgressEventAt) {
+          executionLastProgressEventAt = snapshot.lastProgressEventAt;
+        }
         const decision = evaluateBudget({
-          now: new Date(),
+          now: new Date(now()),
           startedAt: executionStartedAt,
           maxDurationMs: claim.run.maxDurationMin * 60_000,
           currentRunNumber: claim.run.runNumber,
           maxRuns: claim.run.maxRunsPerTask,
           processAlive: snapshot.processAlive,
-          lastProgressEventAt: snapshot.lastProgressEventAt,
+          lastProgressEventAt: executionLastProgressEventAt,
           stallTimeoutMs: claim.run.stallTimeoutMin * 60_000,
           toolDeadlineMs: config.toolDeadlineMs,
           inFlightTool: snapshot.inFlightTool,
@@ -452,7 +549,7 @@ export const executeClaim = async (
         }
         return {
           processAlive: snapshot.processAlive,
-          lastProgressEventAt: snapshot.lastProgressEventAt,
+          lastProgressEventAt: executionLastProgressEventAt,
           inFlightTool: serializeTool(snapshot.inFlightTool),
         };
       },
@@ -481,24 +578,105 @@ export const executeClaim = async (
     // renewal loop keeps the run Lease live while later flushes retry it.
     void flushEvents().catch(observeEventFlush);
 
-    const completedHandle = handle;
-    const evidence = await completedHandle.exit;
+    let evidence = await handle.exit;
     producedOutput = outputTail(evidence);
+    let providerResumeAttempts = 0;
+    const resumeBackoff = dependencies.providerResumeBackoff ?? transientBackoff;
+    while (true) {
+      if (handle.lastProgressEventAt > handle.startedAt
+        && handle.lastProgressEventAt > executionLastProgressEventAt) {
+        executionLastProgressEventAt = handle.lastProgressEventAt;
+      }
+      const deadProviderConversationId = rememberProviderConversationId();
+      if (!adapter.isInRunResumeCandidate?.(evidence, deadProviderConversationId)
+        || deadProviderConversationId === null) break;
+      if (providerResumeAttempts >= PROVIDER_RESUME_MAX_ATTEMPTS) {
+        sink({
+          source: "RUNNER",
+          type: "PROVIDER_RESUME_EXHAUSTED",
+          payload: {
+            attempt: providerResumeAttempts + 1,
+            cap: PROVIDER_RESUME_MAX_ATTEMPTS,
+            providerConversationId: deadProviderConversationId,
+            backoffMs: 0,
+            evidence: exitEvidencePayload(evidence),
+          },
+        });
+        break;
+      }
+      // A non-held authority here was already adopted from an acknowledged
+      // heartbeat. It cannot authorize a relaunch, so do not spend backoff
+      // time merely to ask the same stopped lease again.
+      if (!runLease.authority.held || budget.refusal !== null) break;
+      if (providerResumeAttempts === 0) {
+        const productProbe = await probeDurableTerminalProduct();
+        if (productProbe !== "absent") break;
+      }
+
+      const attempt = providerResumeAttempts + 1;
+      const backoffStartedAt = now();
+      let backoffMs = 0;
+      const [renewal] = await Promise.all([
+        runLease.renewNow(),
+        (async () => {
+          await resumeBackoff(attempt);
+          backoffMs = Math.max(0, now() - backoffStartedAt);
+        })(),
+      ]);
+      const authority = await runLease.checkpoint();
+      const remainingLeaseMs = renewal.remainingLeaseMs - Math.max(0, now() - renewal.observedAt);
+      const remainingWalltimeMs = executionStartedAt.getTime()
+        + claim.run.maxDurationMin * 60_000
+        - now();
+      if (!renewal.accepted
+        || !renewal.authority.held
+        || !authority.held
+        || remainingLeaseMs <= PROVIDER_RESUME_MIN_LEASE_TTL_MS
+        || remainingWalltimeMs <= PROVIDER_RESUME_MIN_WALLTIME_MS
+        || budget.refusal !== null) break;
+
+      sink({
+        source: "RUNNER",
+        type: "PROVIDER_RESUME_STARTED",
+        payload: {
+          attempt,
+          cap: PROVIDER_RESUME_MAX_ATTEMPTS,
+          providerConversationId: deadProviderConversationId,
+          backoffMs,
+          evidence: exitEvidencePayload(evidence),
+        },
+      });
+      const resumedHandle = await runLease.launch(() => adapter.resume({
+        ...spec,
+        providerConversationId: deadProviderConversationId,
+        input: providerDisconnectResumeInput(),
+      }, sink));
+      if (!resumedHandle) break;
+      providerResumeAttempts = attempt;
+      handle = resumedHandle;
+      evidence = await resumedHandle.exit;
+      producedOutput = outputTail(evidence);
+    }
     let regressionHandoffPersisted = false;
     if (runLease.held) {
       try {
         const handoff = await readRegressionOutputHandoff(config, claim, workspace);
         if (handoff) {
-          if ("reason" in handoff) {
-            regressionHandoffBlock = handoff;
-          } else {
-            await persistRegressionOutputHandoff(session, handoff, sink);
+          const product = detectDurableTerminalProduct({
+            regressionHandoff: handoff,
+            outputEvidence: null,
+            capturedHeadSha: undefined,
+          });
+          if (product.case === "regression-handoff") {
+            await persistRegressionOutputHandoff(session, product.handoff, sink);
             regressionHandoffPersisted = true;
             sink({
               source: "RUNNER",
               type: "REGRESSION_OUTPUT_HANDOFF_PERSISTED",
-              payload: { kind: handoff.kind, commitSha: handoff.commitSha },
+              payload: { kind: product.handoff.kind, commitSha: product.handoff.commitSha },
             });
+          } else if ("reason" in handoff) {
+            regressionHandoffBlock = handoff;
           }
         }
       } catch (error: unknown) {
@@ -543,7 +721,7 @@ export const executeClaim = async (
         });
       } else if (satisfaction?.case === "absent") {
         const { outputKind } = satisfaction;
-        const providerConversationId = completedHandle.providerConversationId;
+        const providerConversationId = rememberProviderConversationId();
         if (!satisfaction.remediable) {
           // Only a mechanical verdict is undeliverable by asking again, and
           // the control plane says so; the runner does not re-test the kind.
@@ -675,22 +853,24 @@ export const executeClaim = async (
       && runLease.held;
     if (disconnectCandidate) {
       try {
-        const satisfaction = (await session.outputStatus())?.satisfaction;
+        const outputEvidence = await session.outputStatus();
+        const satisfaction = outputEvidence?.satisfaction;
         const expectedKind = "result";
         // The server-returned output identity alone authorizes recovery, and
         // "this Run delivered it" is the control plane's decision, not a
         // predicate to re-run here. What remains is the one fact only this
         // process knows: the commit the workspace actually ends on.
-        if (satisfaction?.case !== "delivered") {
+        const product = detectDurableTerminalProduct({ regressionHandoff: null, outputEvidence, capturedHeadSha });
+        if (product.case === "absent") {
+          if (product.reason === "wrong-output-kind" && satisfaction?.case === "delivered") {
+            throw new Error(`Persisted output kind ${satisfaction.output.kind} is not ${expectedKind}`);
+          }
+          if (product.reason === "output-head-mismatch") {
+            throw new Error(`Persisted ${expectedKind} output does not match captured workspace HEAD`);
+          }
           throw new Error(`No persisted ${expectedKind} output exists for this Run`);
         }
-        const { output } = satisfaction;
-        if (output.kind !== expectedKind) {
-          throw new Error(`Persisted output kind ${output.kind} is not ${expectedKind}`);
-        }
-        if (output.commitSha !== capturedHeadSha) {
-          throw new Error(`Persisted ${expectedKind} output does not match captured workspace HEAD`);
-        }
+        const { output } = product;
         postDeliveryDisconnectTolerated = true;
         let localReceipt = null;
         let localReceiptReadError: string | null = null;
