@@ -1001,7 +1001,7 @@ const readStageEntries = ({ manifest, root, unitDirectory, sudoersPath, serviceU
   return { entries, inventory, stageRoot };
 };
 
-const copyStagedEntry = ({ entry, unitDirectory, sudoersPath, strictOwner = true }) => {
+const copyStagedEntry = ({ entry, unitDirectory, sudoersPath, strictOwner = true, chown = chownSync }) => {
   if (!entry.stagedPath || !existsSync(entry.stagedPath)) throw new Error(`systemd-staged-file-missing:${entry.stagedPath ?? entry.path}`);
   if (fileDigest(entry.stagedPath) !== entry.installedSha256) throw new Error(`systemd-staged-file-drift:${entry.stagedPath}`);
   if (entry.kind === "wrapper") throw new Error("systemd-root-wrapper-write-refused");
@@ -1015,8 +1015,8 @@ const copyStagedEntry = ({ entry, unitDirectory, sudoersPath, strictOwner = true
   const ownerUid = 0;
   const ownerGid = 0;
   try {
-    chownSync(entry.path, ownerUid, ownerGid);
-    if (!parentExisted) chownSync(parent, ownerUid, ownerGid);
+    chown(entry.path, ownerUid, ownerGid);
+    if (!parentExisted) chown(parent, ownerUid, ownerGid);
   } catch (error) {
     if (strictOwner) throw new Error(`systemd-install-owner-failed:${entry.path}:${error instanceof Error ? error.message : String(error)}`);
   }
@@ -1397,6 +1397,7 @@ export const installStagedSystemdServices = ({
   serviceUser,
   userLookup = null,
   visudoPath = null,
+  chown = chownSync,
   effectiveUid = typeof process.geteuid === "function" ? process.geteuid() : process.getuid(),
   revert = false,
   apply = true,
@@ -1470,6 +1471,7 @@ export const installStagedSystemdServices = ({
       unitDirectory: resolvedUnitDirectory,
       sudoersPath: resolvedSudoersPath,
       strictOwner: typeof process.geteuid !== "function" || process.geteuid() === 0,
+      chown,
     });
     runSystemctl({ systemctlPath: systemctl, args: ["daemon-reload"], execute });
     for (const entry of manifest.entries.filter((item) => item.kind === "service")) {
@@ -1622,6 +1624,7 @@ export const installLaunchdServices = ({
   sudoersPath,
   systemctlPath,
   visudoPath,
+  chown,
   userLookup,
   effectiveUid,
   execute = execFileSync,
@@ -1642,6 +1645,7 @@ export const installLaunchdServices = ({
     sudoersPath,
     systemctlPath,
     visudoPath,
+    chown,
     userLookup,
     effectiveUid,
     execute,
@@ -1813,6 +1817,7 @@ export const installLaunchd = (args, context = {}) => {
         sudoersPath: context.sudoersPath,
         systemctlPath: context.systemctlPath,
         execute: context.execute ?? execFileSync,
+        chown: context.chown,
         serviceUser,
         userLookup: context.userLookup,
         effectiveUid: context.effectiveUid,
@@ -2135,6 +2140,7 @@ export const installStagedSystemdAutoDeploy = ({
   sudoersPath = SYSTEMD_SUDOERS_PATH,
   systemctlPath = null,
   execute = execFileSync,
+  chown = chownSync,
   serviceUser,
   userLookup = null,
   effectiveUid = typeof process.geteuid === "function" ? process.geteuid() : process.getuid(),
@@ -2219,6 +2225,7 @@ export const installStagedSystemdAutoDeploy = ({
       unitDirectory: targetRoot,
       sudoersPath: targetSudoers,
       strictOwner: typeof process.geteuid !== "function" || process.geteuid() === 0,
+      chown,
     });
     runSystemctl({ systemctlPath: systemctl, args: ["daemon-reload"], execute });
     runSystemctl({ systemctlPath: systemctl, args: ["enable", "--now", `${LABEL}.timer`], unit: `${LABEL}.timer`, execute });

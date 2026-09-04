@@ -8,6 +8,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   statSync,
@@ -19,6 +20,7 @@ import test from "node:test";
 
 import {
   autoDeployEnvironmentValues,
+  controlledLaunchdPath,
   installLaunchd,
   installLaunchdServices,
   installStagedSystemdAutoDeploy,
@@ -50,6 +52,56 @@ const withLinux = async (work) => {
 
 const accountLookup = () => "anneal-test:x:620:620::/var/lib/anneal-test:/bin/bash";
 const digest = (contents) => createHash("sha256").update(contents).digest("hex");
+
+const spawnServiceInstallerCli = ({ root, args, context }) => {
+  const harnessPath = join(root, "service-installer-cli-harness.mjs");
+  const recorderPath = join(root, "service-installer-cli-records.jsonl");
+  const entrypoint = new URL("./install-launchd-services.mjs", import.meta.url);
+  writeFileSync(harnessPath, `
+import { appendFileSync } from "node:fs";
+import { runServiceInstaller } from ${JSON.stringify(entrypoint.href)};
+const config = JSON.parse(process.env.AGENTOS_INSTALLER_TEST_CONTEXT);
+process.env.AGENTOS_SERVICE_PLATFORM = "linux";
+process.argv[1] = config.entrypoint;
+const record = (value) => appendFileSync(config.recorderPath, JSON.stringify(value) + "\\n");
+process.exitCode = runServiceInstaller(process.argv.slice(2), {
+  ...config.context,
+  userLookup: () => "anneal-test:x:620:620::/var/lib/anneal-test:/bin/bash",
+  execute: (_command, commandArgs) => { record({ operation: "execute", args: commandArgs }); return ""; },
+  chown: (path, uid, gid) => record({ operation: "chown", path, uid, gid }),
+});
+`);
+  const result = spawnSync(process.execPath, [harnessPath, ...args], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      AGENTOS_INSTALLER_TEST_CONTEXT: JSON.stringify({
+        context,
+        entrypoint: entrypoint.pathname,
+        recorderPath,
+      }),
+    },
+  });
+  const records = existsSync(recorderPath)
+    ? readFileSync(recorderPath, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line))
+    : [];
+  return { ...result, records };
+};
+
+const writeSudoPolicyStub = (root) => {
+  const path = join(root, "sudo-policy-stub.mjs");
+  writeFileSync(path, `#!/usr/bin/env node
+import { readFileSync } from "node:fs";
+const [nonInteractive, ...command] = process.argv.slice(2);
+if (nonInteractive !== "-n") process.exit(2);
+const policy = readFileSync(process.env.SUDOERS_POLICY, "utf8").trim();
+const allowed = new Set(policy.split("NOPASSWD: ")[1].split(", "));
+process.exit(allowed.has(command.join(" ")) ? 0 : 1);
+`, { mode: 0o755 });
+  chmodSync(path, 0o755);
+  return path;
+};
 
 const unitEnvironmentKeys = (unit) => [...unit.matchAll(/^Environment=([A-Za-z_][A-Za-z0-9_]*)=/gmu)].map((match) => match[1]);
 
@@ -217,7 +269,36 @@ test("default Darwin render, manifest entries, and plan stdout match 9a52c6ad by
       backup: { mode: "host", pgDumpBinary: "/usr/bin/pg_dump" },
     });
     assert.equal(digest(autoPlist), baseline.autoDeployPlistSha256);
-    assert.deepEqual(baseline.autoDeployManifestEntries, ["<HOME>/Library/LaunchAgents/com.agentos.auto-deploy.plist"]);
+    const autoHome = mkdtempSync(join(tmpdir(), "agentos-darwin-auto-home-"));
+    const autoEntrypoint = spawnSync(process.execPath, [
+      "scripts/deploy/install-launchd.mjs",
+      "--pg-dump-mode", "host",
+      "--pg-dump-binary", "/usr/bin/true",
+    ], {
+      cwd: root,
+      encoding: "utf8",
+      env: { ...process.env, AGENTOS_SERVICE_PLATFORM: "darwin", HOME: autoHome },
+    });
+    assert.equal(autoEntrypoint.status, 0, autoEntrypoint.stderr);
+    const autoNode = realpathSync(process.execPath);
+    const resolvedCommand = (name) => realpathSync(spawnSync("/usr/bin/which", [name], { encoding: "utf8" }).stdout.trim());
+    const autoGit = resolvedCommand("git");
+    const autoNpm = resolvedCommand("npm");
+    const autoPath = controlledLaunchdPath({ nodeBinary: autoNode, gitBinary: autoGit });
+    const normalizeAuto = (value) => value
+      .replaceAll(autoHome, "<HOME>")
+      .replaceAll(root, "<ROOT>")
+      .replaceAll(autoPath, "<CONTROLLED_PATH>")
+      .replaceAll(autoNode, "<NODE>")
+      .replaceAll(autoGit, "<GIT>")
+      .replaceAll(autoNpm, "<NPM>");
+    const normalizedAutoStdout = normalizeAuto(autoEntrypoint.stdout);
+    assert.equal(normalizedAutoStdout, baseline.autoDeployPlanStdout);
+    assert.deepEqual(
+      normalizedAutoStdout.match(/^PLAN destination=(.*)$/mu)?.slice(1) ?? [],
+      baseline.autoDeployManifestEntries,
+    );
+    rmSync(autoHome, { recursive: true, force: true });
     const entrypoint = spawnSync(process.execPath, ["scripts/deploy/install-launchd-services.mjs"], {
       cwd: root,
       encoding: "utf8",
@@ -291,7 +372,7 @@ test("rendered unit syntax is verified by systemd-analyze when available", (t) =
   }
 });
 
-test("Linux service stage is unprivileged and the root stage has an ordered activation plan", async () => {
+test("the real service CLI enforces the Linux root boundary and sudo -n policy", async () => {
   await withLinux(async () => {
     const root = mkdtempSync(join(tmpdir(), "agentos-systemd-installer-"));
     const unitDirectory = join(root, "etc/systemd/system");
@@ -348,33 +429,39 @@ test("Linux service stage is unprivileged and the root stage has an ordered acti
       // The recorder test runs without root; make the root-owned production
       // mode writable again before exercising the successful retry.
       chmodSync(sudoersPath, 0o600);
-      const calls = [];
-      const execute = (_command, args) => { calls.push(args); return ""; };
-      const installed = installLaunchdServices({
+      const cli = spawnServiceInstallerCli({
+        root,
+        args: ["--install-units", "--service-user", "anneal-test"],
+        context: {
         repositoryRoot: root,
         unitDirectory,
         sudoersPath,
         systemctlPath: "/usr/bin/true",
         effectiveUid: 0,
-        execute,
-        serviceUser: "anneal-test",
-        userLookup: accountLookup,
         visudoPath: "/usr/bin/true",
-        installUnits: true,
-        apply: false,
+        },
       });
-      assert.equal(installed.applied, true);
-      assert.equal(installed.platform, "linux");
+      assert.equal(cli.status, 0, cli.stderr);
+      assert.equal(cli.stdout, `APPLY platform=linux\nAPPLY unit-directory=${unitDirectory}\nAPPLY units=${SERVICE_LABELS.length}\nAPPLY staging=${staged.staging}\n`);
+      const calls = cli.records.filter(({ operation }) => operation === "execute").map(({ args }) => args);
+      const ownership = cli.records.filter(({ operation }) => operation === "chown");
       const wrapperAfterRoot = statSync(stableWrapper);
       assert.equal(wrapperAfterRoot.ino, wrapperBeforeRoot.ino);
       assert.equal(wrapperAfterRoot.mtimeMs, wrapperBeforeRoot.mtimeMs);
       const systemctlCalls = calls.filter((args) => args[0] !== "-c");
-      assert.deepEqual(systemctlCalls.slice(0, 2), [["daemon-reload"], ["enable", "--now", `${SERVICE_LABELS[0]}.service`]]);
-      assert.equal(systemctlCalls.length, SERVICE_LABELS.length + 1);
-      assert.equal(existsSync(join(unitDirectory, "com.agentos.api.service")), true);
-      assert.equal(statSync(join(unitDirectory, "com.agentos.api.service")).mode & 0o777, 0o644);
-      assert.equal(statSync(join(unitDirectory, "com.agentos.api.service.d/os-isolation.conf")).mode & 0o777, 0o644);
-      assert.equal(statSync(sudoersPath).mode & 0o777, 0o440);
+      assert.deepEqual(systemctlCalls, [
+        ["daemon-reload"],
+        ...SERVICE_LABELS.map((label) => ["enable", "--now", `${label}.service`]),
+      ]);
+      const installedTargets = [
+        ...staged.manifest.entries.filter(({ kind }) => kind !== "wrapper"),
+        ...staged.manifest.auxiliaryEntries,
+      ];
+      for (const entry of installedTargets) {
+        assert.equal(existsSync(entry.path), true, entry.path);
+        assert.equal(statSync(entry.path).mode & 0o777, entry.kind === "sudoers" ? 0o440 : 0o644, entry.path);
+        assert.equal(ownership.some((change) => change.path === entry.path && change.uid === 0 && change.gid === 0), true, entry.path);
+      }
       const sudoers = readFileSync(sudoersPath, "utf8");
       assert.equal(sudoers, renderSystemdSudoers({
         serviceUser: "anneal-test",
@@ -382,16 +469,28 @@ test("Linux service stage is unprivileged and the root stage has an ordered acti
       }));
       assert.match(sudoers, /systemctl show -p ExecStart --value com\.agentos\.api\.service/u);
       assert.doesNotMatch(sudoers, /\b(?:enable|disable|daemon-reload)\b/u);
-      const policy = new Set(sudoers.trim().split("NOPASSWD: ")[1].split(", "));
-      assert.equal(policy.has("/bin/systemctl restart com.agentos.api.service"), true);
-      assert.equal(policy.has("/bin/systemctl enable com.agentos.api.service"), false);
-      assert.equal(policy.has("/bin/systemctl daemon-reload"), false);
-      assert.equal(policy.has("/bin/systemctl restart com.agentos.unknown.service"), false);
+      const sudo = writeSudoPolicyStub(root);
+      const executePolicy = (args) => spawnSync(sudo, ["-n", "/bin/systemctl", ...args], {
+        encoding: "utf8",
+        env: { ...process.env, SUDOERS_POLICY: sudoersPath },
+      });
+      for (const label of SERVICE_LABELS) {
+        const unit = `${label}.service`;
+        assert.equal(executePolicy(["restart", unit]).status, 0, unit);
+        assert.equal(executePolicy(["show", "-p", "ExecStart", "--value", unit]).status, 0, unit);
+        assert.equal(executePolicy(["is-active", unit]).status, 0, unit);
+        assert.equal(executePolicy(["enable", unit]).status, 1, unit);
+      }
+      assert.equal(executePolicy(["daemon-reload"]).status, 1);
+      assert.equal(executePolicy(["restart", "com.agentos.unknown.service"]).status, 1);
+      assert.equal(executePolicy(["show", "-p", "ExecStart", "--value", "com.agentos.unknown.service"]).status, 1);
+      assert.equal(executePolicy(["is-active", "com.agentos.unknown.service"]).status, 1);
 
       const apiUnit = join(unitDirectory, "com.agentos.api.service");
       const installedApi = readFileSync(apiUnit, "utf8");
       writeFileSync(apiUnit, "operator mutation\n");
       const callsBeforeDrift = calls.length;
+      const execute = (_command, args) => { calls.push(args); return ""; };
       assert.throws(
         () => installStagedSystemdServices({
           repositoryRoot: root,
@@ -684,17 +783,23 @@ test("auto-deploy systemd stage renders a oneshot and timer, enabling only the t
       assert.match(renderAutoDeploySystemdTimer(), /^OnBootSec=60$/mu);
       const staged = planSystemdAutoDeploy({ ...options, apply: true });
       const calls = [];
+      const ownership = [];
       const execute = (_command, args) => { calls.push(args); return ""; };
       const installCode = installLaunchd(["--install-units", "--service-user", "anneal-test"], {
         ...options,
         manifestPath: staged.manifestPath,
         effectiveUid: 0,
         execute,
+        chown: (path, uid, gid) => ownership.push({ path, uid, gid }),
         environment: { AGENTOS_SERVICE_PLATFORM: "linux" },
       });
       assert.equal(installCode, 0);
       assert.deepEqual(calls, [["daemon-reload"], ["enable", "--now", "com.agentos.auto-deploy.timer"]]);
-      assert.equal(existsSync(join(unitDirectory, "com.agentos.auto-deploy.service")), true);
+      for (const entry of staged.manifest.entries) {
+        assert.equal(existsSync(entry.path), true, entry.path);
+        assert.equal(statSync(entry.path).mode & 0o777, 0o644, entry.path);
+        assert.equal(ownership.some((change) => change.path === entry.path && change.uid === 0 && change.gid === 0), true, entry.path);
+      }
       const planRevertCode = installLaunchd(["--revert", "--service-user", "anneal-test"], {
         ...options,
         manifestPath: staged.manifestPath,

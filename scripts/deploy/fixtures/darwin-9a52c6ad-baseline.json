@@ -16,6 +16,7 @@
     "com.agentos.web": "6431345192453213373b818ac1b7d929d62d5d9367b4974cf3fbfb9b25d9e7b3"
   },
   "autoDeployPlistSha256": "92edeacaa6c0c5024313f686f1901c53c58ee873ebf42ef91d3323f99783c99b",
+  "autoDeployPlanStdout": "PLAN label=com.agentos.auto-deploy\nPLAN destination=<HOME>/Library/LaunchAgents/com.agentos.auto-deploy.plist\nPLAN repository=<ROOT>\nPLAN node=<NODE>\nPLAN path=<CONTROLLED_PATH>\nPLAN git=<GIT>\nPLAN npm=<NPM>\nPLAN rendered_toolchain=verified\nPLAN pg_dump_mode=host\nPLAN pg_dump=/usr/bin/true\nPLAN no files or launchd state changed\n",
   "serviceManifestEntries": [
     "<ROOT>/shared/bin/agentos-service-wrapper.mjs",
     "<ROOT>/fixture-home/Library/LaunchAgents/com.agentos.api.plist",
