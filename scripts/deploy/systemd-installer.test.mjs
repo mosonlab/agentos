@@ -39,17 +39,6 @@ import {
 } from "./install-launchd.mjs";
 import { SERVICE_LABELS } from "./launchd-service-wrapper.mjs";
 
-const withLinux = async (work) => {
-  const previous = process.env.AGENTOS_SERVICE_PLATFORM;
-  process.env.AGENTOS_SERVICE_PLATFORM = "linux";
-  try {
-    return await work();
-  } finally {
-    if (previous === undefined) delete process.env.AGENTOS_SERVICE_PLATFORM;
-    else process.env.AGENTOS_SERVICE_PLATFORM = previous;
-  }
-};
-
 const withServicePlatform = async (platform, work) => {
   const previous = process.env.AGENTOS_SERVICE_PLATFORM;
   process.env.AGENTOS_SERVICE_PLATFORM = platform;
@@ -60,6 +49,8 @@ const withServicePlatform = async (platform, work) => {
     else process.env.AGENTOS_SERVICE_PLATFORM = previous;
   }
 };
+
+const withLinux = (work) => withServicePlatform("linux", work);
 
 const prepareManifestValidationCase = (platform) => {
   const root = mkdtempSync(join(tmpdir(), `agentos-${platform}-manifest-invalid-`));
@@ -85,6 +76,7 @@ const prepareManifestValidationCase = (platform) => {
     return {
       root,
       manifestPath,
+      restage: () => installLaunchdServices(options),
       invoke: () => installStagedSystemdServices({
         ...options,
         effectiveUid: 0,
@@ -128,6 +120,19 @@ const assertManifestValidationFailure = ({ platform, field, mutate }) => {
       const manifest = JSON.parse(readFileSync(prepared.manifestPath, "utf8"));
       if (mutate === "entries-null") manifest.entries[1] = null;
       if (mutate === "entry-path-missing") delete manifest.entries[1].path;
+      if (mutate === "entry-label-missing") delete manifest.entries[1].label;
+      if (mutate === "entry-pending-install-false") manifest.entries[1].pendingInstall = false;
+      if (mutate === "retired-entries-null") manifest.retiredEntries = [null];
+      if (mutate === "retired-entry-label-missing") {
+        manifest.retiredEntries = [
+          { ...manifest.entries[1] },
+          { ...manifest.entries[2] },
+        ];
+        delete manifest.retiredEntries[1].label;
+      }
+      if (mutate === "staging-root-number") manifest.stagingRoot = 42;
+      if (mutate === "unit-directory-number") manifest.unitDirectory = 42;
+      if (mutate === "sudoers-path-number") manifest.sudoersPath = 42;
       if (mutate === "runner-count-string") {
         manifest.renderInputs = { ...manifest.renderInputs, runnerCount: "10" };
       }
@@ -148,18 +153,46 @@ const assertManifestValidationFailure = ({ platform, field, mutate }) => {
   }
 };
 
-for (const { name, mutate, field } of [
-  { name: "an unparseable manifest", mutate: "unparseable", field: [/manifest/u] },
+for (const { name, mutate, field, platforms = ["linux", "darwin"] } of [
+  { name: "an unparseable manifest", mutate: "unparseable", field: [/unparseable/u] },
   { name: "a null manifest entry", mutate: "entries-null", field: [/entries[^\n]*1/u] },
   { name: "a manifest entry missing path", mutate: "entry-path-missing", field: [/entries[^\n]*1[^\n]*path/u] },
+  { name: "a manifest entry missing label", mutate: "entry-label-missing", field: [/entries[^\n]*1[^\n]*label/u] },
+  { name: "a manifest entry with pendingInstall false", mutate: "entry-pending-install-false", field: [/entries[^\n]*1[^\n]*pendingInstall/u] },
+  { name: "a null retired manifest entry", mutate: "retired-entries-null", field: [/retiredEntries[^\n]*0/u] },
+  { name: "a retired manifest entry missing label", mutate: "retired-entry-label-missing", field: [/retiredEntries[^\n]*1[^\n]*label/u] },
   { name: "a manifest renderInputs runnerCount string", mutate: "runner-count-string", field: [/renderInputs[^\n]*runnerCount/u] },
+  { name: "a numeric stagingRoot", mutate: "staging-root-number", field: [/stagingRoot/u], platforms: ["linux"] },
+  { name: "a numeric unitDirectory", mutate: "unit-directory-number", field: [/unitDirectory/u], platforms: ["linux"] },
+  { name: "a numeric sudoersPath", mutate: "sudoers-path-number", field: [/sudoersPath/u], platforms: ["linux"] },
 ]) {
-  test(`${name} is refused with a named error on both service platforms`, async () => {
-    for (const platform of ["linux", "darwin"]) {
+  test(`${name} is refused with a named error on each applicable service platform`, async () => {
+    for (const platform of platforms) {
       await withServicePlatform(platform, () => assertManifestValidationFailure({ platform, field, mutate }));
     }
   });
 }
+
+test("Linux restaging validates manifest entries before indexing them by path", async () => {
+  await withLinux(() => {
+    const prepared = prepareManifestValidationCase("linux");
+    try {
+      const manifest = JSON.parse(readFileSync(prepared.manifestPath, "utf8"));
+      manifest.entries[1] = null;
+      writeFileSync(prepared.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+      assert.throws(prepared.restage, (error) => {
+        assert.match(error.message, /systemd-service-manifest-invalid/u);
+        assert.match(error.message, new RegExp(escapeRegExp(prepared.manifestPath), "u"));
+        assert.match(error.message, /entries[^\n]*1/u);
+        assert.notEqual(error.name, "TypeError");
+        assert.notEqual(error.name, "SyntaxError");
+        return true;
+      });
+    } finally {
+      rmSync(prepared.root, { recursive: true, force: true });
+    }
+  });
+});
 
 const accountLookup = () => "anneal-test:x:620:620::/var/lib/anneal-test:/bin/bash";
 const digest = (contents) => createHash("sha256").update(contents).digest("hex");
@@ -1370,6 +1403,67 @@ test("a partial shrink leaves each manifest aligned with the units still present
     else process.env.AGENTOS_SERVICE_PLATFORM = previousPlatform;
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("Darwin normalizes legacy retired entries before another partial shrink", async () => {
+  await withServicePlatform("darwin", () => {
+    const root = mkdtempSync(join(tmpdir(), "agentos-launchd-legacy-retired-shrink-"));
+    const home = join(root, "home");
+    const manifestPath = join(root, ".agentos-deploy/launchd/manifest.json");
+    try {
+      mkdirSync(join(root, "shared"), { recursive: true });
+      writeFileSync(join(root, "shared/.env"), "DATABASE_URL=configured\n");
+      mkdirSync(join(root, "releases/release-1"), { recursive: true });
+      symlinkSync("releases/release-1", join(root, "current"));
+      const common = {
+        repositoryRoot: root,
+        userHome: home,
+        nodeBinary: process.execPath,
+        gitBinary: process.execPath,
+        effectiveUid: 501,
+        apply: true,
+      };
+      installLaunchdServices({ ...common, environment: { AGENTOS_RUNNER_COUNT: "3" } });
+
+      let failingLabel = "com.agentos.runner-3";
+      const unloaded = new Set();
+      const execute = (_command, args) => {
+        if (args[0] === "print" && unloaded.has(args[1])) throw launchdNotFound();
+        if (failingLabel && args[0] === "bootout" && args[1].endsWith(failingLabel)) throw new Error("stop failed");
+        if (args[0] === "bootout") unloaded.add(args[1]);
+        return "";
+      };
+      assert.throws(() => installLaunchdServices({
+        ...common,
+        environment: { AGENTOS_RUNNER_COUNT: "2" },
+        execute,
+      }), /launchd-service-removal-failed:com\.agentos\.runner-3/u);
+
+      const legacyManifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+      for (const entry of legacyManifest.retiredEntries) delete entry.label;
+      writeFileSync(manifestPath, `${JSON.stringify(legacyManifest, null, 2)}\n`);
+
+      failingLabel = "com.agentos.runner-2";
+      assert.throws(() => installLaunchdServices({
+        ...common,
+        environment: { AGENTOS_RUNNER_COUNT: "1" },
+        execute,
+      }), /launchd-service-removal-failed:com\.agentos\.runner-2/u);
+      const normalized = JSON.parse(readFileSync(manifestPath, "utf8"));
+      assert.equal(normalized.retiredEntries.every((entry) => typeof entry.label === "string"), true);
+
+      failingLabel = null;
+      installLaunchdServices({
+        ...common,
+        environment: { AGENTOS_RUNNER_COUNT: "1" },
+        execute,
+      });
+      const completed = JSON.parse(readFileSync(manifestPath, "utf8"));
+      assert.equal(completed.retiredEntries, undefined);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 test("systemd shrink retries daemon-reload after all retired units were removed", async () => {

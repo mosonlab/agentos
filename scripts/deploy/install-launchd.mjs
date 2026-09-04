@@ -28,6 +28,7 @@ import { fileURLToPath } from "node:url";
 import { resolveServicePlatform } from "./service-platform.mjs";
 
 import {
+  MAX_RUNNER_COUNT,
   SERVICE_INVENTORY_ENTRIES,
   generateServiceInventory,
   resolveRunnerIdPrefix,
@@ -884,18 +885,17 @@ const validateSudoers = ({ path, visudoPath, execute = execFileSync }) => {
 };
 
 const fileDigest = (path) => existsSync(path) ? sha256(readFileSync(path)) : null;
-const invalidManifest = (reason, manifestPath, field = "manifest") => {
+const invalidManifest = (reason, manifestPath, field) => {
   const detail = [manifestPath, field].filter((value) => value !== undefined && value !== null && value !== "").join(":");
   throw new DeployFailure(reason, detail);
 };
 
 const readJsonFile = (path, reason) => {
   try { return JSON.parse(readFileSync(path, "utf8")); }
-  catch { invalidManifest(reason, path, "manifest"); }
+  catch { invalidManifest(reason, path, "unparseable"); }
 };
 
-const validateManifestEntries = ({ entries, arrayName, reason, manifestPath, requireLabel = () => true }) => {
-  if (!Array.isArray(entries)) return false;
+const validateManifestEntries = ({ entries, arrayName, reason, manifestPath, requireLabel }) => {
   for (const [index, entry] of entries.entries()) {
     const entryField = `${arrayName}[${index}]`;
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
@@ -911,7 +911,28 @@ const validateManifestEntries = ({ entries, arrayName, reason, manifestPath, req
       invalidManifest(reason, manifestPath, `${entryField}.pendingInstall`);
     }
   }
-  return true;
+};
+
+const validateManifestEntryArrays = ({ manifest, reason, manifestPath, arrays }) => {
+  for (const { arrayName, required, requireLabel } of arrays) {
+    const entries = manifest[arrayName];
+    if (entries === undefined && !required) continue;
+    if (!Array.isArray(entries)) invalidManifest(reason, manifestPath, arrayName);
+    validateManifestEntries({
+      entries,
+      arrayName,
+      reason,
+      manifestPath,
+      requireLabel: requireLabel(entries),
+    });
+  }
+};
+
+const manifestStringField = ({ manifest, reason, manifestPath, field }) => {
+  if (typeof manifest?.[field] !== "string" || manifest[field] === "") {
+    invalidManifest(reason, manifestPath, field);
+  }
+  return manifest[field];
 };
 
 const validateManifestRenderInputs = ({
@@ -936,7 +957,7 @@ const validateManifestRenderInputs = ({
       || typeof renderInputs.runnerCount !== "number"
       || !Number.isSafeInteger(renderInputs.runnerCount)
       || renderInputs.runnerCount < 1
-      || renderInputs.runnerCount > 64) {
+      || renderInputs.runnerCount > MAX_RUNNER_COUNT) {
     invalidManifest(reason, manifestPath, "renderInputs.runnerCount");
   }
   if (renderInputs.runnerIdPrefix !== undefined) {
@@ -1046,7 +1067,7 @@ const readStageEntries = ({
   if (typeof runnerCount !== "number"
       || !Number.isSafeInteger(runnerCount)
       || runnerCount < 1
-      || runnerCount > 64) {
+      || runnerCount > MAX_RUNNER_COUNT) {
     invalidManifest(reason, manifestPath, "runnerCount");
   }
   if (renderInputs.runnerCount !== runnerCount) {
@@ -1058,45 +1079,28 @@ const readStageEntries = ({
   }
   let inventory;
   try { inventory = inventoryForCount(runnerCount, recordedRunnerIdPrefix); } catch { invalidManifest(reason, manifestPath, "renderInputs"); }
-  const recordedStageRoot = typeof manifest.stagingRoot === "string"
-    ? manifest.stagingRoot
-    : join(root, SERVICE_INSTALL_ROOT, "staging");
+  const recordedStageRoot = manifestStringField({ manifest, reason, manifestPath, field: "stagingRoot" });
+  manifestStringField({ manifest, reason, manifestPath, field: "unitDirectory" });
+  manifestStringField({ manifest, reason, manifestPath, field: "sudoersPath" });
   const stageRoot = resolve(recordedStageRoot);
   assertContainedPath(stageRoot, join(root, SERVICE_INSTALL_ROOT));
-  if (!Array.isArray(manifest.entries)) invalidManifest(reason, manifestPath, "entries");
-  if (!Array.isArray(manifest.auxiliaryEntries)) invalidManifest(reason, manifestPath, "auxiliaryEntries");
-  if (!manifest || manifest.schemaVersion !== 1 || manifest.platform !== "linux"
+  validateManifestEntryArrays({
+    manifest,
+    reason,
+    manifestPath,
+    arrays: [
+      { arrayName: "entries", required: true, requireLabel: () => (entry) => entry.kind === "service" },
+      { arrayName: "auxiliaryEntries", required: true, requireLabel: () => () => false },
+      { arrayName: "retiredEntries", required: false, requireLabel: () => (entry) => entry.kind === "service" },
+    ],
+  });
+  if (manifest.schemaVersion !== 1 || manifest.platform !== "linux"
       || manifest.repositoryRoot !== resolve(root) || manifest.stagingRoot !== stageRoot
       || manifest.unitDirectory !== unitDirectory || manifest.sudoersPath !== sudoersPath
       || manifest.systemctlPath !== "/bin/systemctl"
       || (manifest.reloadPending !== undefined && manifest.reloadPending !== true)
-      || !Array.isArray(manifest.entries) || manifest.entries.length !== inventory.length + 1
-      || !Array.isArray(manifest.auxiliaryEntries) || !manifest.renderInputs) {
+      || manifest.entries.length !== inventory.length + 1) {
     invalidManifest(reason, manifestPath);
-  }
-  validateManifestEntries({
-    entries: manifest.entries,
-    arrayName: "entries",
-    reason,
-    manifestPath,
-    requireLabel: (entry) => entry.kind === "service",
-  });
-  validateManifestEntries({
-    entries: manifest.auxiliaryEntries,
-    arrayName: "auxiliaryEntries",
-    reason,
-    manifestPath,
-    requireLabel: () => false,
-  });
-  if (manifest.retiredEntries !== undefined) {
-    if (!Array.isArray(manifest.retiredEntries)) invalidManifest(reason, manifestPath, "retiredEntries");
-    validateManifestEntries({
-      entries: manifest.retiredEntries,
-      arrayName: "retiredEntries",
-      reason,
-      manifestPath,
-      requireLabel: (entry) => entry.kind === "service",
-    });
   }
   const account = resolveSystemdServiceUser({ serviceUser, platform: "linux", lookup: userLookup, execute });
   if (account !== manifest.serviceUser) throw new Error("systemd-service-user-manifest-mismatch");
@@ -1181,14 +1185,8 @@ const readStageEntries = ({
       }
     }
   }
-  let resolvedNodeBinary;
-  try {
-    resolvedNodeBinary = typeof renderInputs.nodeBinary === "string" ? resolve(renderInputs.nodeBinary) : null;
-  } catch {
-    resolvedNodeBinary = null;
-  }
   if (typeof renderInputs.nodeBinary !== "string" || renderInputs.nodeBinary === ""
-      || renderInputs.nodeBinary !== resolvedNodeBinary
+      || renderInputs.nodeBinary !== resolve(renderInputs.nodeBinary)
       || typeof renderInputs.path !== "string" || renderInputs.path === "") {
     invalidManifest(reason, manifestPath, "renderInputs");
   }
@@ -1560,32 +1558,27 @@ const systemdStagePlan = ({
   const previousManifest = existsSync(manifestPath)
     ? readJsonFile(manifestPath, "systemd-service-manifest-invalid")
     : null;
-  const requestedStageRoot = resolve(stagingRoot ?? join(root, SERVICE_INSTALL_ROOT, "staging"));
-  const previousStageRoot = typeof previousManifest?.stagingRoot === "string"
-    ? resolve(previousManifest.stagingRoot)
+  const previousValidated = previousManifest
+    ? readStageEntries({
+        manifest: previousManifest,
+        manifestPath,
+        root,
+        unitDirectory: resolvedUnitDirectory,
+        sudoersPath: resolvedSudoersPath,
+        serviceUser: account,
+        runnerIdPrefix,
+        userLookup,
+        execute,
+      })
     : null;
+  const requestedStageRoot = resolve(stagingRoot ?? join(root, SERVICE_INSTALL_ROOT, "staging"));
+  const previousStageRoot = previousValidated?.stageRoot ?? null;
   const stageRoot = previousManifest && requestedStageRoot === previousStageRoot
     ? join(root, SERVICE_INSTALL_ROOT, `staging-${randomUUID()}`)
     : requestedStageRoot;
   assertContainedPath(stageRoot, join(root, SERVICE_INSTALL_ROOT));
-  if (previousManifest && (previousManifest.renderInputs?.runnerIdPrefix ?? "") !== runnerIdPrefix) {
-    throw new Error("systemd-runner-id-prefix-manifest-mismatch");
-  }
-  const previousByPath = new Map(Array.isArray(previousManifest?.entries)
-    ? previousManifest.entries.map((entry) => [entry.path, entry])
-    : []);
+  const previousByPath = new Map(previousManifest?.entries.map((entry) => [entry.path, entry]) ?? []);
   if (previousManifest) {
-    readStageEntries({
-      manifest: previousManifest,
-      manifestPath,
-      root,
-      unitDirectory: resolvedUnitDirectory,
-      sudoersPath: resolvedSudoersPath,
-      serviceUser: account,
-      runnerIdPrefix,
-      userLookup,
-      execute,
-    });
     for (const entry of [...previousManifest.entries, ...previousManifest.auxiliaryEntries]) {
       const currentSha = fileDigest(entry.path);
       if (!existsSync(entry.path)
@@ -1823,12 +1816,9 @@ export const installStagedSystemdServices = ({
   const writeServiceManifest = (contents) => writeAtomic(path, contents, manifestMode, manifestOwnership, chown);
   const manifest = readJsonFile(path, "systemd-service-manifest-invalid");
   const runnerIdPrefix = resolveRunnerIdPrefix(environment);
-  const recordedUnitDirectory = typeof manifest?.unitDirectory === "string"
-    ? manifest.unitDirectory
-    : SYSTEMD_UNIT_DIRECTORY;
-  const recordedSudoersPath = typeof manifest?.sudoersPath === "string"
-    ? manifest.sudoersPath
-    : SYSTEMD_SUDOERS_PATH;
+  const reason = "systemd-service-manifest-invalid";
+  const recordedUnitDirectory = manifestStringField({ manifest, reason, manifestPath: path, field: "unitDirectory" });
+  const recordedSudoersPath = manifestStringField({ manifest, reason, manifestPath: path, field: "sudoersPath" });
   const resolvedUnitDirectory = resolve(unitDirectory ?? recordedUnitDirectory);
   const resolvedSudoersPath = resolve(sudoersPath ?? recordedSudoersPath);
   const validated = readStageEntries({
@@ -2080,12 +2070,9 @@ const installLinuxServices = (options = {}) => {
     const path = options.manifestPath ?? systemdManifestPath(root);
     if (!existsSync(path)) throw new Error("systemd-service-manifest-missing");
     const manifest = readJsonFile(path, "systemd-service-manifest-invalid");
-    const recordedUnitDirectory = typeof manifest?.unitDirectory === "string"
-      ? manifest.unitDirectory
-      : SYSTEMD_UNIT_DIRECTORY;
-    const recordedSudoersPath = typeof manifest?.sudoersPath === "string"
-      ? manifest.sudoersPath
-      : SYSTEMD_SUDOERS_PATH;
+    const reason = "systemd-service-manifest-invalid";
+    const recordedUnitDirectory = manifestStringField({ manifest, reason, manifestPath: path, field: "unitDirectory" });
+    const recordedSudoersPath = manifestStringField({ manifest, reason, manifestPath: path, field: "sudoersPath" });
     const resolvedUnitDirectory = resolve(options.unitDirectory ?? recordedUnitDirectory);
     const resolvedSudoersPath = resolve(options.sudoersPath ?? recordedSudoersPath);
     const validated = readStageEntries({
@@ -2137,28 +2124,31 @@ const validateServiceManifest = (manifest, repositoryRoot, manifestPath) => {
       || manifest.schemaVersion !== 1 || manifest.repositoryRoot !== resolve(repositoryRoot)) {
     invalidManifest(reason, manifestPath);
   }
-  if (!Array.isArray(manifest.entries)) invalidManifest(reason, manifestPath, "entries");
-  const legacyServiceEntries = manifest.entries.slice(1).every((entry) =>
-    entry && typeof entry === "object" && !Array.isArray(entry) && !Object.hasOwn(entry, "label"));
-  validateManifestEntries({
-    entries: manifest.entries,
-    arrayName: "entries",
+  validateManifestEntryArrays({
+    manifest,
     reason,
     manifestPath,
-    requireLabel: (_entry, index) => index > 0 && !legacyServiceEntries,
+    arrays: [
+      {
+        arrayName: "entries",
+        required: true,
+        requireLabel: (entries) => {
+          const legacyServiceEntries = entries.slice(1).every((entry) =>
+            entry && typeof entry === "object" && !Array.isArray(entry) && !Object.hasOwn(entry, "label"));
+          return (_entry, index) => index > 0 && !legacyServiceEntries;
+        },
+      },
+      {
+        arrayName: "retiredEntries",
+        required: false,
+        requireLabel: (entries) => {
+          const legacyRetiredEntries = entries.every((entry) =>
+            entry && typeof entry === "object" && !Array.isArray(entry) && !Object.hasOwn(entry, "label"));
+          return () => !legacyRetiredEntries;
+        },
+      },
+    ],
   });
-  if (manifest.retiredEntries !== undefined) {
-    if (!Array.isArray(manifest.retiredEntries)) invalidManifest(reason, manifestPath, "retiredEntries");
-    const legacyRetiredEntries = manifest.retiredEntries.every((entry) =>
-      entry && typeof entry === "object" && !Array.isArray(entry) && !Object.hasOwn(entry, "label"));
-    validateManifestEntries({
-      entries: manifest.retiredEntries,
-      arrayName: "retiredEntries",
-      reason,
-      manifestPath,
-      requireLabel: () => !legacyRetiredEntries,
-    });
-  }
   const renderInputs = validateManifestRenderInputs({
     manifest,
     reason,
@@ -2389,7 +2379,11 @@ export const installLaunchdServices = ({
     ...(previous?.manifest.entries ?? []),
     ...(previous?.manifest.retiredEntries ?? []),
   ].filter((entry, index, candidates) => !desiredPaths.has(entry.path)
-    && candidates.findIndex((candidate) => candidate.path === entry.path) === index);
+    && candidates.findIndex((candidate) => candidate.path === entry.path) === index)
+    .map((entry) => Object.hasOwn(entry, "label") ? entry : {
+      ...entry,
+      label: entry.path.slice(entry.path.lastIndexOf("/") + 1, -".plist".length),
+    });
   for (const entry of retiredEntries) {
     if (entry.existed) throw new Error(`launchd-service-shrink-owned-unit-refused:${entry.path}`);
     if (!existsSync(entry.path) || sha256(readFileSync(entry.path)) !== entry.installedSha256) {
