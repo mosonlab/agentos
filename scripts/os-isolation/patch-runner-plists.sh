@@ -36,7 +36,23 @@ for arg in "$@"; do
   esac
 done
 
-RUNNER_COUNT="${RUNNER_COUNT:-8}"
+ACCOUNT_COUNT="${ACCOUNT_COUNT-8}"
+SERVICE_RUNNER_COUNT_VALUE="${AGENTOS_RUNNER_COUNT-10}"
+case "$SERVICE_RUNNER_COUNT_VALUE" in
+  ''|*[!0-9]*) echo "runner-count-invalid:$SERVICE_RUNNER_COUNT_VALUE" >&2; exit 64 ;;
+esac
+if [ "$SERVICE_RUNNER_COUNT_VALUE" -lt 1 ] || [ "$SERVICE_RUNNER_COUNT_VALUE" -gt 64 ]; then
+  echo "runner-count-invalid:$SERVICE_RUNNER_COUNT_VALUE" >&2
+  exit 64
+fi
+RUNNER_SERVICE_COUNT="$SERVICE_RUNNER_COUNT_VALUE"
+case "$ACCOUNT_COUNT" in
+  ''|*[!0-9]*) echo "account-count-invalid:$ACCOUNT_COUNT" >&2; exit 64 ;;
+esac
+if [ "$ACCOUNT_COUNT" -lt 1 ]; then
+  echo "account-count-invalid:$ACCOUNT_COUNT" >&2
+  exit 64
+fi
 ACCOUNT_PREFIX="${ACCOUNT_PREFIX:-_agentos}"
 BASE_UID="${BASE_UID:-620}"
 AGENTOS_PREFIX="${AGENTOS_PREFIX:-/opt/agentos}"
@@ -49,6 +65,20 @@ AGENT_DIR="${AGENT_DIR:-$HOME/Library/LaunchAgents}"
 BACKUP_SUFFIX=".pre-os-isolation.bak"
 PLIST_BUDDY=/usr/libexec/PlistBuddy
 API_LABEL="com.agentos.api"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPOSITORY_ROOT="${REPOSITORY_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
+SERVICE_PLATFORM_HELPER="$SCRIPT_DIR/../deploy/service-platform.sh"
+if [ ! -r "$SERVICE_PLATFORM_HELPER" ]; then
+  echo "service-platform-resolver-missing:$SERVICE_PLATFORM_HELPER" >&2
+  exit 64
+fi
+# All shell callers use the same resolver. It is also what allows tests to
+# exercise both branches on one host without pretending uname returned another
+# value.
+. "$SERVICE_PLATFORM_HELPER"
+if ! SERVICE_PLATFORM="$(resolve_service_platform)"; then
+  exit 64
+fi
 
 if [ "$(id -u)" = 0 ]; then
   echo "Do not run this as root: it would rewrite the operator's LaunchAgents as root-owned files." >&2
@@ -75,13 +105,476 @@ run() {
 buddy_get()    { "$PLIST_BUDDY" -c "Print :EnvironmentVariables:$2" "$1" 2>/dev/null || true; }
 buddy_has()    { "$PLIST_BUDDY" -c "Print :EnvironmentVariables:$2" "$1" >/dev/null 2>&1; }
 label_for()    { if [ "$1" = 1 ]; then printf 'com.agentos.runner'; else printf 'com.agentos.runner-%s' "$1"; fi; }
-account_for()  { printf '%s%s' "$ACCOUNT_PREFIX" "$1"; }
+account_index_for() { printf '%s' "$(( ( $1 - 1 ) % ACCOUNT_COUNT + 1 ))"; }
+account_for()  { printf '%s%s' "$ACCOUNT_PREFIX" "$(account_index_for "$1")"; }
 manifest_for() { printf '%s/%s.manifest' "$MANIFEST_DIR" "$1"; }
 # `|| true` on both: dscl exits non-zero for an account that does not exist, and
 # with `set -o pipefail` that would end the script through `set -e` instead of
 # reaching the pre-flight message that says which account is missing.
 dscl_value()   { dscl . -read "$1" "$2" 2>/dev/null | awk '{ $1=""; sub(/^ /,""); print }' || true; }
-sha256_of()    { shasum -a 256 "$1" 2>/dev/null | awk '{print $1}' || true; }
+sha256_of() {
+  if [ "$SERVICE_PLATFORM" = linux ] && command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" 2>/dev/null | awk '{print $1}' || true
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" 2>/dev/null | awk '{print $1}' || true
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" 2>/dev/null | awk '{print $1}' || true
+  else
+    true
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Linux systemd drop-ins.  The launchd implementation below is deliberately
+# left in its historical shape; Linux has no plist file to edit, so it stages a
+# small drop-in that carries the same environment contract.  The drop-in is
+# owned by the unprivileged installer and is later copied into /etc by the
+# privileged service installer.
+# ---------------------------------------------------------------------------
+SYSTEMD_STAGING_DIR="${SYSTEMD_STAGING_DIR:-${AGENTOS_SYSTEMD_STAGING_DIR:-${AGENTOS_DEPLOY_STAGING_DIR:-${AGENTOS_INSTALL_ROOT:-${STAGING_DIR:-$REPOSITORY_ROOT/.agentos-deploy/systemd}}}}}"
+if [ "$SERVICE_PLATFORM" = linux ] && [ "$MANIFEST_DIR" = "$AGENTOS_PREFIX/etc/plist-manifest" ]; then
+  MANIFEST_DIR="$SYSTEMD_STAGING_DIR/plist-manifest"
+fi
+
+LINUX_RUNNER_KEYS=(
+  RUNNER_RUN_AS_PREFIX
+  RUNNER_HOME
+  RUNNER_WORKSPACE_ROOT
+  RUNNER_MCP_SERVER_PATH
+  RUNNER_PI_EXTENSION_PATH
+  RUNNER_CLAUDE_SETTINGS_PATH
+  RUNNER_SESSION_CONFIG_BASELINE_ROOT
+  RUNNER_PATH
+)
+LINUX_API_KEYS=(
+  RUNNER_WORKSPACE_ROOT
+  RUNNER_RUN_AS_PREFIX
+  RUNNER_HOME
+  RUNNER_REPO_MIRROR_ROOT
+)
+
+linux_is_managed_key_for_label() {
+  local label="$1" wanted="$2" key
+  if [ "$label" = "$API_LABEL" ]; then
+    for key in "${LINUX_API_KEYS[@]}"; do
+      [ "$key" = "$wanted" ] && return 0
+    done
+  else
+    for key in "${LINUX_RUNNER_KEYS[@]}"; do
+      [ "$key" = "$wanted" ] && return 0
+    done
+  fi
+  return 1
+}
+
+# Print the key represented by one Environment= assignment.  One assignment
+# per line is what this script writes; accepting an unquoted spelling as well
+# makes a hand-edited drop-in fail/revert predictably rather than lose a key.
+linux_dropin_line_key() {
+  local line="$1" value
+  line="${line#"${line%%[![:space:]]*}"}"
+  case "$line" in
+    Environment=*) value="${line#Environment=}" ;;
+    *) return 1 ;;
+  esac
+  value="${value#\"}"
+  value="${value%%\"}"
+  case "$value" in
+    *=*) printf '%s\n' "${value%%=*}" ;;
+    *) return 1 ;;
+  esac
+}
+
+linux_systemd_unescape() {
+  # The corresponding encoder below quotes whitespace and doubles percent
+  # signs (systemd specifier escaping).  Decode only those forms here; values
+  # outside this script's managed contract remain byte-for-byte untouched.
+  printf '%s\n' "$1" | sed 's/\\\\"/\"/g; s/\\\\\\\\/\\\\/g; s/%%/%/g'
+}
+
+linux_dropin_value() {
+  local file="$1" wanted="$2" line key value
+  [ -f "$file" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    key="$(linux_dropin_line_key "$line" 2>/dev/null || true)"
+    [ "$key" = "$wanted" ] || continue
+    line="${line#"${line%%[![:space:]]*}"}"
+    value="${line#Environment=}";
+    value="${value#\"}"; value="${value%%\"}"
+    value="${value#*=}"
+    linux_systemd_unescape "$value"
+    return 0
+  done < "$file"
+  return 1
+}
+
+linux_dropin_has() {
+  linux_dropin_value "$1" "$2" >/dev/null 2>&1
+}
+
+linux_systemd_quote() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//%/%%}"
+  printf '"%s"' "$value"
+}
+
+linux_dropin_assignment() {
+  printf 'Environment=%s\n' "$(linux_systemd_quote "$1=$2")"
+}
+
+linux_write_dropin() {
+  local file="$1" desired="$2" label="$3" temp line key service_seen=0 saw_service=0 inserted=0
+  if [ "$APPLY" != 1 ]; then
+    plan "write $file"
+    return 0
+  fi
+  mkdir -p "$(dirname "$file")"
+  temp="$file.tmp.$$"
+  : > "$temp"
+  if [ -f "$file" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        "[Service]")
+          service_seen=1
+          saw_service=1
+          printf '%s\n' "$line" >> "$temp"
+          ;;
+        \[*\])
+          if [ "$service_seen" = 1 ] && [ "$inserted" = 0 ]; then
+            while IFS=$'\t' read -r key value; do
+              [ -n "$key" ] || continue
+              linux_dropin_assignment "$key" "$value" >> "$temp"
+            done <<EOF
+$desired
+EOF
+            inserted=1
+          fi
+          service_seen=0
+          printf '%s\n' "$line" >> "$temp"
+          ;;
+        *)
+          key="$(linux_dropin_line_key "$line" 2>/dev/null || true)"
+          if [ -n "$key" ] && linux_is_managed_key_for_label "$label" "$key"; then
+            continue
+          fi
+          printf '%s\n' "$line" >> "$temp"
+          ;;
+      esac
+    done < "$file"
+  fi
+  if [ "$saw_service" = 0 ]; then
+    printf '[Service]\n' >> "$temp"
+    service_seen=1
+  fi
+  if [ "$service_seen" = 1 ] && [ "$inserted" = 0 ]; then
+    while IFS=$'\t' read -r key value; do
+      [ -n "$key" ] || continue
+      linux_dropin_assignment "$key" "$value" >> "$temp"
+    done <<EOF
+$desired
+EOF
+  fi
+  chmod 0644 "$temp"
+  mv "$temp" "$file"
+}
+
+linux_manifest_before_line() {
+  local file="$1" key="$2" current
+  if linux_dropin_has "$file" "$key"; then
+    current="$(linux_dropin_value "$file" "$key")"
+    printf 'before\t%s\tvalue\t%s\n' "$key" "$current"
+  else
+    printf 'before\t%s\tabsent\n' "$key"
+  fi
+}
+
+linux_record_before() {
+  local file="$1" key="$2" manifest="$3" existing=""
+  if [ -f "$manifest" ]; then
+    existing="$(awk -F'\t' -v k="$key" '$1 == "before" && $2 == k' "$manifest")"
+  fi
+  if [ -n "$existing" ]; then
+    manifest_records="${manifest_records}${existing}"$'\n'
+  else
+    manifest_records="${manifest_records}$(linux_manifest_before_line "$file" "$key")"$'\n'
+  fi
+}
+
+linux_set_env() {
+  local file="$1" label="$2" key="$3" value="$4" manifest="$5" current
+  case "$value" in
+    *$'\t'*|*$'\n'*) fail "$label: refusing to manage $key: the value contains a tab or newline and could not be recorded"; return ;;
+  esac
+  linux_record_before "$file" "$key" "$manifest"
+  manifest_records="${manifest_records}$(printf 'after\t%s\t%s' "$key" "$value")"$'\n'
+  linux_desired_records="${linux_desired_records}$(printf '%s\t%s' "$key" "$value")"$'\n'
+  current="$(linux_dropin_value "$file" "$key" 2>/dev/null || true)"
+  if linux_dropin_has "$file" "$key" && [ "$current" = "$value" ]; then
+    ok "$label: $key already $value"
+  else
+    changed=$((changed + 1))
+  fi
+}
+
+linux_write_manifest() {
+  local label="$1" file="$2" manifest tmp
+  manifest="$(manifest_for "$label")"
+  carry_forward_records_linux "$manifest"
+  if [ "$APPLY" != 1 ]; then
+    plan "write $manifest ($(printf '%s' "$manifest_records" | grep -c '^before' || true) key(s) recorded)"
+    return 0
+  fi
+  mkdir -p "$MANIFEST_DIR"
+  tmp="$manifest.tmp.$$"
+  {
+    printf '# Written by scripts/os-isolation/patch-runner-plists.sh — --revert reads this.\n'
+    printf 'schema\t1\n'
+    printf 'plist\t%s\n' "$file"
+    printf '%s' "$manifest_records"
+    printf 'applied-sha256\t%s\n' "$(sha256_of "$file")"
+  } > "$tmp"
+  chmod 0600 "$tmp"
+  mv "$tmp" "$manifest"
+}
+
+carry_forward_records_linux() {
+  local manifest="$1" touched key line
+  [ -f "$manifest" ] || return 0
+  touched="$(printf '%s' "$manifest_records" | awk -F'\t' '$1 == "before" { print $2 }')"
+  while IFS= read -r line; do
+    case "$line" in
+      before*|after*) key="$(printf '%s' "$line" | awk -F'\t' '{print $2}')" ;;
+      *) continue ;;
+    esac
+    case " $(printf '%s' "$touched" | tr '\n' ' ') " in
+      *" $key "*) continue ;;
+    esac
+    manifest_records="${manifest_records}${line}"$'\n'
+  done < "$manifest"
+}
+
+linux_expected_keys() {
+  if [ "$1" = "$API_LABEL" ]; then
+    printf '%s\n' "${LINUX_API_KEYS[@]}"
+  else
+    printf '%s\n' "${LINUX_RUNNER_KEYS[@]}"
+  fi
+}
+
+linux_revert_dropin() {
+  local file="$1" manifest="$2" label="$3" restored="" kind key state value
+  [ -f "$file" ] || return 0
+  while IFS=$'\t' read -r kind key state value; do
+    [ "$kind" = before ] || continue
+    [ "$state" = value ] || continue
+    restored="${restored}$(printf '%s\t%s\n' "$key" "$value")"
+  done < "$manifest"
+  # Starting from the current file and replacing only managed lines leaves
+  # every unrecorded Environment= assignment and comment in place.
+  linux_desired_records="$restored"
+  linux_write_dropin "$file" "$linux_desired_records" "$label"
+}
+
+linux_account_field() {
+  local account="$1" field="$2" entry name password gecos
+  entry="$(getent passwd "$account" 2>/dev/null || true)"
+  [ -n "$entry" ] || return 1
+  IFS=: read -r name password uid gid gecos home shell <<EOF
+$entry
+EOF
+  case "$field" in
+    uid) printf '%s\n' "$uid" ;;
+    gid) printf '%s\n' "$gid" ;;
+    home) printf '%s\n' "$home" ;;
+    shell) printf '%s\n' "$shell" ;;
+  esac
+}
+
+linux_main() {
+  local i label account account_index file manifest runner_path asset uid expected_uid
+  local api_dropin api_manifest account1
+  SYSTEMD_STAGING_DIR="${SYSTEMD_STAGING_DIR%/}"
+  if [ "$APPLY" = 1 ]; then
+    mkdir -p "$SYSTEMD_STAGING_DIR" "$MANIFEST_DIR"
+  fi
+  printf 'Anneal runner systemd drop-ins — %s%s\n' \
+    "$([ "$REVERT" = 1 ] && echo 'REVERT ' || echo '')" \
+    "$([ "$APPLY" = 1 ] && echo APPLY || echo 'dry run (no changes)')"
+  printf '  staging     : %s\n' "$SYSTEMD_STAGING_DIR"
+  printf '  manifest    : %s\n' "$MANIFEST_DIR"
+
+  step "Linux pre-flight"
+  if ! command -v getent >/dev/null 2>&1; then
+    fail "system-account-reader-unavailable:getent"
+  fi
+  if [ "$REVERT" = 1 ]; then
+    for i in $(seq 1 "$RUNNER_SERVICE_COUNT"); do
+      label="$(label_for "$i")"
+      file="$SYSTEMD_STAGING_DIR/$label.service.d/os-isolation.conf"
+      manifest="$(manifest_for "$label")"
+      [ -f "$manifest" ] || fail "$label has no manifest at $manifest; there is no record of what to undo"
+      [ ! -f "$manifest" ] || [ -r "$manifest" ] || fail "$manifest is not readable"
+      # The file can be absent only after a prior successful revert; when a
+      # manifest is present it is a drift/error, not a reason to skip silently.
+      [ -f "$file" ] || fail "$label drop-in is missing at $file"
+    done
+    api_dropin="$SYSTEMD_STAGING_DIR/$API_LABEL.service.d/os-isolation.conf"
+    api_manifest="$(manifest_for "$API_LABEL")"
+    [ -f "$api_manifest" ] || fail "$API_LABEL has no manifest at $api_manifest; there is no record of what to undo"
+    [ -f "$api_dropin" ] || fail "$API_LABEL drop-in is missing at $api_dropin"
+  else
+    for i in $(seq 1 "$RUNNER_SERVICE_COUNT"); do
+      account="$(account_for "$i")"
+      account_index="$(account_index_for "$i")"
+      uid="$(linux_account_field "$account" uid 2>/dev/null || true)"
+      expected_uid=$((BASE_UID + account_index - 1))
+      if [ -z "$uid" ]; then
+        fail "$account does not exist; run provision.sh --apply first"
+      elif [ "$uid" != "$expected_uid" ]; then
+        fail "$account has uid $uid, expected $expected_uid; provision.sh and this script disagree about the account"
+      fi
+      [ "$(linux_account_field "$account" home 2>/dev/null || true)" = "$HOME_BASE/$account" ] \
+        || fail "$account home is '$(linux_account_field "$account" home 2>/dev/null || true)', expected $HOME_BASE/$account"
+    done
+    for asset in \
+      "$LIB_DIR/mcp-server.js" \
+      "$LIB_DIR/pi-agentos-extension.ts" \
+      "$LIB_DIR/claude-platform-settings.json" \
+      "$LIB_DIR/session-config-baseline/codex/config.toml"; do
+      [ -r "$asset" ] || fail "$asset is missing; run provision.sh --apply after building the runner"
+    done
+    [ -d "$WORKSPACE_ROOT" ] || fail "$WORKSPACE_ROOT does not exist; run provision.sh --apply first"
+  fi
+  if [ "$failures" -gt 0 ]; then
+    echo
+    echo "$failures pre-flight problem(s). Nothing was changed." >&2
+    return 1
+  fi
+  ok "pre-flight clean: $RUNNER_SERVICE_COUNT runner drop-ins and the API drop-in"
+
+  if [ "$REVERT" = 1 ]; then
+    step "revert pre-flight: has anything moved since the patch?"
+    for label in $(for i in $(seq 1 "$RUNNER_SERVICE_COUNT"); do label_for "$i"; done) "$API_LABEL"; do
+      [ -n "$label" ] || continue
+      file="$SYSTEMD_STAGING_DIR/$label.service.d/os-isolation.conf"
+      manifest="$(manifest_for "$label")"
+      expected_sha="$(awk -F'\t' '$1 == "applied-sha256" { print $2 }' "$manifest")"
+      current_sha="$(sha256_of "$file")"
+      [ "$current_sha" = "$expected_sha" ] || ok "$label has changed since it was patched; reverting only the recorded keys"
+      while IFS=$'\t' read -r kind key value; do
+        [ "$kind" = after ] || continue
+        current="$(linux_dropin_value "$file" "$key" 2>/dev/null || true)"
+        if [ "$current" != "$value" ]; then
+          if [ "$FORCE" = 1 ]; then
+            warn "$label: $key is '${current:-<unset>}', not the '$value' this script wrote — reverting anyway (--force)"
+          else
+            fail "$label: $key is '${current:-<unset>}', not the '$value' this script wrote; someone changed it deliberately. Re-run with --force to revert it anyway."
+          fi
+        fi
+      done < "$manifest"
+    done
+    if [ "$failures" -gt 0 ]; then
+      echo
+      echo "$failures managed key(s) no longer hold the value this script wrote. Nothing was changed." >&2
+      return 1
+    fi
+    step "field-level revert"
+    for label in $(for i in $(seq 1 "$RUNNER_SERVICE_COUNT"); do label_for "$i"; done) "$API_LABEL"; do
+      [ -n "$label" ] || continue
+      file="$SYSTEMD_STAGING_DIR/$label.service.d/os-isolation.conf"
+      manifest="$(manifest_for "$label")"
+      linux_revert_dropin "$file" "$manifest" "$label"
+      labels_touched+=("$label")
+    done
+    if [ "$APPLY" = 1 ]; then
+      for label in "${labels_touched[@]:-}"; do
+        [ -n "$label" ] || continue
+        file="$SYSTEMD_STAGING_DIR/$label.service.d/os-isolation.conf"
+        manifest="$(manifest_for "$label")"
+        for key in $(linux_expected_keys "$label"); do
+          # A before=absent key must be gone; a before=value key must match.
+          before_line="$(awk -F'\t' -v k="$key" '$1 == "before" && $2 == k { print; exit }' "$manifest")"
+          state="$(printf '%s' "$before_line" | awk -F'\t' '{print $3}')"
+          expected="$(printf '%s' "$before_line" | awk -F'\t' '{print $4}')"
+          current="$(linux_dropin_value "$file" "$key" 2>/dev/null || true)"
+          if [ "$state" = absent ]; then
+            linux_dropin_has "$file" "$key" && fail "$label: $key should have been removed but is '$current'"
+          elif [ "$current" != "$expected" ]; then
+            fail "$label: $key should be '$expected' but is '${current:-<unset>}'"
+          fi
+        done
+        mv "$manifest" "$manifest.reverted"
+        ok "$label reverted; record kept at $(basename "$manifest").reverted"
+      done
+    fi
+  else
+    for i in $(seq 1 "$RUNNER_SERVICE_COUNT"); do
+      label="$(label_for "$i")"
+      account="$(account_for "$i")"
+      file="$SYSTEMD_STAGING_DIR/$label.service.d/os-isolation.conf"
+      manifest="$(manifest_for "$label")"
+      step "$label -> $account"
+      manifest_records=""
+      linux_desired_records=""
+      linux_set_env "$file" "$label" RUNNER_RUN_AS_PREFIX "sudo -u $account -E --" "$manifest"
+      linux_set_env "$file" "$label" RUNNER_HOME "$HOME_BASE/$account" "$manifest"
+      linux_set_env "$file" "$label" RUNNER_WORKSPACE_ROOT "$WORKSPACE_ROOT" "$manifest"
+      linux_set_env "$file" "$label" RUNNER_MCP_SERVER_PATH "$LIB_DIR/mcp-server.js" "$manifest"
+      linux_set_env "$file" "$label" RUNNER_PI_EXTENSION_PATH "$LIB_DIR/pi-agentos-extension.ts" "$manifest"
+      linux_set_env "$file" "$label" RUNNER_CLAUDE_SETTINGS_PATH "$LIB_DIR/claude-platform-settings.json" "$manifest"
+      linux_set_env "$file" "$label" RUNNER_SESSION_CONFIG_BASELINE_ROOT "$LIB_DIR/session-config-baseline" "$manifest"
+      runner_path="${RUNNER_PATH:-$BIN_DIR}"
+      case ":$runner_path:" in
+        *":$BIN_DIR:"*) ;;
+        *) runner_path="$BIN_DIR${runner_path:+:$runner_path}" ;;
+      esac
+      linux_set_env "$file" "$label" RUNNER_PATH "$runner_path" "$manifest"
+      linux_write_dropin "$file" "$linux_desired_records" "$label"
+      linux_write_manifest "$label" "$file"
+      labels_touched+=("$label")
+    done
+
+    account1="$(account_for 1)"
+    api_dropin="$SYSTEMD_STAGING_DIR/$API_LABEL.service.d/os-isolation.conf"
+    api_manifest="$(manifest_for "$API_LABEL")"
+    step "$API_LABEL -> $account1"
+    manifest_records=""
+    linux_desired_records=""
+    linux_set_env "$api_dropin" "$API_LABEL" RUNNER_WORKSPACE_ROOT "$WORKSPACE_ROOT" "$api_manifest"
+    linux_set_env "$api_dropin" "$API_LABEL" RUNNER_HOME "$HOME_BASE/$account1" "$api_manifest"
+    linux_set_env "$api_dropin" "$API_LABEL" RUNNER_REPO_MIRROR_ROOT "$HOME_BASE/$account1/.agentos/repo-mirrors" "$api_manifest"
+    linux_set_env "$api_dropin" "$API_LABEL" RUNNER_RUN_AS_PREFIX "sudo -u $account1 -E --" "$api_manifest"
+    linux_write_dropin "$api_dropin" "$linux_desired_records" "$API_LABEL"
+    linux_write_manifest "$API_LABEL" "$api_dropin"
+    labels_touched+=("$API_LABEL")
+  fi
+
+  step "next steps (not done here)"
+  if [ "$REVERT" = 1 ]; then
+    echo "  Re-render the service units, then run the privileged systemd installer to reload them."
+  else
+    echo "  The privileged service installer copies these staged drop-ins into /etc/systemd/system."
+  fi
+  echo "  Then: scripts/os-isolation/verify.sh --probe   (it checks the LOADED environment)"
+  echo
+  if [ "$failures" -gt 0 ]; then
+    echo "$failures problem(s) found after writing — the drop-ins are in a partial state." >&2
+    return 1
+  fi
+  if [ "$APPLY" = 1 ]; then
+    echo "Applied ($changed value(s) written, every one staged)."
+  else
+    echo "Dry run only (pre-flight passed). Re-run with --apply to write these changes."
+  fi
+  return 0
+}
+
+if [ "$SERVICE_PLATFORM" = linux ]; then
+  linux_main
+  exit $?
+fi
 
 printf 'Anneal runner plists — %s%s\n' \
   "$([ "$REVERT" = 1 ] && echo 'REVERT ' || echo '')" \
@@ -103,12 +596,12 @@ while IFS= read -r file; do
   [ -n "$file" ] || continue
   found+=("$file")
 done < <(find "$AGENT_DIR" -maxdepth 1 -name 'com.agentos.runner*.plist' 2>/dev/null | sort)
-if [ "${#found[@]}" -ne "$RUNNER_COUNT" ]; then
-  fail "found ${#found[@]} com.agentos.runner*.plist under $AGENT_DIR, expected $RUNNER_COUNT (set RUNNER_COUNT if that is wrong)"
+if [ "${#found[@]}" -ne "$RUNNER_SERVICE_COUNT" ]; then
+  fail "found ${#found[@]} com.agentos.runner*.plist under $AGENT_DIR, expected $RUNNER_SERVICE_COUNT (set AGENTOS_RUNNER_COUNT if that is wrong)"
 fi
 
 targets=()
-for i in $(seq 1 "$RUNNER_COUNT"); do
+for i in $(seq 1 "$RUNNER_SERVICE_COUNT"); do
   label="$(label_for "$i")"
   file="$AGENT_DIR/$label.plist"
   if [ ! -f "$file" ]; then
@@ -126,7 +619,7 @@ for file in "${found[@]:-}"; do
     *" $label "*) ;;
     # A stray com.agentos.runner-9.plist means the host runs more runners than
     # this script would isolate, and the extra one keeps the operator's uid.
-    *) fail "$label is not one of the $RUNNER_COUNT expected runner labels; it would be left unisolated" ;;
+    *) fail "$label is not one of the $RUNNER_SERVICE_COUNT expected runner labels; it would be left unisolated" ;;
   esac
 done
 
@@ -149,10 +642,10 @@ if [ "$REVERT" = 1 ]; then
     [ ! -f "$manifest" ] || [ -w "$manifest" ] || fail "$manifest is not writable by $(id -un)"
   done
 else
-  for i in $(seq 1 "$RUNNER_COUNT"); do
+  for i in $(seq 1 "$RUNNER_SERVICE_COUNT"); do
     account="$(account_for "$i")"
     uid="$(dscl_value "/Users/$account" UniqueID)"
-    expected_uid=$((BASE_UID + i - 1))
+    expected_uid=$((BASE_UID + $(account_index_for "$i") - 1))
     if [ -z "$uid" ]; then
       fail "$account does not exist; run provision.sh --apply first"
     elif [ "$uid" != "$expected_uid" ]; then
@@ -185,7 +678,7 @@ if [ "$failures" -gt 0 ]; then
   echo "$failures pre-flight problem(s). Nothing was changed." >&2
   exit 1
 fi
-ok "pre-flight clean: $RUNNER_COUNT runner plists, the API plist, and everything they will point at"
+ok "pre-flight clean: $RUNNER_SERVICE_COUNT runner plists, the API plist, and everything they will point at"
 
 # ---------------------------------------------------------------------------
 # Manifest. before/after records per key; the plist checksum is forensic only —
@@ -386,7 +879,7 @@ if [ "$REVERT" = 1 ]; then
     done
   fi
 else
-  for i in $(seq 1 "$RUNNER_COUNT"); do
+  for i in $(seq 1 "$RUNNER_SERVICE_COUNT"); do
     label="$(label_for "$i")"
     account="$(account_for "$i")"
     file="$AGENT_DIR/$label.plist"
@@ -449,7 +942,7 @@ else
     # Re-read from disk rather than trusting the writes: PlistBuddy reports
     # nothing useful on a partial failure, and "Applied." is what the runbook
     # treats as the step being done.
-    for i in $(seq 1 "$RUNNER_COUNT"); do
+    for i in $(seq 1 "$RUNNER_SERVICE_COUNT"); do
       label="$(label_for "$i")"
       account="$(account_for "$i")"
       file="$AGENT_DIR/$label.plist"
