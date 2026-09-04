@@ -816,10 +816,17 @@ const copyStagedEntry = ({ entry, unitDirectory, sudoersPath, strictOwner = true
   if (fileDigest(entry.stagedPath) !== entry.installedSha256) throw new Error(`systemd-staged-file-drift:${entry.stagedPath}`);
   if (entry.path.startsWith(`${unitDirectory}/`)) assertTargetPathSafe(entry.path, unitDirectory);
   if (entry.path === sudoersPath) assertTargetPathSafe(entry.path, dirname(sudoersPath));
-  mkdirSync(dirname(entry.path), { recursive: true, mode: 0o755 });
+  const parent = dirname(entry.path);
+  const parentExisted = existsSync(parent);
+  mkdirSync(parent, { recursive: true, mode: 0o755 });
   copyFileSync(entry.stagedPath, entry.path);
   chmodSync(entry.path, entry.path.endsWith("agentos-service-wrapper.mjs") ? 0o755 : entry.kind === "sudoers" ? 0o440 : 0o644);
-  try { chownSync(entry.path, 0, 0); } catch (error) {
+  const ownerUid = entry.kind === "wrapper" ? entry.stagedUid : 0;
+  const ownerGid = entry.kind === "wrapper" ? entry.stagedGid : 0;
+  try {
+    chownSync(entry.path, ownerUid, ownerGid);
+    if (entry.kind === "wrapper" && !parentExisted) chownSync(parent, ownerUid, ownerGid);
+  } catch (error) {
     if (strictOwner) throw new Error(`systemd-install-owner-failed:${entry.path}:${error instanceof Error ? error.message : String(error)}`);
   }
 };
@@ -880,12 +887,18 @@ const serviceUnitEntry = ({ label, stagedPath, targetPath, stagingRoot }) => {
 
 const wrapperEntry = ({ wrapperPath, stagedPath, stagingRoot }) => {
   const existed = existsSync(wrapperPath);
+  const stagedStatus = statSync(stagedPath);
+  const originalStatus = existed ? statSync(wrapperPath) : null;
   return {
     kind: "wrapper",
     path: wrapperPath,
     stagedPath,
     existed,
     mode: existed ? statSync(wrapperPath).mode & 0o777 : 0o755,
+    originalUid: originalStatus?.uid ?? null,
+    originalGid: originalStatus?.gid ?? null,
+    stagedUid: stagedStatus.uid,
+    stagedGid: stagedStatus.gid,
     backupPath: existed ? join(stagingRoot, "backups", "agentos-service-wrapper.mjs") : null,
     originalSha256: existed ? sha256(readFileSync(wrapperPath)) : null,
     installedSha256: sha256(readFileSync(stagedPath)),
@@ -1143,6 +1156,9 @@ export const installStagedSystemdServices = ({
     if (entry.existed) {
       if (fileDigest(entry.path) !== entry.originalSha256) copyFileSync(entry.backupPath, entry.path);
       chmodSync(entry.path, entry.mode ?? 0o644);
+      if (entry.kind === "wrapper" && entry.originalUid !== null && entry.originalGid !== null) {
+        chownSync(entry.path, entry.originalUid, entry.originalGid);
+      }
     } else rmSync(entry.path, { force: true });
     if (entry.backupPath) rmSync(entry.backupPath, { force: true });
   }
@@ -1166,7 +1182,9 @@ const installLinuxServices = (options = {}) => {
     const entries = readStageEntries(manifest, root);
     return Object.freeze({ applied: false, reverted: false, entries: entries.map((entry) => entry.path) });
   }
-  if (typeof process.geteuid === "function" && process.geteuid() === 0) throw new Error("launchd-installer-refuses-root");
+  const callerUid = options.effectiveUid
+    ?? (typeof process.geteuid === "function" ? process.geteuid() : process.getuid());
+  if (callerUid === 0) throw new Error("launchd-installer-refuses-root");
   return systemdStagePlan(options);
 };
 
@@ -1223,7 +1241,9 @@ export const installLaunchdServices = ({
     effectiveUid,
     execute,
   });
-  if (typeof process.geteuid === "function" ? process.geteuid() === 0 : process.getuid() === 0) {
+  const callerUid = effectiveUid
+    ?? (typeof process.geteuid === "function" ? process.geteuid() : process.getuid());
+  if (callerUid === 0) {
     throw new Error("launchd-installer-refuses-root");
   }
   if (installUnits) throw new Error("systemd-installer-unsupported:darwin");
