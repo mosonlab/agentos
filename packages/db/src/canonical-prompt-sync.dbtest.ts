@@ -408,6 +408,104 @@ test("sync rolls the checkout Regression prompt generation once and preserves ch
   }), 2);
 });
 
+test("sync rolls the deployed pre-optional-review prompt generation once", async (t) => {
+  // The generation production ran when the blind review step became optional:
+  // runner-provided Regression tooling was already installed, only the fix and
+  // Regression prompts still required both review reports.
+  const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  const templateNames = ["direct-engineer-workflow", "compound-engineer-workflow"] as const;
+  const templates = await prisma.taskTemplate.findMany({
+    where: { projectId: project.id, name: { in: [...templateNames] } },
+    include: { steps: { orderBy: { stepIndex: "asc" } } },
+    orderBy: { name: "asc" },
+  });
+  assert.equal(templates.length, templateNames.length);
+
+  const taskIds: string[] = [];
+  const legacyTemplateIds: string[] = [];
+  const retired = new Map<string, { templateId: string; fixTaskId: string; prompt: string }>();
+  t.after(async () => {
+    await prisma.task.deleteMany({ where: { id: { in: taskIds } } });
+    await prisma.taskTemplate.deleteMany({ where: { id: { in: legacyTemplateIds } } });
+  });
+
+  for (const template of templates) {
+    await prisma.taskTemplateStep.updateMany({
+      where: { taskTemplateId: template.id },
+      data: { provisionDependencies: true, optional: false },
+    });
+    const fix = template.steps.find(({ outputKind }) => outputKind === "fixed-implementation");
+    const regression = template.steps.find(({ outputKind }) => outputKind === "regression-verification-v2");
+    assert.ok(fix);
+    assert.ok(regression);
+    const outgoingFixPrompt = restorePreOptionalReviewPrompt(fix.prompt);
+    const outgoingRegressionPrompt = restorePreOptionalReviewPrompt(regression.prompt);
+    assert.notEqual(outgoingFixPrompt, fix.prompt);
+    assert.notEqual(outgoingRegressionPrompt, regression.prompt);
+    await prisma.taskTemplateStep.update({ where: { id: fix.id }, data: { prompt: outgoingFixPrompt } });
+    await prisma.taskTemplateStep.update({ where: { id: regression.id }, data: { prompt: outgoingRegressionPrompt } });
+
+    const chainId = `pre-optional-review-${template.name}-${randomBytes(4).toString("hex")}`;
+    let fixTaskId = "";
+    for (const step of template.steps) {
+      const task = await prisma.task.create({ data: {
+        projectId: project.id,
+        templateId: template.id,
+        templateStepId: step.id,
+        name: `pre-optional review ${template.name} ${step.stepIndex}`,
+        description: "prompt-generation rollover fixture",
+        assigneeAgentId: step.assigneeAgentId,
+        assigneeType: step.assigneeType,
+        status: TaskStatus.DONE,
+        chainId,
+        chainIndex: step.stepIndex,
+        chainLayer: step.layer,
+      } });
+      taskIds.push(task.id);
+      if (step.id === fix.id) fixTaskId = task.id;
+    }
+    assert.notEqual(fixTaskId, "");
+    retired.set(template.name, { templateId: template.id, fixTaskId, prompt: outgoingFixPrompt });
+  }
+
+  const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(synced.status, 0, synced.output);
+  assert.match(synced.output, /"createdCanonicalTemplates":2/u);
+
+  for (const templateName of templateNames) {
+    const old = retired.get(templateName)!;
+    const legacyName = `${templateName}-legacy-pre-optional-review-omission-${old.templateId}`;
+    const legacy = await prisma.taskTemplate.findUniqueOrThrow({
+      where: { projectId_name: { projectId: project.id, name: legacyName } },
+      include: { steps: { orderBy: { stepIndex: "asc" } } },
+    });
+    assert.equal(legacy.id, old.templateId);
+    legacyTemplateIds.push(legacy.id);
+    const oldTask = await prisma.task.findUniqueOrThrow({
+      where: { id: old.fixTaskId },
+      include: { templateStep: true },
+    });
+    assert.equal(oldTask.templateStep?.prompt, old.prompt);
+
+    const current = await prisma.taskTemplate.findUniqueOrThrow({
+      where: { projectId_name: { projectId: project.id, name: templateName } },
+      include: { steps: { orderBy: { stepIndex: "asc" } } },
+    });
+    assert.notEqual(current.id, old.templateId);
+    const currentFix = current.steps.find(({ outputKind }) => outputKind === "fixed-implementation");
+    assert.ok(currentFix);
+    assert.match(currentFix.prompt, /when it is absent, the Sol report is the sole report/u);
+    assert.equal(current.steps.find(({ outputKind }) => outputKind === "blind-findings")?.optional, true);
+  }
+
+  const second = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(second.status, 0, second.output);
+  assert.match(second.output, /"createdCanonicalTemplates":0/u);
+  assert.equal(await prisma.taskTemplate.count({
+    where: { projectId: project.id, name: { contains: "legacy-pre-optional-review-omission" } },
+  }), 2);
+});
+
 test("sync rolls parked and not-yet-started v1 chains forward without changing them", async () => {
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
   // The canonical source is now eight-step for bound chains. Reconstruct the
