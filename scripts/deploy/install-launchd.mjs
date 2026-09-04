@@ -499,6 +499,12 @@ export const verifySystemdServiceDefinitions = (definitions, labels = SERVICE_LA
     if (directiveCount(rendered, "User") !== 1 || !/^User=(?!root$)\S+$/mu.test(rendered)) {
       throw new Error(`systemd-service-definition-user-invalid:${label}`);
     }
+    for (const directive of ["WorkingDirectory", "ExecStart", "SyslogIdentifier"]) {
+      if (directiveCount(rendered, directive) !== 1) {
+        throw new Error(`systemd-service-definition-directive-missing:${label}:${directive}`);
+      }
+    }
+    if (/^EnvironmentFile=/mu.test(rendered)) throw new Error(`systemd-service-environment-file-forbidden:${label}`);
   }
   return true;
 };
@@ -508,9 +514,24 @@ export const verifySystemdAutoDeployDefinitions = ({ service, timer }) => {
     if (typeof rendered !== "string") throw new Error(`systemd-auto-deploy-definition-missing:${name}`);
     if (/__[A-Z_]+__/u.test(rendered)) throw new Error(`systemd-auto-deploy-definition-unresolved:${name}`);
   }
-  if (!/^Type=oneshot$/mu.test(service) || !/^OnBootSec=60$/mu.test(timer)
-      || !/^OnUnitActiveSec=300$/mu.test(timer)) {
-    throw new Error("systemd-auto-deploy-definition-directive-missing");
+  const required = [
+    [service, "Type", "oneshot"],
+    [service, "After", "network-online.target"],
+    [service, "Wants", "network-online.target"],
+    [timer, "OnBootSec", "60"],
+    [timer, "OnUnitActiveSec", "300"],
+    [timer, "Unit", `${LABEL}.service`],
+    [timer, "WantedBy", "timers.target"],
+  ];
+  for (const [rendered, directive, value] of required) {
+    if (directiveCount(rendered, directive) !== 1 || !hasExactDirective(rendered, directive, value)) {
+      throw new Error(`systemd-auto-deploy-definition-directive-missing:${directive}`);
+    }
+  }
+  for (const directive of ["User", "WorkingDirectory", "ExecStart"]) {
+    if (directiveCount(service, directive) !== 1) {
+      throw new Error(`systemd-auto-deploy-definition-directive-missing:${directive}`);
+    }
   }
   if (/^EnvironmentFile=/mu.test(service)) throw new Error("systemd-auto-deploy-environment-file-forbidden");
   return true;
