@@ -154,7 +154,7 @@ export const ProjectDetailPage = ({ projectId }: { projectId: string }): ReactNo
     const ok = await run(() => api.patch(`/projects/${projectId}`, { yamlDocument: editingYaml }));
     if (ok) { setEditingYaml(null); reload(); reloadProjects(); }
   };
-  const saveGateDefault = (field: "specGateDefault" | "mergeGateDefault", next: boolean): void => {
+  const saveGateDefault = (field: "specGateDefault" | "mergeGateDefault" | "skipOptionalSteps", next: boolean): void => {
     void run(async () => {
       await api.patch(`/projects/${projectId}`, { [field]: next });
       reload();
@@ -200,6 +200,10 @@ export const ProjectDetailPage = ({ projectId }: { projectId: string }): ReactNo
             {
               k: t("projects.details.mergeGateDefault"),
               v: <Toggle on={project.mergeGateDefault} onChange={(next) => saveGateDefault("mergeGateDefault", next)} disabled={pending} label={t("projects.details.mergeGateDefault")} />,
+            },
+            {
+              k: t("projects.details.skipOptionalSteps"),
+              v: <Toggle on={project.skipOptionalSteps} onChange={(next) => saveGateDefault("skipOptionalSteps", next)} disabled={pending} label={t("projects.details.skipOptionalSteps")} />,
             },
           ]} />
         </Card>

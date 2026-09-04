@@ -56,9 +56,9 @@ const member = (overrides: Partial<BoardTask> = {}): BoardTask => ({
   blockedOn: null, mergeOutcome: null, repairOf: null, chainAggregate: null, ...overrides,
 });
 
-const aggregate = (position: number | null, done: number): ChainAggregate => ({
-  chainId: "chain-1", chainName: "Release", stepCount: 12,
-  statusCounts: { BACKLOG: 0, TODO: 12 - done, DOING: 0, REVIEW: 0, DONE: done },
+const aggregate = (position: number | null, done: number, stepCount = 12): ChainAggregate => ({
+  chainId: "chain-1", chainName: "Release", stepCount,
+  statusCounts: { BACKLOG: 0, TODO: stepCount - done, DOING: 0, REVIEW: 0, DONE: done },
   detailTaskId: "step-3", status: "TODO",
   frontier: { taskId: "step-3", title: "Implement release", status: "TODO", latestRun: null, mergeOutcome: null, failureReason: null, position },
   activeRepair: null, activation: activation("running", null), totalCost: null,
@@ -76,4 +76,8 @@ test("the Step a card names falls back from the projection to the member to the 
   // fully settled chain never claims a Step beyond its last.
   assert.equal(chainStepPosition(aggregate(null, 2), []), 3);
   assert.equal(chainStepPosition(aggregate(null, 12), []), 12);
+});
+
+test("a sparse frontier member never reports a position above the aggregate step count", () => {
+  assert.equal(chainStepPosition(aggregate(null, 2, 3), [member({ chainIndex: 8 })]), 3);
 });

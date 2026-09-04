@@ -33,6 +33,7 @@ const step = (stepIndex: number, outputKind: string): TaskTemplateStep => ({
   assigneeType: "AGENT",
   prompt: "",
   approvalGate: false,
+  optional: false,
   outputKind,
   priorOutputKinds: [],
   baseFromStepIndex: null,

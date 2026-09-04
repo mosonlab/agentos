@@ -295,6 +295,7 @@ export const NewTask = ({ projectId, project, agents, repos, onClose, onCreated 
                           (slot === null ? step.approvalGate : activeGateSelection.current[slot] === true)
                             ? `    ${t("newTask.preview.gate")}`
                             : null,
+                          step.optional ? `    ${t("newTask.preview.optional")}` : null,
                         ].filter((line) => line !== null).join("\n");
                       }).join("\n")}
                     </div>
