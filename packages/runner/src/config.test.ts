@@ -6,6 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { RUNNER_KINDS } from "./adapters.js";
 import { DEFAULT_API_URL, loadRunnerConfig, runnerProxyEnvironment } from "./config.js";
 import { LocalApiDestinationError } from "./local-origin.js";
 
@@ -96,6 +97,38 @@ test("the repository mirror defaults into the task account's home and accepts an
 test("the daemon reports the runner package version", () => {
   const metadata = require("../package.json") as { version: string };
   assert.equal(loadRunnerConfig().daemonVersion, metadata.version);
+});
+
+test("served runner kinds are optional, exact, deduplicated, and normalized", () => {
+  const previous = process.env.RUNNER_SERVED_KINDS;
+  try {
+    delete process.env.RUNNER_SERVED_KINDS;
+    assert.equal(loadRunnerConfig().servedKinds, null);
+
+    process.env.RUNNER_SERVED_KINDS = "CODEX,PI";
+    assert.deepEqual(loadRunnerConfig().servedKinds, ["CODEX", "PI"]);
+
+    process.env.RUNNER_SERVED_KINDS = " PI , CODEX ";
+    assert.deepEqual(loadRunnerConfig().servedKinds, ["CODEX", "PI"]);
+
+    process.env.RUNNER_SERVED_KINDS = "CODEX,CODEX";
+    assert.deepEqual(loadRunnerConfig().servedKinds, ["CODEX"]);
+
+    for (const value of ["", " ", ",", "codex", "GPT"]) {
+      process.env.RUNNER_SERVED_KINDS = value;
+      assert.throws(
+        () => loadRunnerConfig(),
+        (error: unknown) => error instanceof Error
+          && error.message.includes("RUNNER_SERVED_KINDS")
+          && error.message.includes(JSON.stringify(value))
+          && RUNNER_KINDS.every((runner) => error.message.includes(runner)),
+        `${JSON.stringify(value)} was accepted`,
+      );
+    }
+  } finally {
+    if (previous === undefined) delete process.env.RUNNER_SERVED_KINDS;
+    else process.env.RUNNER_SERVED_KINDS = previous;
+  }
 });
 
 const withClaimMaxLoadAverage = (value: string | undefined, body: () => void): void => {
