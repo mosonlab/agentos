@@ -59,8 +59,10 @@ test("canonical role frontmatter matches the Prisma seed contract", async () => 
     };
   }));
 
-  assert.equal(roles.every(({ model }) => !model.startsWith("openai-codex/")), true);
-  assert.equal(roles.every(({ runnerPreference }) => runnerPreference !== RunnerPreference.PI), true);
+  for (const { name, model, runnerPreference } of roles) {
+    assert.equal(model.startsWith("openai-codex/"), false, name);
+    assert.notEqual(runnerPreference, RunnerPreference.PI, name);
+  }
   assert.doesNotThrow(() => assertCanonicalAgentSources(roles));
 });
 
