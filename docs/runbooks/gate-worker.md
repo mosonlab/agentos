@@ -125,14 +125,14 @@ AGENTOS_WORKSPACE_PATH="$(git rev-parse --show-toplevel)" AGENTOS_GATE_SERVER=pr
   oid as the baseline before taking a slot.
 - When local dispatch is enabled, the dispatcher considers `local-1` through
   `local-N` first. A local slot is eligible only when this worktree is clean at
-  `<oid>`; it runs `scripts/merge-gate.sh` directly in the workspace. A real
-  `PASS`, `FAIL`, or `NOT AUTHORITATIVE` result is final; only absence of a
-  verdict falls through to a remote worker.
-- If no eligible local slot produces a verdict, the primary worker is tried. It
-  runs `mirror-push.sh` before `remote-gate.sh`, pushing only the frozen candidate
-  and baseline under oid-named cache refs. The local checkout may be detached or
-  single-branch; its incomplete ref namespace is never mirrored and cannot
-  delete worker refs.
+  `<oid>`; it runs `scripts/merge-gate.sh` directly in the workspace. Once a
+  local slot is acquired, that gate's status is returned directly and no remote
+  worker is tried afterward.
+- If local execution is ineligible or every local slot is busy or broken, the
+  primary worker is tried. It runs `mirror-push.sh` before `remote-gate.sh`,
+  pushing only the frozen candidate and baseline under oid-named cache refs. The
+  local checkout may be detached or single-branch; its incomplete ref namespace
+  is never mirrored and cannot delete worker refs.
 - If the primary is offline, its mirror push fails, its SSH connection drops,
   or both of its slots are busy, the fallback receives the same frozen candidate
   and baseline. A real `PASS`, `FAIL`, or `NOT AUTHORITATIVE` result is final;
