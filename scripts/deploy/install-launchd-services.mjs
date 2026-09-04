@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { installLaunchdServices } from "./install-launchd.mjs";
 
+const shellQuote = (value) => `'${String(value).replaceAll("'", `'"'"'`)}'`;
+
 const usage = () => {
   process.stdout.write(`usage: node scripts/deploy/install-launchd-services.mjs [--apply] [--replace-existing] [--revert] [--install-units] [--service-user <account>]\n\n`);
   process.stdout.write("Plans the generated service definitions by default. On Linux, --apply stages units and the sudoers grant; --install-units performs the privileged systemd stage. On macOS, --apply writes the stable shared wrapper and LaunchAgent definitions; --replace-existing performs the explicit wrapper migration and records backups.\n");
@@ -57,7 +59,9 @@ try {
       process.stdout.write(`${phase} staging=${result.staging ?? "recorded"}\n`);
       if (!options.apply && !options.installUnits) process.stdout.write("PLAN no files or systemd state changed\n");
       else if (options.apply && !options.installUnits && !options.revert) {
-        process.stdout.write(`NEXT sudo node ${process.argv[1]} --install-units --service-user ${options.serviceUser}\n`);
+        process.stdout.write(`NEXT sudo node ${shellQuote(process.argv[1])} --install-units --service-user ${shellQuote(options.serviceUser)}\n`);
+      } else if (options.apply && options.revert && !options.installUnits) {
+        process.stdout.write(`NEXT sudo node ${shellQuote(process.argv[1])} --install-units --revert --service-user ${shellQuote(options.serviceUser)}\n`);
       }
     } else {
       process.stdout.write(`${options.revert ? "REVERT" : options.apply ? "APPLY" : "PLAN"} service-wrapper=${result.wrapper ?? "recorded"}\n`);

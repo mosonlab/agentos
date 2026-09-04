@@ -1,4 +1,4 @@
-import { DeployFailure } from "./quiet-window-lib.mjs";
+import { DeployFailure, SERVICE_INVENTORY_ENTRIES } from "./quiet-window-lib.mjs";
 import { resolveServicePlatform } from "./service-platform.mjs";
 
 /**
@@ -11,7 +11,9 @@ export const serviceUnitName = (label) => {
   if (typeof label !== "string" || label.length === 0 || /[\s/]/u.test(label)) {
     throw new DeployFailure("service-control-label-invalid", String(label));
   }
-  return `${label}.service`;
+  const entry = SERVICE_INVENTORY_ENTRIES.find((candidate) => candidate.label === label);
+  if (!entry) throw new DeployFailure("service-control-label-invalid", String(label));
+  return entry.unitName;
 };
 
 const uidOf = () => {
@@ -40,6 +42,14 @@ const deniedFailure = (unit, cause = "command-refused") => {
   failure.cause = cause;
   return failure;
 };
+
+const controlFailure = (verb, unit, result) => {
+  const diagnosis = commandOutput(result).trim().replaceAll(/\s+/gu, " ").slice(-2_000);
+  return new DeployFailure(`service-control-failed:${verb}:${unit}`, diagnosis || `exit-${result?.code ?? "unknown"}`);
+};
+
+const sudoDenied = (result) => /(?:^|\s)sudo:|password is required|not allowed to execute|a password is required/iu
+  .test(commandOutput(result));
 
 const unavailableFailure = (binary, cause = "missing") =>
   new DeployFailure(`service-control-${binary}-unavailable`, cause);
@@ -117,7 +127,9 @@ export const createServiceControl = ({
         // boundary and must not be disguised as an authorization refusal.
         if (platform === "darwin" || /timeout|interrupted/u.test(error.reason)) throw error;
       }
-      throw deniedFailure(unit, error instanceof Error ? error.message : String(error));
+      const errorResult = { code: error?.code ?? 1, stdout: error?.stdout ?? "", stderr: error?.stderr ?? error?.message ?? String(error) };
+      if (platform === "linux" && euid !== 0 && sudoDenied(errorResult)) throw deniedFailure(unit, `${verb}-refused`);
+      throw controlFailure(verb, unit, errorResult);
     }
 
     if (result.code !== 0) {
@@ -136,7 +148,8 @@ export const createServiceControl = ({
         const diagnosis = commandOutput(result).trim().replaceAll(/\s+/gu, " ").slice(-2_000);
         throw new DeployFailure(failureReason, `exit-${result.code}${diagnosis ? `: ${diagnosis}` : ""}`);
       }
-      throw deniedFailure(unit, `${verb}-exit-${result.code}`);
+      if (euid !== 0 && sudoDenied(result)) throw deniedFailure(unit, `${verb}-exit-${result.code}`);
+      throw controlFailure(verb, unit, result);
     }
     return result;
   };

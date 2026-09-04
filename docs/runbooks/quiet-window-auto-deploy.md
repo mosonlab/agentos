@@ -217,8 +217,9 @@ manifests below `.agentos-deploy/`. It does not write `/etc`, call
 command for its second stage; run those commands as printed, with
 `--install-units`, rather than constructing a different path by hand.
 
-Stage two copies the staged files to `/etc/systemd/system` as `root:root` with
-mode 0644, validates the generated
+Stage two verifies the already operator-installed stable wrapper, copies only
+the system-owned staged files to `/etc/systemd/system` as `root:root` with
+mode 0644, independently validates the rendered units and generated
 `/etc/sudoers.d/anneal-service-control` with `visudo -c`, runs
 `systemctl daemon-reload`, and then enables the generated inventory. The
 sudoers grant names only the generated unit names and only the verbs
@@ -226,6 +227,12 @@ sudoers grant names only the generated unit names and only the verbs
 `daemon-reload`; those operations remain in the root install stage. A
 non-root control call uses `sudo -n`, and a denied command is a deployment
 failure rather than a successful no-op.
+
+Before replacing an existing system file, stage two records its bytes,
+ownership, mode, and enabled/active state in a root-owned mode-0600 transaction
+record beside the unit definitions. The unprivileged staging manifest cannot
+rewrite that record. A successful revert consumes and removes it after the
+final `daemon-reload`.
 
 The service installer manifest includes the stable wrapper as its first entry
 and one entry for every generated service definition. The separate
@@ -282,9 +289,18 @@ verification fails after activation, atomically point `current` back to
 checks for the prior release. The auto-deploy oneshot is not restarted as part
 of service rollback; its timer remains the scheduler.
 
-To undo an installation, use each installer's root `--revert --apply`
-operation with `AGENTOS_SERVICE_PLATFORM=linux` and the same service and backup
-values used for staging. The recorded manifest is authoritative: a digest
+To undo the service installation, first run the unprivileged wrapper-revert
+stage; it restores only the operator-owned stable wrapper and prints the exact
+root command that reverts the system-owned files:
+
+```sh
+node scripts/deploy/install-launchd-services.mjs \
+  --service-user "$SERVICE_USER" --revert --apply
+```
+
+Run that printed `--install-units --revert` command, then use the separate
+auto-deploy installer's `--install-units --revert` mode for its oneshot and
+timer. The recorded manifests are authoritative: a digest
 drift refuses the revert without changing anything; otherwise the installer
 restores or removes every recorded file, records `systemctl disable --now` for
 units it removes, and finishes with `systemctl daemon-reload`. This restores
@@ -305,7 +321,7 @@ builder, and then performs exactly this sequence:
    recovery.
 3. Copy the verified release to a disposable writable operation workspace.
    This is not a Git checkout and is never published.
-4. Prove the thirteen loaded services are running through the stable wrapper
+4. Prove every configured service is running through the stable wrapper
    and still identify the old `current` release.
 5. Stream a custom-format `pg_dump` to a mode-0600 temporary host file, fsync
    it, and rename it only after a successful non-empty result. Record
@@ -319,7 +335,7 @@ builder, and then performs exactly this sequence:
 8. Recheck the deploy barrier and blocking statuses, then reverify the original
    immutable artifact.
 9. Atomically update `previous` and `current`, durably record `ACTIVATED`, and
-   restart all thirteen labels.
+   restart every configured label.
 10. Require all labels running, `/health` successful, and `/version` reporting
     the target clean commit. Record `VERIFIED` and `SUCCEEDED` and write the
     success Inbox record.

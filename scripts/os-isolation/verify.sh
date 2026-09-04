@@ -25,7 +25,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../deploy" && pwd)"
 # shellcheck source=scripts/deploy/service-platform.sh
 . "$SCRIPT_DIR/service-platform.sh"
-if ! SERVICE_PLATFORM="$(resolve_service_platform)"; then
+if ! SERVICE_PLATFORM="$(agentos_service_platform)"; then
   exit 64
 fi
 
@@ -40,43 +40,36 @@ for arg in "$@"; do
   esac
 done
 
+SERVICE_RUNNER_COUNT="${AGENTOS_RUNNER_COUNT-10}"
+ACCOUNT_COUNT="${ACCOUNT_COUNT-8}"
+case "$SERVICE_RUNNER_COUNT" in
+    ''|*[!0-9]*)
+      printf 'runner-count-invalid:%s\n' "$SERVICE_RUNNER_COUNT" >&2
+      exit 64
+      ;;
+esac
+normalized="${SERVICE_RUNNER_COUNT#${SERVICE_RUNNER_COUNT%%[!0]*}}"
+[ -n "$normalized" ] || normalized=0
+if [ "$normalized" -lt 1 ] 2>/dev/null || [ "$normalized" -gt 64 ] 2>/dev/null; then
+  printf 'runner-count-invalid:%s\n' "$SERVICE_RUNNER_COUNT" >&2
+  exit 64
+fi
+SERVICE_RUNNER_COUNT="$normalized"
+case "$ACCOUNT_COUNT" in
+    ''|*[!0-9]*)
+      printf 'account-count-invalid:%s\n' "$ACCOUNT_COUNT" >&2
+      exit 64
+      ;;
+esac
+normalized="${ACCOUNT_COUNT#${ACCOUNT_COUNT%%[!0]*}}"
+[ -n "$normalized" ] || normalized=0
+if [ "$normalized" -lt 1 ] 2>/dev/null || [ "$normalized" -gt 64 ] 2>/dev/null; then
+  printf 'account-count-invalid:%s\n' "$ACCOUNT_COUNT" >&2
+  exit 64
+fi
+ACCOUNT_COUNT="$normalized"
+
 verify_linux() {
-  local runner_value account_value normalized
-  runner_value="${AGENTOS_RUNNER_COUNT-10}"
-  account_value="${ACCOUNT_COUNT-8}"
-
-  # Do not let an invalid value reach seq or arithmetic expansion: the reason
-  # is part of the operator contract and must be deterministic.
-  case "$runner_value" in
-    ''|*[!0-9]*)
-      printf 'runner-count-invalid:%s\n' "$runner_value" >&2
-      return 64
-      ;;
-  esac
-  normalized="${runner_value#${runner_value%%[!0]*}}"
-  [ -n "$normalized" ] || normalized=0
-  if [ "$normalized" -lt 1 ] 2>/dev/null || [ "$normalized" -gt 64 ] 2>/dev/null; then
-    printf 'runner-count-invalid:%s\n' "$runner_value" >&2
-    return 64
-  fi
-  runner_value="$normalized"
-
-  case "$account_value" in
-    ''|*[!0-9]*)
-      printf 'account-count-invalid:%s\n' "$account_value" >&2
-      return 64
-      ;;
-  esac
-  normalized="${account_value#${account_value%%[!0]*}}"
-  [ -n "$normalized" ] || normalized=0
-  if [ "$normalized" -lt 1 ] 2>/dev/null || [ "$normalized" -gt 64 ] 2>/dev/null; then
-    printf 'account-count-invalid:%s\n' "$account_value" >&2
-    return 64
-  fi
-  account_value="$normalized"
-
-  local SERVICE_RUNNER_COUNT="$runner_value"
-  local ACCOUNT_COUNT="$account_value"
   local ACCOUNT_PREFIX="${ACCOUNT_PREFIX:-_agentos}"
   local GROUP_NAME="${GROUP_NAME:-agentos-runners}"
   local GROUP_GID="${GROUP_GID:-620}"
@@ -138,17 +131,68 @@ verify_linux() {
     # in pre-flight and is a separate named failure.
     [ "$status" -eq 0 ] && [ "$LINUX_ACTIVE_OUTPUT" = active ]
   }
+  local -a LINUX_ENV_KEYS=() LINUX_ENV_VALUES=()
+  parse_environment_linux() {
+    local output="$1" token='' char decoded key value
+    local quoted=0 index=0 length="${#1}"
+    LINUX_ENV_KEYS=()
+    LINUX_ENV_VALUES=()
+    while [ "$index" -le "$length" ]; do
+      char="${output:index:1}"
+      if [ "$index" -eq "$length" ]; then char=' '; fi
+      if [ "$char" = '"' ]; then
+        quoted=$((1 - quoted))
+      elif [ "$char" = '\' ]; then
+        index=$((index + 1))
+        char="${output:index:1}"
+        case "$char" in
+          x)
+            decoded="${output:index+1:2}"
+            if [[ "$decoded" =~ ^[0-9A-Fa-f]{2}$ ]]; then
+              printf -v char "\\x$decoded"
+              index=$((index + 2))
+            fi
+            ;;
+          n) char=$'\n' ;;
+          r) char=$'\r' ;;
+          t) char=$'\t' ;;
+          s) char=' ' ;;
+        esac
+        token+="$char"
+      elif [[ "$char" =~ [[:space:]] ]] && [ "$quoted" -eq 0 ]; then
+        if [ -n "$token" ]; then
+          key="${token%%=*}"
+          value="${token#*=}"
+          [ "$key" != "$token" ] || return 1
+          LINUX_ENV_KEYS+=("$key")
+          LINUX_ENV_VALUES+=("$value")
+          token=''
+        fi
+      else
+        token+="$char"
+      fi
+      index=$((index + 1))
+    done
+    [ "$quoted" -eq 0 ]
+  }
   env_key_present_linux() {
-    local key="$1" output="$2"
-    case " $output " in
-      *" $key="*) return 0 ;;
-      *) return 1 ;;
-    esac
+    local key="$1" output="$2" index
+    parse_environment_linux "$output" || return 1
+    for index in "${!LINUX_ENV_KEYS[@]}"; do
+      [ "${LINUX_ENV_KEYS[$index]}" = "$key" ] && return 0
+    done
+    return 1
   }
   env_value_linux() {
-    local key="$1" output="$2" value
-    value="$(printf '%s\n' "$output" | sed -n "s/^$key=//p; s/.*[[:space:]]$key=//p" | head -n 1)"
-    printf '%s\n' "$value"
+    local key="$1" output="$2" index
+    parse_environment_linux "$output" || return 1
+    for index in "${!LINUX_ENV_KEYS[@]}"; do
+      if [ "${LINUX_ENV_KEYS[$index]}" = "$key" ]; then
+        printf '%s\n' "${LINUX_ENV_VALUES[$index]}"
+        return 0
+      fi
+    done
+    return 1
   }
   check_loaded_env_linux() {
     local label="$1" key="$2" expected="$3" unit output
@@ -156,12 +200,11 @@ verify_linux() {
     if ! systemctl_show_linux Environment "$unit"; then return; fi
     output="$LINUX_SYSTEMCTL_OUTPUT"
     if env_key_present_linux "$key" "$output"; then
-      # Prefixes intentionally contain spaces.  A boundary-aware substring
-      # check keeps those values intact instead of splitting on shell words.
-      case " $output " in
-        *" $key=$expected "*|*" $key=$expected") pass_linux "$label $key = $expected" ;;
-        *) fail_linux "$label is LOADED with $key='$(env_value_linux "$key" "$output")', expected '$expected'" ;;
-      esac
+      if [ "$(env_value_linux "$key" "$output")" = "$expected" ]; then
+        pass_linux "$label $key = $expected"
+      else
+        fail_linux "$label is LOADED with $key='$(env_value_linux "$key" "$output")', expected '$expected'"
+      fi
     else
       fail_linux "$label is LOADED with $key='<unset>', expected '$expected'"
     fi
@@ -256,8 +299,13 @@ verify_linux() {
     esac
     # Linux has no IsHidden attribute.  Its sub-1000 uid is the visibility
     # boundary, so only retain the privilege check from the Darwin path.
-    for privileged_group in sudo adm; do
-      privileged_members="$(getent group "$privileged_group" 2>/dev/null | awk -F: '{print $4}')"
+    for privileged_group in sudo wheel admin adm; do
+      privileged_record="$(getent group "$privileged_group" 2>/dev/null || true)"
+      privileged_gid="$(printf '%s\n' "$privileged_record" | awk -F: '{print $3}')"
+      privileged_members="$(printf '%s\n' "$privileged_record" | awk -F: '{print $4}')"
+      if [ -n "$privileged_gid" ] && [ "$gid" = "$privileged_gid" ]; then
+        fail_linux "$account has $privileged_group as its primary group"
+      fi
       case ",$privileged_members," in
         *,"$account",*) fail_linux "$account is in the $privileged_group group" ;;
       esac
@@ -479,28 +527,6 @@ if [ "$SERVICE_PLATFORM" = linux ]; then
   exit $?
 fi
 
-SERVICE_RUNNER_COUNT="${AGENTOS_RUNNER_COUNT:-10}"
-case "$SERVICE_RUNNER_COUNT" in
-  ''|*[!0-9]*) printf 'runner-count-invalid:%s\n' "$SERVICE_RUNNER_COUNT" >&2; exit 64 ;;
-esac
-SERVICE_RUNNER_COUNT_NORMALIZED="${SERVICE_RUNNER_COUNT#${SERVICE_RUNNER_COUNT%%[!0]*}}"
-[ -n "$SERVICE_RUNNER_COUNT_NORMALIZED" ] || SERVICE_RUNNER_COUNT_NORMALIZED=0
-if [ "$SERVICE_RUNNER_COUNT_NORMALIZED" -lt 1 ] 2>/dev/null || [ "$SERVICE_RUNNER_COUNT_NORMALIZED" -gt 64 ] 2>/dev/null; then
-  printf 'runner-count-invalid:%s\n' "$SERVICE_RUNNER_COUNT" >&2
-  exit 64
-fi
-SERVICE_RUNNER_COUNT="$SERVICE_RUNNER_COUNT_NORMALIZED"
-ACCOUNT_COUNT="${ACCOUNT_COUNT:-8}"
-case "$ACCOUNT_COUNT" in
-  ''|*[!0-9]*) printf 'account-count-invalid:%s\n' "$ACCOUNT_COUNT" >&2; exit 64 ;;
-esac
-ACCOUNT_COUNT_NORMALIZED="${ACCOUNT_COUNT#${ACCOUNT_COUNT%%[!0]*}}"
-[ -n "$ACCOUNT_COUNT_NORMALIZED" ] || ACCOUNT_COUNT_NORMALIZED=0
-if [ "$ACCOUNT_COUNT_NORMALIZED" -lt 1 ] 2>/dev/null || [ "$ACCOUNT_COUNT_NORMALIZED" -gt 64 ] 2>/dev/null; then
-  printf 'account-count-invalid:%s\n' "$ACCOUNT_COUNT" >&2
-  exit 64
-fi
-ACCOUNT_COUNT="$ACCOUNT_COUNT_NORMALIZED"
 ACCOUNT_PREFIX="${ACCOUNT_PREFIX:-_agentos}"
 GROUP_NAME="${GROUP_NAME:-agentos-runners}"
 GROUP_GID="${GROUP_GID:-620}"

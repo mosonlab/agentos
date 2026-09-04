@@ -76,7 +76,7 @@ fi
 # exercise both branches on one host without pretending uname returned another
 # value.
 . "$SERVICE_PLATFORM_HELPER"
-if ! SERVICE_PLATFORM="$(resolve_service_platform)"; then
+if ! SERVICE_PLATFORM="$(agentos_service_platform)"; then
   exit 64
 fi
 
@@ -131,7 +131,7 @@ sha256_of() {
 # owned by the unprivileged installer and is later copied into /etc by the
 # privileged service installer.
 # ---------------------------------------------------------------------------
-SYSTEMD_STAGING_DIR="${SYSTEMD_STAGING_DIR:-${AGENTOS_SYSTEMD_STAGING_DIR:-${AGENTOS_DEPLOY_STAGING_DIR:-${AGENTOS_INSTALL_ROOT:-${STAGING_DIR:-$REPOSITORY_ROOT/.agentos-deploy/launchd/staging/units}}}}}"
+SYSTEMD_STAGING_DIR="${SYSTEMD_STAGING_DIR:-$REPOSITORY_ROOT/.agentos-deploy/launchd/staging/units}"
 if [ "$SERVICE_PLATFORM" = linux ] && [ "$MANIFEST_DIR" = "$AGENTOS_PREFIX/etc/plist-manifest" ]; then
   MANIFEST_DIR="$SYSTEMD_STAGING_DIR/plist-manifest"
 fi
@@ -525,7 +525,14 @@ linux_main() {
       linux_set_env "$file" "$label" RUNNER_PI_EXTENSION_PATH "$LIB_DIR/pi-agentos-extension.ts" "$manifest"
       linux_set_env "$file" "$label" RUNNER_CLAUDE_SETTINGS_PATH "$LIB_DIR/claude-platform-settings.json" "$manifest"
       linux_set_env "$file" "$label" RUNNER_SESSION_CONFIG_BASELINE_ROOT "$LIB_DIR/session-config-baseline" "$manifest"
-      runner_path="${RUNNER_PATH:-$BIN_DIR}"
+      if [ -n "${RUNNER_PATH+x}" ]; then
+        runner_path="$RUNNER_PATH"
+      else
+        node_dir="$(dirname "$(realpath "$(command -v node)")")"
+        git_dir="$(dirname "$(realpath "$(command -v git)")")"
+        runner_path="$BIN_DIR:$node_dir:$git_dir:/usr/local/bin:/usr/bin:/bin"
+        runner_path="$(printf '%s\n' "$runner_path" | awk -v RS=: '!seen[$0]++ { out=out (out?":":"") $0 } END { print out }')"
+      fi
       case ":$runner_path:" in
         *":$BIN_DIR:"*) ;;
         *) runner_path="$BIN_DIR${runner_path:+:$runner_path}" ;;

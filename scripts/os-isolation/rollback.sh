@@ -37,6 +37,14 @@ for arg in "$@"; do
 done
 
 ACCOUNT_COUNT="${ACCOUNT_COUNT:-8}"
+SERVICE_RUNNER_COUNT="${AGENTOS_RUNNER_COUNT-10}"
+case "$SERVICE_RUNNER_COUNT" in
+  ''|*[!0-9]*) echo "runner-count-invalid:$SERVICE_RUNNER_COUNT" >&2; exit 64 ;;
+esac
+if [ "$SERVICE_RUNNER_COUNT" -lt 1 ] || [ "$SERVICE_RUNNER_COUNT" -gt 64 ]; then
+  echo "runner-count-invalid:$SERVICE_RUNNER_COUNT" >&2
+  exit 64
+fi
 ACCOUNT_PREFIX="${ACCOUNT_PREFIX:-_agentos}"
 GROUP_NAME="${GROUP_NAME:-agentos-runners}"
 AGENTOS_PREFIX="${AGENTOS_PREFIX:-/opt/agentos}"
@@ -78,7 +86,25 @@ printf 'Anneal OS isolation rollback — %s\n' "$([ "$APPLY" = 1 ] && echo APPLY
 step "1. is any runner still configured to use these accounts?"
 still_wired=0
 if [ "$SERVICE_PLATFORM" = "linux" ]; then
-  ok "Linux has no launchd plists to inspect"
+  SYSTEMCTL="${SYSTEMCTL_BIN:-systemctl}"
+  if ! command -v "$SYSTEMCTL" >/dev/null 2>&1; then
+    echo "systemd-systemctl-unavailable" >&2
+    exit 1
+  fi
+  for i in $(seq 1 "$SERVICE_RUNNER_COUNT"); do
+    if [ "$i" = 1 ]; then label=com.agentos.runner; else label="com.agentos.runner-$i"; fi
+    unit="$label.service"
+    if ! environment_output="$("$SYSTEMCTL" show -p Environment --value "$unit" 2>/dev/null)"; then
+      echo "systemd-runner-inspection-failed:$unit" >&2
+      exit 1
+    fi
+    case "$environment_output" in
+      *RUNNER_RUN_AS_PREFIX=*"$ACCOUNT_PREFIX"*)
+        warn "$label still has RUNNER_RUN_AS_PREFIX naming a managed account"
+        still_wired=$((still_wired + 1))
+        ;;
+    esac
+  done
 else
   for file in "$AGENT_DIR"/com.agentos.runner*.plist; do
     [ -f "$file" ] || continue
@@ -98,7 +124,7 @@ if [ "$still_wired" -gt 0 ] && [ "$FORCE" != 1 ]; then
   echo "or pass --force if the plists are already gone." >&2
   exit 1
 fi
-if [ "$still_wired" -eq 0 ]; then ok "no runner plist references these accounts"; fi
+if [ "$still_wired" -eq 0 ]; then ok "no runner service references these accounts"; fi
 
 step "2. sudoers grant"
 if [ -f "$SUDOERS_FILE" ]; then

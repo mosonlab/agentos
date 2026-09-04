@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -8,6 +9,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -19,6 +21,7 @@ import {
   autoDeployEnvironmentValues,
   installLaunchd,
   installLaunchdServices,
+  installStagedSystemdAutoDeploy,
   installStagedSystemdServices,
   planSystemdAutoDeploy,
   renderAutoDeploySystemdUnit,
@@ -46,6 +49,7 @@ const withLinux = async (work) => {
 };
 
 const accountLookup = () => "anneal-test:x:620:620::/var/lib/anneal-test:/bin/bash";
+const digest = (contents) => createHash("sha256").update(contents).digest("hex");
 
 const unitEnvironmentKeys = (unit) => [...unit.matchAll(/^Environment=([A-Za-z_][A-Za-z0-9_]*)=/gmu)].map((match) => match[1]);
 
@@ -80,7 +84,7 @@ test("systemd service units carry the exact plist environment contract", () => {
     assert.deepEqual(new Set(unitEnvironmentKeys(unit)), new Set(plistEnvironmentKeys(plist)));
     assert.deepEqual(new Set(unitEnvironmentKeys(unit)), new Set(Object.keys(serviceEnvironmentValues(value))));
     assert.doesNotMatch(unit, /^EnvironmentFile=/mu);
-    assert.match(unit, new RegExp(`^ExecStart=/usr/bin/node .* ${value.label}$`, "mu"));
+    assert.match(unit, new RegExp(`^ExecStart="/usr/bin/node" .* ${value.label}$`, "mu"));
     assert.match(unit, /PATH=".*%%"/u);
     assert.match(unit, /^User=(?!root$)\S+$/mu);
   }
@@ -119,6 +123,113 @@ test("auto-deploy units match the plist environment contract in both backup mode
     assert.deepEqual(new Set(unitEnvironmentKeys(service)), new Set(Object.keys(autoDeployEnvironmentValues(values))));
     assert.doesNotMatch(service, /^EnvironmentFile=/mu);
     assert.match(service, /PATH=".*%%"/u);
+  }
+});
+
+test("non-default runner count is persisted in service and auto-deploy definitions", () => {
+  const root = "/fixture";
+  const serviceValues = servicePlistValues({
+    label: "com.agentos.runner-16",
+    runnerCount: 16,
+    nodeBinary: "/usr/bin/node",
+    repositoryRoot: root,
+    stdoutPath: "/tmp/stdout",
+    stderrPath: "/tmp/stderr",
+    path: "/usr/bin:/bin",
+  });
+  const plist = renderServiceLaunchdPlist(
+    readFileSync(new URL("./com.agentos.service.plist.in", import.meta.url), "utf8"),
+    serviceValues,
+  );
+  const unit = renderServiceSystemdUnit(undefined, { ...serviceValues, serviceUser: "anneal-test" });
+  assert.match(plist, /<key>AGENTOS_RUNNER_COUNT<\/key>\s*<string>16<\/string>/u);
+  assert.match(unit, /^Environment=AGENTOS_RUNNER_COUNT="16"$/mu);
+  const autoValues = {
+    nodeBinary: "/usr/bin/node",
+    deployScript: "/fixture/current/scripts/deploy/quiet-window-deploy.mjs",
+    repositoryRoot: root,
+    stdoutPath: "/tmp/stdout",
+    stderrPath: "/tmp/stderr",
+    path: "/usr/bin:/bin",
+    gitBinary: "/usr/bin/git",
+    npmBinary: "/usr/bin/npm",
+    sourceRemote: "origin",
+    backup: { mode: "host", pgDumpBinary: "/usr/bin/pg_dump" },
+    serviceUser: "anneal-test",
+    runnerCount: 16,
+  };
+  assert.match(renderLaunchdPlist(readFileSync(new URL("./com.agentos.auto-deploy.plist.in", import.meta.url), "utf8"), autoValues), /<key>AGENTOS_RUNNER_COUNT<\/key>\s*<string>16<\/string>/u);
+  assert.match(renderAutoDeploySystemdUnit(undefined, autoValues), /^Environment=AGENTOS_RUNNER_COUNT="16"$/mu);
+});
+
+test("systemd path directives quote whitespace and escape percent specifiers", () => {
+  const root = "/opt/Anneal Runtime 100%";
+  const values = servicePlistValues({
+    label: "com.agentos.api",
+    nodeBinary: "/opt/Node Runtime 100%/node",
+    repositoryRoot: root,
+    sharedRoot: `${root}/shared`,
+    stdoutPath: "/tmp/stdout",
+    stderrPath: "/tmp/stderr",
+    path: "/usr/bin:/bin",
+    wrapperPath: `${root}/shared/bin/agentos-service-wrapper.mjs`,
+  });
+  const unit = renderServiceSystemdUnit(undefined, { ...values, serviceUser: "anneal-test" });
+  assert.match(unit, /^WorkingDirectory="\/opt\/Anneal Runtime 100%%"$/mu);
+  assert.match(unit, /^ExecStart="\/opt\/Node Runtime 100%%\/node" "\/opt\/Anneal Runtime 100%%\/shared\/bin\/agentos-service-wrapper\.mjs" com\.agentos\.api$/mu);
+});
+
+test("default Darwin render, manifest entries, and plan stdout match 9a52c6ad bytes", () => {
+  const previousPlatform = process.env.AGENTOS_SERVICE_PLATFORM;
+  const previousCount = process.env.AGENTOS_RUNNER_COUNT;
+  process.env.AGENTOS_SERVICE_PLATFORM = "darwin";
+  delete process.env.AGENTOS_RUNNER_COUNT;
+  try {
+    const baseline = JSON.parse(readFileSync(new URL("./fixtures/darwin-9a52c6ad-baseline.json", import.meta.url), "utf8"));
+    const root = process.cwd();
+    const plan = installLaunchdServices({
+      repositoryRoot: root,
+      userHome: join(root, "fixture-home"),
+      nodeBinary: "/usr/bin/node",
+      gitBinary: "/usr/bin/git",
+      path: "/usr/bin:/bin",
+      effectiveUid: 501,
+      apply: false,
+    });
+    const normalize = (value) => value.replaceAll(root, "<ROOT>");
+    const hashes = Object.fromEntries(Object.entries(plan.rendered).map(([label, contents]) => [
+      label,
+      digest(normalize(contents)),
+    ]));
+    assert.deepEqual(hashes, baseline.renderedPlistSha256);
+    assert.deepEqual(plan.entries.map(normalize), baseline.serviceManifestEntries);
+    const autoTemplate = readFileSync(new URL("./com.agentos.auto-deploy.plist.in", import.meta.url), "utf8");
+    const autoPlist = renderLaunchdPlist(autoTemplate, {
+      nodeBinary: "/usr/bin/node",
+      deployScript: "/fixture/current/scripts/deploy/quiet-window-deploy.mjs",
+      repositoryRoot: "/fixture",
+      stdoutPath: "/fixture/stdout",
+      stderrPath: "/fixture/stderr",
+      path: "/usr/bin:/bin",
+      gitBinary: "/usr/bin/git",
+      npmBinary: "/usr/bin/npm",
+      sourceRemote: "origin",
+      backup: { mode: "host", pgDumpBinary: "/usr/bin/pg_dump" },
+    });
+    assert.equal(digest(autoPlist), baseline.autoDeployPlistSha256);
+    assert.deepEqual(baseline.autoDeployManifestEntries, ["<HOME>/Library/LaunchAgents/com.agentos.auto-deploy.plist"]);
+    const entrypoint = spawnSync(process.execPath, ["scripts/deploy/install-launchd-services.mjs"], {
+      cwd: root,
+      encoding: "utf8",
+      env: { ...process.env, AGENTOS_SERVICE_PLATFORM: "darwin" },
+    });
+    assert.equal(entrypoint.status, 0, entrypoint.stderr);
+    assert.equal(normalize(entrypoint.stdout), baseline.servicePlanStdout);
+  } finally {
+    if (previousPlatform === undefined) delete process.env.AGENTOS_SERVICE_PLATFORM;
+    else process.env.AGENTOS_SERVICE_PLATFORM = previousPlatform;
+    if (previousCount === undefined) delete process.env.AGENTOS_RUNNER_COUNT;
+    else process.env.AGENTOS_RUNNER_COUNT = previousCount;
   }
 });
 
@@ -200,7 +311,7 @@ test("Linux service stage is unprivileged and the root stage has an ordered acti
       assert.equal(existsSync(plan.staging), false);
       const stagedDropIn = join(plan.staging, "units/com.agentos.api.service.d/os-isolation.conf");
       mkdirSync(join(plan.staging, "units/com.agentos.api.service.d"), { recursive: true });
-      writeFileSync(stagedDropIn, "[Service]\nEnvironment=UNRECORDED=\"preserved\"\n");
+      writeFileSync(stagedDropIn, "[Service]\nEnvironment=RUNNER_WORKSPACE_ROOT=\"/configured/workspaces\"\n");
       const staged = installLaunchdServices({
         repositoryRoot: root,
         serviceUser: "anneal-test",
@@ -215,6 +326,8 @@ test("Linux service stage is unprivileged and the root stage has an ordered acti
       assert.equal(staged.entries.length, SERVICE_LABELS.length + 1);
       assert.equal(staged.manifest.auxiliaryEntries.some(({ kind }) => kind === "drop-in"), true);
       assert.equal(existsSync(join(root, ".agentos-deploy/launchd/manifest.json")), true);
+      const stableWrapper = join(root, "shared/bin/agentos-service-wrapper.mjs");
+      const wrapperBeforeRoot = statSync(stableWrapper);
       assert.throws(
         () => installStagedSystemdServices({
           repositoryRoot: root,
@@ -222,7 +335,13 @@ test("Linux service stage is unprivileged and the root stage has an ordered acti
           sudoersPath,
           systemctlPath: "/usr/bin/false",
           effectiveUid: 0,
-          execute: () => { throw new Error("recorder refusal"); },
+          execute: (_command, args) => {
+            if (args[0] === "-c") return "";
+            throw new Error("recorder refusal");
+          },
+          serviceUser: "anneal-test",
+          userLookup: accountLookup,
+          visudoPath: "/usr/bin/true",
         }),
         /systemd-control-failed:daemon-reload/u,
       );
@@ -231,17 +350,27 @@ test("Linux service stage is unprivileged and the root stage has an ordered acti
       chmodSync(sudoersPath, 0o600);
       const calls = [];
       const execute = (_command, args) => { calls.push(args); return ""; };
-      const installed = installStagedSystemdServices({
+      const installed = installLaunchdServices({
         repositoryRoot: root,
         unitDirectory,
         sudoersPath,
         systemctlPath: "/usr/bin/true",
         effectiveUid: 0,
         execute,
+        serviceUser: "anneal-test",
+        userLookup: accountLookup,
+        visudoPath: "/usr/bin/true",
+        installUnits: true,
+        apply: false,
       });
       assert.equal(installed.applied, true);
-      assert.deepEqual(calls.slice(0, 2), [["daemon-reload"], ["enable", "--now", `${SERVICE_LABELS[0]}.service`]]);
-      assert.equal(calls.length, SERVICE_LABELS.length + 1);
+      assert.equal(installed.platform, "linux");
+      const wrapperAfterRoot = statSync(stableWrapper);
+      assert.equal(wrapperAfterRoot.ino, wrapperBeforeRoot.ino);
+      assert.equal(wrapperAfterRoot.mtimeMs, wrapperBeforeRoot.mtimeMs);
+      const systemctlCalls = calls.filter((args) => args[0] !== "-c");
+      assert.deepEqual(systemctlCalls.slice(0, 2), [["daemon-reload"], ["enable", "--now", `${SERVICE_LABELS[0]}.service`]]);
+      assert.equal(systemctlCalls.length, SERVICE_LABELS.length + 1);
       assert.equal(existsSync(join(unitDirectory, "com.agentos.api.service")), true);
       assert.equal(statSync(join(unitDirectory, "com.agentos.api.service")).mode & 0o777, 0o644);
       assert.equal(statSync(join(unitDirectory, "com.agentos.api.service.d/os-isolation.conf")).mode & 0o777, 0o644);
@@ -253,6 +382,11 @@ test("Linux service stage is unprivileged and the root stage has an ordered acti
       }));
       assert.match(sudoers, /systemctl show -p ExecStart --value com\.agentos\.api\.service/u);
       assert.doesNotMatch(sudoers, /\b(?:enable|disable|daemon-reload)\b/u);
+      const policy = new Set(sudoers.trim().split("NOPASSWD: ")[1].split(", "));
+      assert.equal(policy.has("/bin/systemctl restart com.agentos.api.service"), true);
+      assert.equal(policy.has("/bin/systemctl enable com.agentos.api.service"), false);
+      assert.equal(policy.has("/bin/systemctl daemon-reload"), false);
+      assert.equal(policy.has("/bin/systemctl restart com.agentos.unknown.service"), false);
 
       const apiUnit = join(unitDirectory, "com.agentos.api.service");
       const installedApi = readFileSync(apiUnit, "utf8");
@@ -267,12 +401,21 @@ test("Linux service stage is unprivileged and the root stage has an ordered acti
           effectiveUid: 0,
           execute,
           revert: true,
+          serviceUser: "anneal-test",
+          userLookup: accountLookup,
+          visudoPath: "/usr/bin/true",
         }),
         /systemd-service-definition-drift/u,
       );
       assert.equal(calls.length, callsBeforeDrift);
       assert.equal(readFileSync(apiUnit, "utf8"), "operator mutation\n");
       writeFileSync(apiUnit, installedApi);
+      const wrapperPath = join(root, "shared/bin/agentos-service-wrapper.mjs");
+      rmSync(wrapperPath);
+      const manifestPath = join(root, ".agentos-deploy/launchd/manifest.json");
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+      manifest.wrapperReverted = true;
+      writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
       const reverted = installStagedSystemdServices({
         repositoryRoot: root,
         unitDirectory,
@@ -281,11 +424,17 @@ test("Linux service stage is unprivileged and the root stage has an ordered acti
         effectiveUid: 0,
         execute,
         revert: true,
+        serviceUser: "anneal-test",
+        userLookup: accountLookup,
+        visudoPath: "/usr/bin/true",
       });
       assert.equal(reverted.reverted, true);
+      assert.equal(reverted.platform, "linux");
       assert.equal(existsSync(join(unitDirectory, "com.agentos.api.service")), false);
+      assert.equal(existsSync(join(unitDirectory, "com.agentos.api.service.d")), false);
+      assert.equal(existsSync(join(unitDirectory, ".anneal-service-transaction.json")), false);
       assert.deepEqual(
-        calls.slice(-(SERVICE_LABELS.length + 1)),
+        calls.filter((args) => args[0] !== "-c").slice(-(SERVICE_LABELS.length + 1)),
         [
           ...SERVICE_LABELS.map((label) => ["disable", "--now", `${label}.service`]),
           ["daemon-reload"],
@@ -315,6 +464,149 @@ test("systemd install privilege and service-account boundaries are explicit", as
   });
 });
 
+test("privileged service install rejects tampered paths, symlinks, units, and sudoers", async () => {
+  await withLinux(() => {
+    const variants = ["target", "staged", "backup", "backup-symlink", "cleanup", "symlink", "root-unit", "sudoers"];
+    for (const variant of variants) {
+      const root = mkdtempSync(join(tmpdir(), `agentos-systemd-tamper-${variant}-`));
+      const unitDirectory = join(root, "etc/systemd/system");
+      const sudoersPath = join(root, "etc/sudoers.d/anneal-service-control");
+      try {
+        if (variant === "backup-symlink") {
+          mkdirSync(unitDirectory, { recursive: true });
+          writeFileSync(join(unitDirectory, "com.agentos.api.service"), "previous definition\n");
+        }
+        const staged = installLaunchdServices({
+          repositoryRoot: root,
+          serviceUser: "anneal-test",
+          userLookup: accountLookup,
+          nodeBinary: process.execPath,
+          gitBinary: process.execPath,
+          unitDirectory,
+          sudoersPath,
+          visudoPath: "/usr/bin/true",
+          effectiveUid: 501,
+          replaceExisting: variant === "backup-symlink",
+          apply: true,
+        });
+        const manifest = JSON.parse(readFileSync(staged.manifestPath, "utf8"));
+        if (variant === "target") manifest.entries[1].path = join(root, "outside-target");
+        if (variant === "staged") manifest.entries[1].stagedPath = join(root, "outside-staged");
+        if (variant === "backup") {
+          manifest.entries[1].existed = true;
+          manifest.entries[1].backupPath = join(root, "outside-backup");
+        }
+        if (variant === "backup-symlink") {
+          const entry = manifest.entries[1];
+          const contents = readFileSync(entry.backupPath);
+          rmSync(entry.backupPath);
+          const real = `${entry.backupPath}.real`;
+          writeFileSync(real, contents);
+          symlinkSync(real, entry.backupPath);
+        }
+        if (variant === "cleanup") manifest.stagingRoot = join(root, "outside-cleanup");
+        if (variant === "symlink") {
+          const target = manifest.entries[1].stagedPath;
+          const contents = readFileSync(target);
+          rmSync(target);
+          const real = `${target}.real`;
+          writeFileSync(real, contents);
+          symlinkSync(real, target);
+        }
+        if (variant === "root-unit") {
+          const entry = manifest.entries[1];
+          const contents = readFileSync(entry.stagedPath, "utf8").replace("User=anneal-test", "User=root");
+          writeFileSync(entry.stagedPath, contents);
+          entry.installedSha256 = digest(contents);
+        }
+        if (variant === "sudoers") {
+          const entry = manifest.auxiliaryEntries.find(({ kind }) => kind === "sudoers");
+          const contents = `${readFileSync(entry.stagedPath, "utf8").trim()}, /bin/systemctl daemon-reload\n`;
+          chmodSync(entry.stagedPath, 0o600);
+          writeFileSync(entry.stagedPath, contents);
+          entry.installedSha256 = digest(contents);
+        }
+        writeFileSync(staged.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+        assert.throws(() => installStagedSystemdServices({
+          repositoryRoot: root,
+          unitDirectory,
+          sudoersPath,
+          systemctlPath: "/usr/bin/true",
+          visudoPath: "/usr/bin/true",
+          effectiveUid: 0,
+          serviceUser: "anneal-test",
+          userLookup: accountLookup,
+          execute: () => "",
+        }), /systemd-(?:service-manifest-invalid|target-outside-directory|symlink-refused|staged-unit-invalid|staged-sudoers-invalid)/u, variant);
+        assert.equal(existsSync(join(root, "outside-target")), false);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }
+  });
+});
+
+test("replace-existing restores unit bytes, mode, and enabled/active state", async () => {
+  await withLinux(() => {
+    const root = mkdtempSync(join(tmpdir(), "agentos-systemd-replace-"));
+    const unitDirectory = join(root, "etc/systemd/system");
+    const sudoersPath = join(root, "etc/sudoers.d/anneal-service-control");
+    const apiUnit = join(unitDirectory, "com.agentos.api.service");
+    mkdirSync(unitDirectory, { recursive: true });
+    writeFileSync(apiUnit, "operator-owned definition\n", { mode: 0o600 });
+    const stageExecute = (_command, args) => {
+      if (args[0] === "is-enabled") return args[1] === "com.agentos.api.service" ? "enabled\n" : "disabled\n";
+      if (args[0] === "is-active") return args[1] === "com.agentos.api.service" ? "active\n" : "inactive\n";
+      return "";
+    };
+    try {
+      const staged = installLaunchdServices({
+        repositoryRoot: root,
+        serviceUser: "anneal-test",
+        userLookup: accountLookup,
+        nodeBinary: process.execPath,
+        gitBinary: process.execPath,
+        unitDirectory,
+        sudoersPath,
+        systemctlPath: "/usr/bin/true",
+        visudoPath: "/usr/bin/true",
+        execute: stageExecute,
+        replaceExisting: true,
+        effectiveUid: 501,
+        apply: true,
+      });
+      const calls = [];
+      const execute = (_command, args) => {
+        calls.push(args);
+        if (args[0] === "is-enabled" && args[1] === "com.agentos.api.service") return "enabled\n";
+        if (args[0] === "is-active" && args[1] === "com.agentos.api.service") return "active\n";
+        return "";
+      };
+      installLaunchdServices({
+        repositoryRoot: root, serviceUser: "anneal-test", userLookup: accountLookup,
+        unitDirectory, sudoersPath, systemctlPath: "/usr/bin/true", visudoPath: "/usr/bin/true",
+        execute, effectiveUid: 0, installUnits: true,
+      });
+      assert.notEqual(readFileSync(apiUnit, "utf8"), "operator-owned definition\n");
+      installLaunchdServices({
+        repositoryRoot: root, serviceUser: "anneal-test", userLookup: accountLookup,
+        unitDirectory, sudoersPath, execute, effectiveUid: 501, revert: true, apply: true,
+      });
+      installLaunchdServices({
+        repositoryRoot: root, serviceUser: "anneal-test", userLookup: accountLookup,
+        unitDirectory, sudoersPath, systemctlPath: "/usr/bin/true", execute,
+        effectiveUid: 0, installUnits: true, revert: true,
+      });
+      assert.equal(readFileSync(apiUnit, "utf8"), "operator-owned definition\n");
+      assert.equal(statSync(apiUnit).mode & 0o777, 0o600);
+      assert.equal(calls.some((args) => args.join(" ") === "enable com.agentos.api.service"), true);
+      assert.equal(calls.some((args) => args.join(" ") === "start com.agentos.api.service"), true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 test("a count of sixteen produces twenty-entry service manifests on both platforms", () => {
   const source = String.raw`
     import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -327,6 +619,7 @@ test("a count of sixteen produces twenty-entry service manifests on both platfor
       const linux = installLaunchdServices({
         repositoryRoot: roots[0], serviceUser: "anneal-test", userLookup: () => "anneal-test:x:620:620::/tmp:/bin/bash",
         nodeBinary: process.execPath, gitBinary: process.execPath, visudoPath: "/usr/bin/true", effectiveUid: 501, apply: true,
+        unitDirectory: join(roots[0], "etc/systemd/system"), sudoersPath: join(roots[0], "etc/sudoers.d/anneal-service-control"),
       });
       process.env.AGENTOS_SERVICE_PLATFORM = "darwin";
       mkdirSync(join(roots[1], "shared"), { recursive: true });
@@ -339,7 +632,18 @@ test("a count of sixteen produces twenty-entry service manifests on both platfor
       });
       const linuxManifest = JSON.parse(readFileSync(linux.manifestPath, "utf8"));
       const darwinManifest = JSON.parse(readFileSync(join(roots[1], ".agentos-deploy/launchd/manifest.json"), "utf8"));
-      console.log(JSON.stringify({ linux: linuxManifest.entries.length, darwin: darwinManifest.entries.length, linuxResult: linux.entries.length, darwinResult: darwin.entries.length }));
+      const countPersisted = linuxManifest.entries.filter((entry) => entry.kind === "service")
+        .every((entry) => readFileSync(entry.stagedPath, "utf8").includes('Environment=AGENTOS_RUNNER_COUNT="16"'));
+      delete process.env.AGENTOS_RUNNER_COUNT;
+      process.env.AGENTOS_SERVICE_PLATFORM = "linux";
+      const calls = [];
+      const installed = installLaunchdServices({
+        repositoryRoot: roots[0], serviceUser: "anneal-test", userLookup: () => "anneal-test:x:620:620::/tmp:/bin/bash",
+        installUnits: true, apply: false, effectiveUid: 0,
+        unitDirectory: join(roots[0], "etc/systemd/system"), sudoersPath: join(roots[0], "etc/sudoers.d/anneal-service-control"),
+        systemctlPath: "/usr/bin/true", visudoPath: "/usr/bin/true", execute: (_command, args) => { calls.push(args); return ""; },
+      });
+      console.log(JSON.stringify({ linux: linuxManifest.entries.length, darwin: darwinManifest.entries.length, linuxResult: linux.entries.length, darwinResult: darwin.entries.length, installedUnits: installed.units.length, countPersisted, enabled: calls.filter((args) => args[0] === "enable").length }));
     } finally {
       for (const root of roots) rmSync(root, { recursive: true, force: true });
     }
@@ -350,7 +654,7 @@ test("a count of sixteen produces twenty-entry service manifests on both platfor
     encoding: "utf8",
   });
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(result.stdout), { linux: 20, darwin: 20, linuxResult: 20, darwinResult: 20 });
+  assert.deepEqual(JSON.parse(result.stdout), { linux: 20, darwin: 20, linuxResult: 20, darwinResult: 20, installedUnits: 19, countPersisted: true, enabled: 19 });
 });
 
 test("auto-deploy systemd stage renders a oneshot and timer, enabling only the timer", async () => {
@@ -411,6 +715,55 @@ test("auto-deploy systemd stage renders a oneshot and timer, enabling only the t
       assert.equal(existsSync(join(unitDirectory, "com.agentos.auto-deploy.service")), false);
     } finally {
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+test("privileged auto-deploy install rejects tampered targets and root service content", async () => {
+  await withLinux(() => {
+    for (const variant of ["target", "root-unit"]) {
+      const root = mkdtempSync(join(tmpdir(), `agentos-auto-tamper-${variant}-`));
+      const unitDirectory = join(root, "etc/systemd/system");
+      const options = {
+        repositoryRoot: root,
+        nodeBinary: "/usr/bin/node",
+        gitBinary: "/usr/bin/git",
+        npmBinary: "/usr/bin/npm",
+        path: "/usr/bin:/bin",
+        sourceRemote: "configured-remote",
+        backup: { mode: "host", pgDumpBinary: "/usr/bin/pg_dump" },
+        serviceUser: "anneal-test",
+        userLookup: accountLookup,
+        unitDirectory,
+        sudoersPath: join(root, "etc/sudoers.d/anneal-service-control"),
+        apply: true,
+        effectiveUid: 501,
+      };
+      try {
+        const staged = planSystemdAutoDeploy(options);
+        const manifest = JSON.parse(readFileSync(staged.manifestPath, "utf8"));
+        if (variant === "target") manifest.entries[0].path = join(root, "outside-auto-target");
+        else {
+          const entry = manifest.entries[0];
+          const contents = readFileSync(entry.stagedPath, "utf8").replace("User=anneal-test", "User=root");
+          writeFileSync(entry.stagedPath, contents);
+          entry.installedSha256 = digest(contents);
+        }
+        writeFileSync(staged.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+        assert.throws(() => installStagedSystemdAutoDeploy({
+          repositoryRoot: root,
+          manifestPath: staged.manifestPath,
+          unitDirectory,
+          serviceUser: "anneal-test",
+          userLookup: accountLookup,
+          systemctlPath: "/usr/bin/true",
+          execute: () => "",
+          effectiveUid: 0,
+        }), /systemd-(?:auto-deploy-manifest-invalid|staged-unit-invalid)/u);
+        assert.equal(existsSync(join(root, "outside-auto-target")), false);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
     }
   });
 });

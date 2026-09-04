@@ -80,6 +80,23 @@ test("a denied Linux control command fails with the unit named", async () => {
   );
 });
 
+test("a systemctl failure is distinct from sudo denial and retains diagnostics", async () => {
+  const recorder = runRecorder({
+    "sudo -n systemctl restart com.agentos.api.service": {
+      code: 1,
+      stdout: "",
+      stderr: "Job for com.agentos.api.service failed; inspect the journal\n",
+    },
+  });
+  const control = createServiceControl({ platform: "linux", euid: 1000, run: recorder.run });
+  await assert.rejects(
+    control.restart("com.agentos.api"),
+    (error) => error instanceof DeployFailure
+      && error.reason === "service-control-failed:restart:com.agentos.api.service"
+      && /inspect the journal/u.test(error.detail),
+  );
+});
+
 test("Darwin control preserves launchctl argv and GUI domain", async () => {
   const recorder = runRecorder({
     "/bin/launchctl print gui/501/com.agentos.api": {

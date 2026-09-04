@@ -26,10 +26,3 @@ agentos_service_platform() {
       ;;
   esac
 }
-
-# The verification branch uses the descriptive resolver name. Keep this
-# compatibility alias while the existing provisioning scripts use the
-# historical function name; both names resolve through the same implementation.
-resolve_service_platform() {
-  agentos_service_platform "$@"
-}

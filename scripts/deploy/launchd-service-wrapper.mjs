@@ -79,7 +79,7 @@ const definition = (label, entrypoint, workingDirectory = ".", args = []) => Obj
   workingDirectory,
   args: Object.freeze([...args]),
   runnerId: runnerIdForLabel(label),
-  unitName: `${label}.service`,
+  unitName: SERVICE_INVENTORY_ENTRIES.find((entry) => entry.label === label)?.unitName,
 });
 
 /** Paths are relative to the release selected by the current pointer. The

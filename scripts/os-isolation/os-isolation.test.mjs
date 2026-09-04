@@ -178,7 +178,7 @@ const makeLinuxFixture = (t, { runnerCount = 10, accountCount = 8 } = {}) => {
   const log = join(root, "calls.log");
   const prefix = join(root, "prefix");
   const homes = join(root, "homes");
-  const workspace = join(root, "workspace");
+  const workspace = join(root, "workspace space 100%");
   const repo = join(root, "repo");
   const tmp = join(root, "tmp");
   const sudoers = join(root, "sudoers");
@@ -223,7 +223,11 @@ const makeLinuxFixture = (t, { runnerCount = 10, accountCount = 8 } = {}) => {
       '    printf "%s:x:%s:%s\\n" "$FIXTURE_GROUP_NAME" "$FIXTURE_GROUP_GID" "$FIXTURE_MEMBERS"',
       "    exit 0",
       "  fi",
-      '  case "$key" in sudo|adm|wheel) exit 2 ;; esac',
+      '  if [ -n "${FIXTURE_PRIVILEGED_GROUP:-}" ] && [ "$key" = "$FIXTURE_PRIVILEGED_GROUP" ]; then',
+      '    printf "%s:x:999:%s\\n" "$key" "${FIXTURE_PRIVILEGED_MEMBERS:-}"',
+      '    exit 0',
+      '  fi',
+      '  case "$key" in sudo|adm|wheel|admin) exit 2 ;; esac',
       "  exit 2",
       "fi",
       'if [ "$kind" = passwd ]; then',
@@ -310,7 +314,7 @@ const makeLinuxFixture = (t, { runnerCount = 10, accountCount = 8 } = {}) => {
       '    label=$(printf "%s" "$unit" | sed "s/\\.service$//")',
       '    if [ "$label" = com.agentos.api ]; then',
       '      account="$FIXTURE_ACCOUNT_PREFIX"1',
-      '      printf "RUNNER_WORKSPACE_ROOT=%s RUNNER_RUN_AS_PREFIX=sudo -u %s -E -- RUNNER_HOME=%s/%s RUNNER_REPO_MIRROR_ROOT=%s/%s/.agentos/repo-mirrors\\n" "$FIXTURE_WORKSPACE" "$account" "$FIXTURE_HOME_BASE" "$account" "$FIXTURE_HOME_BASE" "$account"',
+      '      printf "\\\"RUNNER_WORKSPACE_ROOT=%s\\\" \\\"RUNNER_RUN_AS_PREFIX=sudo -u %s -E --\\\" RUNNER_HOME=%s/%s RUNNER_REPO_MIRROR_ROOT=%s/%s/.agentos/repo-mirrors\\n" "$FIXTURE_WORKSPACE" "$account" "$FIXTURE_HOME_BASE" "$account" "$FIXTURE_HOME_BASE" "$account"',
       "    else",
       '      case "$label" in',
       '        com.agentos.runner) index=1 ;;',
@@ -319,7 +323,7 @@ const makeLinuxFixture = (t, { runnerCount = 10, accountCount = 8 } = {}) => {
       '      esac',
       "      account_id=$(( (index - 1) % FIXTURE_ACCOUNT_COUNT + 1 ))",
       "      account=$FIXTURE_ACCOUNT_PREFIX$account_id",
-      '      printf "RUNNER_RUN_AS_PREFIX=sudo -u %s -E -- RUNNER_HOME=%s/%s RUNNER_WORKSPACE_ROOT=%s RUNNER_MCP_SERVER_PATH=%s/lib/mcp-server.js RUNNER_PI_EXTENSION_PATH=%s/lib/pi-agentos-extension.ts RUNNER_CLAUDE_SETTINGS_PATH=%s/lib/claude-platform-settings.json RUNNER_SESSION_CONFIG_BASELINE_ROOT=%s/lib/session-config-baseline RUNNER_PATH=/usr/bin\\n" "$account" "$FIXTURE_HOME_BASE" "$account" "$FIXTURE_WORKSPACE" "$FIXTURE_PREFIX" "$FIXTURE_PREFIX" "$FIXTURE_PREFIX" "$FIXTURE_PREFIX"',
+      '      printf "\\\"RUNNER_RUN_AS_PREFIX=sudo -u %s -E --\\\" RUNNER_HOME=%s/%s \\\"RUNNER_WORKSPACE_ROOT=%s\\\" RUNNER_MCP_SERVER_PATH=%s/lib/mcp-server.js RUNNER_PI_EXTENSION_PATH=%s/lib/pi-agentos-extension.ts RUNNER_CLAUDE_SETTINGS_PATH=%s/lib/claude-platform-settings.json RUNNER_SESSION_CONFIG_BASELINE_ROOT=%s/lib/session-config-baseline RUNNER_PATH=/usr/bin\\n" "$account" "$FIXTURE_HOME_BASE" "$account" "$FIXTURE_WORKSPACE" "$FIXTURE_PREFIX" "$FIXTURE_PREFIX" "$FIXTURE_PREFIX" "$FIXTURE_PREFIX"',
       "    fi",
       "    ;;",
       "  *) exit 2 ;;",
@@ -412,6 +416,8 @@ const makeLinuxFixture = (t, { runnerCount = 10, accountCount = 8 } = {}) => {
     STAT_OWNER_OVERRIDE: "",
     STAT_OWNER_VALUE: "wrong-owner",
     SUDO_CREDENTIAL_BYPASS: "",
+    FIXTURE_PRIVILEGED_GROUP: "",
+    FIXTURE_PRIVILEGED_MEMBERS: "",
     PATH: binDir + ":" + (process.env.PATH || ""),
     TMPDIR: tmp,
   };
@@ -443,6 +449,17 @@ test("all os-isolation scripts remain valid Bash on both supported platforms", (
       });
       assert.equal(result.status, 0, platform + " " + script + ": " + result.stderr);
     }
+  }
+});
+
+test("verify rejects an explicitly empty runner count on both platforms", () => {
+  for (const platform of ["darwin", "linux"]) {
+    const result = runScript("verify.sh", ["--staged"], {
+      AGENTOS_SERVICE_PLATFORM: platform,
+      AGENTOS_RUNNER_COUNT: "",
+    });
+    assert.equal(result.status, 64);
+    assert.match(result.output, /runner-count-invalid:\s*$/u);
   }
 });
 
@@ -510,6 +527,19 @@ test("Linux verify rejects insecure homes, credentials, ownership, and cross-acc
   assert.match(crossAccountRead.output, /can read .*credential/u);
 });
 
+test("Linux verify rejects every provisioning-defined administrative group", (t) => {
+  const fixture = makeLinuxFixture(t, { runnerCount: 1, accountCount: 1 });
+  for (const group of ["sudo", "wheel", "admin"]) {
+    const result = runScript("verify.sh", [], {
+      ...fixture.environment,
+      FIXTURE_PRIVILEGED_GROUP: group,
+      FIXTURE_PRIVILEGED_MEMBERS: fixture.accounts[0],
+    });
+    assert.notEqual(result.status, 0, `${group}: ${result.output}`);
+    assert.match(result.output, new RegExp(`is in the ${group} group`, "u"));
+  }
+});
+
 test("Linux verify --probe names skipped live checks without a remote and fails live credential checks", (t) => {
   const fixture = makeLinuxFixture(t, { runnerCount: 2, accountCount: 2 });
   const skipped = runScript("verify.sh", ["--probe"], fixture.environment);
@@ -540,7 +570,9 @@ test("Linux patch maps runners to accounts and field-level revert preserves unre
       const label = index === 1 ? "com.agentos.runner" : "com.agentos.runner-" + index;
       const account = fixture.accounts[(index - 1) % fixture.accounts.length];
       const dropin = join(staging, label + ".service.d", "os-isolation.conf");
-      assert.match(readFileSync(dropin, "utf8"), new RegExp("RUNNER_HOME=.*" + account));
+      const contents = readFileSync(dropin, "utf8");
+      assert.match(contents, new RegExp("RUNNER_HOME=.*" + account));
+      assert.match(contents, new RegExp(`RUNNER_PATH=.*${dirname(process.execPath).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}`, "u"));
     }
     const firstLabel = "com.agentos.runner";
     const firstDropin = join(staging, firstLabel + ".service.d", "os-isolation.conf");
@@ -554,4 +586,48 @@ test("Linux patch maps runners to accounts and field-level revert preserves unre
     assert.doesNotMatch(reverted, /RUNNER_HOME=/u);
     assert.ok(existsSync(join(staging, "plist-manifest", firstLabel + ".manifest.reverted")));
   }
+});
+
+test("Linux rollback refuses wired or uninspectable systemd runners and force is explicit", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "agentos-os-rollback-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const binDir = join(root, "bin");
+  const log = join(root, "calls.log");
+  writeFileSync(log, "");
+  writeShim(binDir, "systemctl", [
+    '[ "${FIXTURE_SYSTEMCTL_FAIL:-0}" = 1 ] && exit 1',
+    'printf "%s\\n" "${FIXTURE_RUNNER_ENV:-}"',
+  ].join("\n"));
+  writeShim(binDir, "getent", "exit 2");
+  const environment = {
+    AGENTOS_SERVICE_PLATFORM: "linux",
+    AGENTOS_RUNNER_COUNT: "2",
+    ACCOUNT_COUNT: "2",
+    ACCOUNT_PREFIX: "fixture-account-",
+    SYSTEMCTL_BIN: join(binDir, "systemctl"),
+    SUDOERS_FILE: join(root, "sudoers"),
+    WORKSPACE_ROOT: join(root, "workspaces"),
+    HOME_BASE: join(root, "homes"),
+    STUB_LOG: log,
+    PATH: `${binDir}:${process.env.PATH || ""}`,
+  };
+  const wired = runScript("rollback.sh", [], {
+    ...environment,
+    FIXTURE_RUNNER_ENV: '"RUNNER_RUN_AS_PREFIX=sudo -u fixture-account-1 -E --"',
+  });
+  assert.notEqual(wired.status, 0);
+  assert.match(wired.output, /Refusing to delete accounts that 2 runner\(s\) still launch as/u);
+  const forced = runScript("rollback.sh", ["--force"], {
+    ...environment,
+    FIXTURE_RUNNER_ENV: '"RUNNER_RUN_AS_PREFIX=sudo -u fixture-account-1 -E --"',
+  });
+  assert.equal(forced.status, 0, forced.output);
+  const unwired = runScript("rollback.sh", [], { ...environment, FIXTURE_RUNNER_ENV: "PATH=/usr/bin" });
+  assert.equal(unwired.status, 0, unwired.output);
+  const failed = runScript("rollback.sh", [], { ...environment, FIXTURE_SYSTEMCTL_FAIL: "1" });
+  assert.notEqual(failed.status, 0);
+  assert.match(failed.output, /systemd-runner-inspection-failed:com\.agentos\.runner\.service/u);
+  const unavailable = runScript("rollback.sh", [], { ...environment, SYSTEMCTL_BIN: join(root, "missing-systemctl") });
+  assert.notEqual(unavailable.status, 0);
+  assert.match(unavailable.output, /systemd-systemctl-unavailable/u);
 });

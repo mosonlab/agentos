@@ -533,11 +533,16 @@ const serviceState = async (serviceControl) => {
  * loaded definition must name the stable shared wrapper, each label must still
  * be running from the old current target, and the API must report that exact
  * current release commit. */
-const verifyStableServicePaths = async (serviceControl) => {
-  const wrapper = serviceWrapperPath(REPOSITORY_ROOT);
+export const verifyStableServicePaths = async (serviceControl, {
+  repositoryRoot = REPOSITORY_ROOT,
+  environment = process.env,
+  fetchImpl = fetch,
+} = {}) => {
+  const wrapper = serviceWrapperPath(repositoryRoot);
   try {
     return await verifyServiceInventory({
-      repositoryRoot: REPOSITORY_ROOT,
+      repositoryRoot,
+      environment,
       start: async (invocation) => {
         let description;
         let running;
@@ -560,8 +565,8 @@ const verifyStableServicePaths = async (serviceControl) => {
       readiness: async ({ label, invocation }) => {
         if (label !== "com.agentos.api") return { ok: true, releaseIdentity: invocation.releaseIdentity };
         const port = process.env.API_PORT ?? "3000";
-        const health = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2_000) });
-        const version = await fetch(`http://127.0.0.1:${port}/version`, { signal: AbortSignal.timeout(2_000) });
+        const health = await fetchImpl(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2_000) });
+        const version = await fetchImpl(`http://127.0.0.1:${port}/version`, { signal: AbortSignal.timeout(2_000) });
         const payload = version.ok ? await version.json() : {};
         return {
           ok: health.ok && version.ok && payload.commit === invocation.releaseCommit && payload.dirty === false,
@@ -584,7 +589,10 @@ const makeWritable = (root) => {
   visit(root);
 };
 
-export const createDeployHost = ({ serviceControl = createDefaultServiceControl() } = {}) => {
+export const createDeployHost = ({
+  serviceControl = createDefaultServiceControl(),
+  verifyRecoveredServices = verifyStableServicePaths,
+} = {}) => {
   let canonicalSyncRefusals = [];
   const notifyDeployOutcome = async (record) => notify(canonicalSyncNoticeRecord(record, canonicalSyncRefusals));
   return createProductionHost({
@@ -898,6 +906,10 @@ export const createDeployHost = ({ serviceControl = createDefaultServiceControl(
           timeoutReason: "previous-service-restore-timeout",
         });
       }
+      // The pointer has already been restored by the transaction coordinator.
+      // Re-run the complete loaded-definition and readiness proof before the
+      // rollback is allowed to become a proven recovery outcome.
+      await verifyRecoveredServices(serviceControl);
     },
     escalate: writeEscalation,
     markEscalationNotified: async () => markEscalationNotified({ path: ESCALATION_PATH }),
