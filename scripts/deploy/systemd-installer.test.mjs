@@ -214,7 +214,7 @@ test("non-default runner count is persisted in service and auto-deploy definitio
   assert.match(renderAutoDeploySystemdUnit(undefined, autoValues), /^Environment=AGENTOS_RUNNER_COUNT="16"$/mu);
 });
 
-test("systemd path directives quote whitespace and escape percent specifiers", () => {
+test("systemd path directives escape whitespace and percent specifiers", () => {
   const root = "/opt/Anneal Runtime 100%";
   const values = servicePlistValues({
     label: "com.agentos.api",
@@ -227,7 +227,7 @@ test("systemd path directives quote whitespace and escape percent specifiers", (
     wrapperPath: `${root}/shared/bin/agentos-service-wrapper.mjs`,
   });
   const unit = renderServiceSystemdUnit(undefined, { ...values, serviceUser: "anneal-test" });
-  assert.match(unit, /^WorkingDirectory="\/opt\/Anneal Runtime 100%%"$/mu);
+  assert.match(unit, /^WorkingDirectory=\/opt\/Anneal\\x20Runtime\\x20100%%$/mu);
   assert.match(unit, /^ExecStart="\/opt\/Node Runtime 100%%\/node" "\/opt\/Anneal Runtime 100%%\/shared\/bin\/agentos-service-wrapper\.mjs" com\.agentos\.api$/mu);
 });
 
@@ -270,6 +270,23 @@ test("default Darwin render, manifest entries, and plan stdout match 9a52c6ad by
     });
     assert.equal(digest(autoPlist), baseline.autoDeployPlistSha256);
     const autoHome = mkdtempSync(join(tmpdir(), "agentos-darwin-auto-home-"));
+    const resolvedCommand = (name) => realpathSync(spawnSync("/usr/bin/which", [name], { encoding: "utf8" }).stdout.trim());
+    const actualGit = resolvedCommand("git");
+    const autoBin = join(autoHome, "bin");
+    const autoGitPath = join(autoBin, "git");
+    mkdirSync(autoBin);
+    writeFileSync(autoGitPath, `#!/usr/bin/env node
+import { spawnSync } from "node:child_process";
+const args = process.argv.slice(2);
+if (args.length === 5 && args[0] === "-C" && args.slice(2).join(" ") === "remote get-url origin") {
+  process.stdout.write("origin\\n");
+  process.exit(0);
+}
+const result = spawnSync(${JSON.stringify(actualGit)}, args, { stdio: "inherit" });
+if (result.error) throw result.error;
+process.exit(result.status ?? 1);
+`, { mode: 0o755 });
+    const autoGit = realpathSync(autoGitPath);
     const autoEntrypoint = spawnSync(process.execPath, [
       "scripts/deploy/install-launchd.mjs",
       "--pg-dump-mode", "host",
@@ -277,21 +294,26 @@ test("default Darwin render, manifest entries, and plan stdout match 9a52c6ad by
     ], {
       cwd: root,
       encoding: "utf8",
-      env: { ...process.env, AGENTOS_SERVICE_PLATFORM: "darwin", HOME: autoHome },
+      env: {
+        ...process.env,
+        AGENTOS_SERVICE_PLATFORM: "darwin",
+        HOME: autoHome,
+        // Gate worktrees need not have an origin; the shim supplies the frozen
+        // baseline value and delegates every other Git command.
+        PATH: `${autoBin}:${process.env.PATH ?? ""}`,
+      },
     });
     assert.equal(autoEntrypoint.status, 0, autoEntrypoint.stderr);
     const autoNode = realpathSync(process.execPath);
-    const resolvedCommand = (name) => realpathSync(spawnSync("/usr/bin/which", [name], { encoding: "utf8" }).stdout.trim());
-    const autoGit = resolvedCommand("git");
     const autoNpm = resolvedCommand("npm");
     const autoPath = controlledLaunchdPath({ nodeBinary: autoNode, gitBinary: autoGit });
     const normalizeAuto = (value) => value
-      .replaceAll(autoHome, "<HOME>")
-      .replaceAll(root, "<ROOT>")
       .replaceAll(autoPath, "<CONTROLLED_PATH>")
       .replaceAll(autoNode, "<NODE>")
       .replaceAll(autoGit, "<GIT>")
-      .replaceAll(autoNpm, "<NPM>");
+      .replaceAll(autoNpm, "<NPM>")
+      .replaceAll(autoHome, "<HOME>")
+      .replaceAll(root, "<ROOT>");
     const normalizedAutoStdout = normalizeAuto(autoEntrypoint.stdout);
     assert.equal(normalizedAutoStdout, baseline.autoDeployPlanStdout);
     assert.deepEqual(

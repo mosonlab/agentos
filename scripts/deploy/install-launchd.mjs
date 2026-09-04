@@ -422,6 +422,20 @@ const systemdDirectiveToken = (value, key) => {
   return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"').replaceAll("%", "%%")}"`;
 };
 
+// WorkingDirectory's path parser treats surrounding quotes as path bytes on
+// older supported systemd releases, so escape whitespace without quoting it.
+const systemdPathDirective = (value, key) => {
+  if (typeof value !== "string" || value === "" || /[\0\n\r]/u.test(value)) {
+    throw new Error(`systemd-directive-value-invalid:${key}`);
+  }
+  return value
+    .replaceAll("\\", "\\\\")
+    .replaceAll("\t", "\\t")
+    .replaceAll(" ", "\\x20")
+    .replaceAll('"', '\\"')
+    .replaceAll("%", "%%");
+};
+
 export const renderSystemdEnvironment = (values) => Object.entries(values)
   .map(([key, value]) => {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(key)) throw new Error(`systemd-environment-key-invalid:${key}`);
@@ -450,7 +464,7 @@ export const renderServiceSystemdUnit = (
     __LABEL__: values.label,
     __NODE_BINARY__: systemdDirectiveToken(values.nodeBinary, "node-binary"),
     __WRAPPER_PATH__: systemdDirectiveToken(values.wrapperPath, "wrapper-path"),
-    __REPOSITORY_ROOT__: systemdDirectiveToken(values.repositoryRoot, "repository-root"),
+    __REPOSITORY_ROOT__: systemdPathDirective(values.repositoryRoot, "repository-root"),
     __SERVICE_USER__: values.serviceUser,
     __ENVIRONMENT__: renderSystemdEnvironment(serviceEnvironmentValues(values)),
   }, "systemd-service-template-has-unresolved-placeholder");
@@ -467,7 +481,7 @@ export const renderAutoDeploySystemdUnit = (
   return renderSystemdTemplate(template, {
     __NODE_BINARY__: systemdDirectiveToken(values.nodeBinary, "node-binary"),
     __DEPLOY_SCRIPT__: systemdDirectiveToken(values.deployScript, "deploy-script"),
-    __REPOSITORY_ROOT__: systemdDirectiveToken(values.repositoryRoot, "repository-root"),
+    __REPOSITORY_ROOT__: systemdPathDirective(values.repositoryRoot, "repository-root"),
     __SERVICE_USER__: values.serviceUser,
     __ENVIRONMENT__: renderSystemdEnvironment(autoDeployEnvironmentValues(values)),
   }, "systemd-auto-deploy-template-has-unresolved-placeholder");
