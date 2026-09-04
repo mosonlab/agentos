@@ -5,8 +5,6 @@ import { isAbsolute, resolve } from "node:path";
 import { RUNNER_KINDS } from "./adapters.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
 
-export const SUPPORTED_RUNNERS: readonly RunnerKind[] = RUNNER_KINDS;
-
 export type CliAvailability = {
   runner: RunnerKind;
   binary: string;
@@ -54,10 +52,10 @@ export const probeCliAvailability = async (
 
 export const probeSupportedCliAvailability = async (
   config: RunnerConfig,
-): Promise<Record<RunnerKind, CliAvailability>> => {
-  const entries = await Promise.all(SUPPORTED_RUNNERS.map(async (runner) => [
+): Promise<Partial<Record<RunnerKind, CliAvailability>>> => {
+  const entries = await Promise.all((config.servedKinds ?? RUNNER_KINDS).map(async (runner) => [
     runner,
     await probeCliAvailability(config, runner),
   ] as const));
-  return Object.fromEntries(entries) as Record<RunnerKind, CliAvailability>;
+  return Object.fromEntries(entries) as Partial<Record<RunnerKind, CliAvailability>>;
 };

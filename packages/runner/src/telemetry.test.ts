@@ -10,8 +10,19 @@ import { loadRunnerConfig } from "./config.js";
 const require = createRequire(import.meta.url);
 const packageVersion = (require("../package.json") as { version: string }).version;
 
+const loadUndeclaredRunnerConfig = (): ReturnType<typeof loadRunnerConfig> => {
+  const previous = process.env.RUNNER_SERVED_KINDS;
+  try {
+    delete process.env.RUNNER_SERVED_KINDS;
+    return loadRunnerConfig();
+  } finally {
+    if (previous === undefined) delete process.env.RUNNER_SERVED_KINDS;
+    else process.env.RUNNER_SERVED_KINDS = previous;
+  }
+};
+
 test("claim and heartbeat telemetry carry the exact package version", async () => {
-  const config = loadRunnerConfig();
+  const config = loadUndeclaredRunnerConfig();
   const stats = async (): Promise<{ bavail: number; bsize: number }> => ({ bavail: 12, bsize: 4_096 });
   const claim = await claimRequestBody(config, stats);
   const heartbeat = await runnerTelemetryBody(config, stats);
@@ -28,8 +39,20 @@ test("claim and heartbeat telemetry carry the exact package version", async () =
   });
 });
 
+test("claim declaration is sent only when the runner serves an explicit set", async () => {
+  const config = loadUndeclaredRunnerConfig();
+  const stats = async (): Promise<{ bavail: number; bsize: number }> => ({ bavail: 12, bsize: 4_096 });
+  const declaredConfig = { ...config, servedKinds: ["CODEX", "PI"] as const };
+
+  const undeclared = await claimRequestBody(config, stats);
+  const declared = await claimRequestBody(declaredConfig, stats);
+
+  assert.equal(Object.hasOwn(undeclared, "servedKinds"), false);
+  assert.deepEqual(declared, { ...undeclared, servedKinds: ["CODEX", "PI"] });
+});
+
 test("a statfs failure omits disk telemetry without blocking a claim", async () => {
-  const config = loadRunnerConfig();
+  const config = loadUndeclaredRunnerConfig();
   const claim = await claimRequestBody(config, async () => { throw new Error("unmounted"); });
   assert.equal(Object.hasOwn(claim, "diskFreeBytes"), false);
   assert.equal(claim.runnerId, config.runnerId);
@@ -37,7 +60,7 @@ test("a statfs failure omits disk telemetry without blocking a claim", async () 
 });
 
 test("the claim telemetry stays inside the API schema bounds", async () => {
-  const config = loadRunnerConfig();
+  const config = loadUndeclaredRunnerConfig();
   const body = await claimRequestBody(config, async () => ({ bavail: 1, bsize: 4_096 }));
   assert.ok(typeof body.daemonVersion === "string" && body.daemonVersion.length <= 40);
   assert.ok(Number.isSafeInteger(body.diskFreeBytes) && Number(body.diskFreeBytes) >= 0);
@@ -54,7 +77,7 @@ test("a control-plane call that connects but never answers fails instead of hold
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address() as AddressInfo;
   const config = {
-    ...loadRunnerConfig(),
+    ...loadUndeclaredRunnerConfig(),
     apiUrl: `http://127.0.0.1:${address.port}`,
     apiTimeoutMs: 300,
   };

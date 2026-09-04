@@ -1259,6 +1259,7 @@ test("T21: a claimed database chain run is the exact provenance recorded by its 
       apiUrl: "http://api.invalid",
       runnerToken: RUNNER,
       runnerId: "runner-1",
+      servedKinds: null,
       daemonVersion: "0.0.0-dbtest",
       pollIntervalMs: 1_000,
       claimMaxLoadAverage: 1.5,
