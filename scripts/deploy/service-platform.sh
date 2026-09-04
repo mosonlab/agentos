@@ -3,7 +3,7 @@
 #
 # Keep this in step with service-platform.mjs: callers may force either
 # supported platform for tests, while an unsupported value is always a hard
-# refusal.  The uname probe lives here so os-isolation scripts do not each grow
+# refusal. The uname probe lives here so os-isolation scripts do not each grow
 # a subtly different platform detector.
 agentos_service_platform() {
   local raw_platform
@@ -27,3 +27,9 @@ agentos_service_platform() {
   esac
 }
 
+# The verification branch uses the descriptive resolver name. Keep this
+# compatibility alias while the existing provisioning scripts use the
+# historical function name; both names resolve through the same implementation.
+resolve_service_platform() {
+  agentos_service_platform "$@"
+}
