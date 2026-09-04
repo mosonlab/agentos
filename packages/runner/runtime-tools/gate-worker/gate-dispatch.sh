@@ -17,15 +17,15 @@
 # slots only when --allow-local (or AGENTOS_GATE_ALLOW_LOCAL=1) says this
 # invocation may spend its resources, and those slots are tried before remotes.
 #
-# The accounting is one lock file per configured slot under
-# ${XDG_CACHE_HOME:-~/.cache}/gate-dispatch/, outside any repository because the
-# slots belong to the machines, not to a checkout. lib.sh holds the locking
-# itself and says why it is shaped the way it is. Every dispatch on this machine
-# contends for the same slots. A direct merge-gate.sh is invisible to this
-# accounting. A direct
-# remote-gate.sh bypasses the local accounting too, but run-gate.sh enforces the
-# worker's configured capacity with worker-wide execution locks held for the
-# real process lifetime.
+# The accounting is one lock file per configured slot under the runner account's
+# cache: AGENTOS_RUNNER_HOME/.cache/gate-dispatch/ in a Run, otherwise
+# ${XDG_CACHE_HOME:-~/.cache}/gate-dispatch/. It is outside any repository because
+# the slots belong to the account, not to a checkout. lib.sh holds the locking
+# itself and says why it is shaped the way it is. Sessions of one account contend
+# for the same slots. A direct merge-gate.sh is invisible to this accounting. A
+# direct remote-gate.sh bypasses the local accounting too, but run-gate.sh
+# enforces the worker's configured capacity with worker-wide execution locks
+# held for the real process lifetime.
 #
 # The optional local slots are only eligible when this worktree is already the
 # thing a local gate would test: HEAD at the requested commit and the tree clean.
@@ -86,7 +86,16 @@ ALLOW_LOCAL="${AGENTOS_GATE_ALLOW_LOCAL:-0}"
 LOCAL_SLOT_COUNT="${AGENTOS_GATE_LOCAL_SLOTS-1}"
 POLL_SECONDS="${GATE_DISPATCH_POLL_SECONDS:-30}"
 TIMEOUT_MINUTES="${GATE_DISPATCH_TIMEOUT_MINUTES:-60}"
-SLOT_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/gate-dispatch"
+if [ -n "${AGENTOS_RUNNER_HOME:-}" ]; then
+  SLOT_ROOT="${AGENTOS_RUNNER_HOME}/.cache/gate-dispatch"
+  SLOT_ROOT_SOURCE="AGENTOS_RUNNER_HOME"
+elif [ -n "${XDG_CACHE_HOME:-}" ]; then
+  SLOT_ROOT="${XDG_CACHE_HOME}/gate-dispatch"
+  SLOT_ROOT_SOURCE="XDG_CACHE_HOME"
+else
+  SLOT_ROOT="$HOME/.cache/gate-dispatch"
+  SLOT_ROOT_SOURCE="HOME"
+fi
 
 OID=""
 MASTER_OID=""
@@ -326,7 +335,8 @@ else
 fi
 [ -n "$FALLBACK_SERVER" ] && printf ', fallback %s(1)' "$FALLBACK_SERVER" >&2
 [ "$ALLOW_LOCAL" -eq 1 ] && printf ', local(%s, explicit)' "$LOCAL_SLOT_COUNT_NUM" >&2
-printf ', poll %ss, timeout %smin\n' "$POLL_SECONDS" "$TIMEOUT_MINUTES" >&2
+printf ', poll %ss, timeout %smin, slot root %s (from %s)\n' \
+  "$POLL_SECONDS" "$TIMEOUT_MINUTES" "$SLOT_ROOT" "$SLOT_ROOT_SOURCE" >&2
 printf 'gate-dispatch: baseline %s%s\n' "$MASTER_OID" "${DEFAULT_REF:+ (${DEFAULT_REF})}" >&2
 
 # --- dispatch ----------------------------------------------------------------
