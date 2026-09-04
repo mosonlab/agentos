@@ -26,6 +26,13 @@
 # the operator-run reclaim pass
 set -uo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../deploy/service-platform.sh
+source "$SCRIPT_DIR/../deploy/service-platform.sh"
+if ! SERVICE_PLATFORM="$(agentos_service_platform)"; then
+  exit 64
+fi
+
 APPLY=0
 OLDER_THAN_HOURS="${OLDER_THAN_HOURS:-24}"
 LIMIT="${LIMIT:-50}"
@@ -41,7 +48,7 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 
-RUNNER_COUNT="${RUNNER_COUNT:-8}"
+ACCOUNT_COUNT="${ACCOUNT_COUNT:-8}"
 ACCOUNT_PREFIX="${ACCOUNT_PREFIX:-_agentos}"
 AGENTOS_PREFIX="${AGENTOS_PREFIX:-/opt/agentos}"
 WORKSPACE_ROOT="${WORKSPACE_ROOT:-$AGENTOS_PREFIX/runs}"
@@ -121,17 +128,21 @@ for dir in "${candidates[@]}"; do
   if [ -L "$dir" ]; then
     kept=$((kept + 1)); report KEEP "$name" "it is a symlink, not a run directory"; continue
   fi
-  owner="$(stat -f '%Su' "$dir" 2>/dev/null)"
+  if [ "$SERVICE_PLATFORM" = "linux" ]; then
+    owner="$(stat -c '%U' "$dir" 2>/dev/null)"
+  else
+    owner="$(stat -f '%Su' "$dir" 2>/dev/null)"
+  fi
   index="${owner#"$ACCOUNT_PREFIX"}"
   case "$owner" in
     "$ACCOUNT_PREFIX"[0-9]*) ;;
     *) kept=$((kept + 1)); report KEEP "$name" "owned by '$owner', not a runner account"; continue ;;
   esac
   case "$index" in
-    ''|*[!0-9]*) kept=$((kept + 1)); report KEEP "$name" "owner '$owner' is not one of $ACCOUNT_PREFIX""1..$RUNNER_COUNT"; continue ;;
+    ''|*[!0-9]*) kept=$((kept + 1)); report KEEP "$name" "owner '$owner' is not one of $ACCOUNT_PREFIX""1..$ACCOUNT_COUNT"; continue ;;
   esac
-  if [ "$index" -lt 1 ] || [ "$index" -gt "$RUNNER_COUNT" ]; then
-    kept=$((kept + 1)); report KEEP "$name" "owner '$owner' is outside 1..$RUNNER_COUNT"; continue
+  if [ "$index" -lt 1 ] || [ "$index" -gt "$ACCOUNT_COUNT" ]; then
+    kept=$((kept + 1)); report KEEP "$name" "owner '$owner' is outside 1..$ACCOUNT_COUNT"; continue
   fi
   row="$(lookup "$name")"
   if [ -z "$row" ]; then

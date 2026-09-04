@@ -1,0 +1,10 @@
+[Unit]
+Description=Anneal quiet-window auto-deploy schedule
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=300
+Unit=com.agentos.auto-deploy.service
+
+[Install]
+WantedBy=timers.target

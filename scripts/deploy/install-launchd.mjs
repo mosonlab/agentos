@@ -4,25 +4,33 @@ import { createHash } from "node:crypto";
 import {
   accessSync,
   chmodSync,
+  chownSync,
   constants as fsConstants,
   copyFileSync,
   existsSync,
+  lstatSync,
   linkSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
   realpathSync,
+  readdirSync,
   renameSync,
+  rmdirSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { resolveServicePlatform } from "./service-platform.mjs";
+
 import {
-  SERVICE_INVENTORY,
+  SERVICE_INVENTORY_ENTRIES,
+  generateServiceInventory,
+  resolveRunnerCount,
   SERVICE_LABELS,
   resolveCurrentRelease,
 } from "./launchd-service-wrapper.mjs";
@@ -40,8 +48,14 @@ const REPOSITORY_ROOT = resolve(SCRIPT_DIR, "../..");
 const TEMPLATE = join(SCRIPT_DIR, "com.agentos.auto-deploy.plist.in");
 const LABEL = "com.agentos.auto-deploy";
 const SERVICE_TEMPLATE = join(SCRIPT_DIR, "com.agentos.service.plist.in");
+const SYSTEMD_SERVICE_TEMPLATE = join(SCRIPT_DIR, "com.agentos.service.unit.in");
+const SYSTEMD_AUTO_DEPLOY_TEMPLATE = join(SCRIPT_DIR, "com.agentos.auto-deploy.unit.in");
+const SYSTEMD_AUTO_DEPLOY_TIMER_TEMPLATE = join(SCRIPT_DIR, "com.agentos.auto-deploy.timer.in");
 const SERVICE_WRAPPER_SOURCE = join(SCRIPT_DIR, "launchd-service-wrapper.mjs");
 const SERVICE_INSTALL_ROOT = ".agentos-deploy/launchd";
+const AUTO_DEPLOY_INSTALL_ROOT = ".agentos-deploy/launchd-auto-deploy";
+const SYSTEMD_UNIT_DIRECTORY = "/etc/systemd/system";
+const SYSTEMD_SUDOERS_PATH = "/etc/sudoers.d/anneal-service-control";
 const SHARED_RUNTIME_DIRECTORIES = Object.freeze([
   "files",
   "runs",
@@ -56,6 +70,8 @@ const xml = (value) => value
   .replaceAll(">", "&gt;")
   .replaceAll('"', "&quot;")
   .replaceAll("'", "&apos;");
+
+const shellQuote = (value) => `'${String(value).replaceAll("'", `'"'"'`)}'`;
 
 const requiredBinary = (name) => {
   let path;
@@ -108,9 +124,14 @@ const optionValue = (args, option) => {
 export const parseInstallerArgs = (args) => {
   const applyCount = args.filter((argument) => argument === "--apply").length;
   if (applyCount > 1) throw new Error("installer-option-repeated:--apply");
-  const mode = optionValue(args, "--pg-dump-mode");
-  const allowed = new Set(["--apply", "--pg-dump-mode"]);
-  const backup = { mode };
+  const installUnitsCount = args.filter((argument) => argument === "--install-units").length;
+  if (installUnitsCount > 1) throw new Error("installer-option-repeated:--install-units");
+  const revertCount = args.filter((argument) => argument === "--revert").length;
+  if (revertCount > 1) throw new Error("installer-option-repeated:--revert");
+  const hasMode = args.includes("--pg-dump-mode");
+  const mode = hasMode ? optionValue(args, "--pg-dump-mode") : null;
+  const allowed = new Set(["--apply", "--install-units", "--revert", "--pg-dump-mode", "--service-user"]);
+  const backup = mode === null ? null : { mode };
   if (mode === "container") {
     allowed.add("--docker-binary");
     allowed.add("--pg-dump-container");
@@ -121,16 +142,27 @@ export const parseInstallerArgs = (args) => {
   } else if (mode === "host") {
     allowed.add("--pg-dump-binary");
     backup.pgDumpBinary = optionValue(args, "--pg-dump-binary");
-  } else {
+  } else if (mode !== null) {
     throw new Error("backup-configuration-invalid:pg-dump-mode-must-be-host-or-container");
   }
+  const serviceUser = args.includes("--service-user") ? optionValue(args, "--service-user") : undefined;
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
     if (!argument.startsWith("--")) throw new Error(`installer-option-unexpected-value:${argument}`);
     if (!allowed.has(argument)) throw new Error(`installer-option-unknown:${argument}`);
-    if (argument !== "--apply") index += 1;
+    if (["--apply", "--install-units", "--revert"].includes(argument)) continue;
+    index += 1;
   }
-  return { apply: applyCount === 1, backup };
+  if (mode === null && !args.includes("--install-units") && !args.includes("--revert")) {
+    throw new Error("backup-configuration-invalid:pg-dump-mode-must-be-host-or-container");
+  }
+  return {
+    apply: applyCount === 1,
+    installUnits: installUnitsCount === 1,
+    revert: revertCount === 1,
+    serviceUser,
+    backup,
+  };
 };
 
 export const verifyBackupConfiguration = (backup, execute = execFileSync) => {
@@ -168,7 +200,11 @@ export const verifyBackupConfiguration = (backup, execute = execFileSync) => {
   });
 };
 
-const backupEnvironment = (backup) => {
+const runnerCountEnvironment = (runnerCount) => runnerCount === undefined || runnerCount === 10
+  ? {}
+  : { AGENTOS_RUNNER_COUNT: String(runnerCount) };
+
+const backupEnvironment = (backup, runnerCount) => {
   const values = backup.mode === "host"
     ? {
         DEPLOY_PG_DUMP_MODE: "host",
@@ -180,6 +216,7 @@ const backupEnvironment = (backup) => {
         DEPLOY_PG_DUMP_CONTAINER: backup.container,
         DEPLOY_CONTAINER_PG_DUMP_BINARY: backup.pgDumpBinary,
       };
+  Object.assign(values, runnerCountEnvironment(runnerCount));
   return Object.entries(values)
     .map(([key, value]) => `    <key>${xml(key)}</key>\n    <string>${xml(value)}</string>`)
     .join("\n");
@@ -201,7 +238,7 @@ export const renderLaunchdPlist = (template, values) => {
   for (const [placeholder, value] of Object.entries(replacements)) {
     rendered = rendered.replaceAll(placeholder, xml(value));
   }
-  rendered = rendered.replaceAll("__BACKUP_ENVIRONMENT__", backupEnvironment(values.backup));
+  rendered = rendered.replaceAll("__BACKUP_ENVIRONMENT__", backupEnvironment(values.backup, values.runnerCount));
   if (/__[A-Z_]+__/u.test(rendered)) throw new Error("launchd-template-has-unresolved-placeholder");
   return rendered;
 };
@@ -273,8 +310,10 @@ export const servicePlistValues = ({
   stderrPath,
   path,
   wrapperPath = serviceWrapperPath(repositoryRoot),
+  runnerCount = resolveRunnerCount(),
 }) => {
-  if (!SERVICE_INVENTORY[label]) throw new Error(`service-label-unknown:${String(label)}`);
+  const inventoryEntry = generateServiceInventory(runnerCount).find((entry) => entry.label === label);
+  if (!inventoryEntry) throw new Error(`service-label-unknown:${String(label)}`);
   if (!nodeBinary || !repositoryRoot || !stdoutPath || !stderrPath || !path) {
     throw new Error("service-plist-values-incomplete");
   }
@@ -287,8 +326,9 @@ export const servicePlistValues = ({
     stdoutPath,
     stderrPath,
     path,
-    ...(SERVICE_INVENTORY[label].runnerId
-      ? { runnerId: SERVICE_INVENTORY[label].runnerId, runnerPath: path }
+    runnerCount,
+    ...(inventoryEntry.runnerId
+      ? { runnerId: inventoryEntry.runnerId, runnerPath: path }
       : {}),
     wrapperPath,
   });
@@ -308,12 +348,244 @@ export const renderServiceLaunchdPlist = (template, values) => {
   };
   let rendered = template;
   for (const [placeholder, value] of Object.entries(replacements)) rendered = rendered.replaceAll(placeholder, xml(value));
-  const runnerEnvironment = values.runnerId
-    ? `    <key>RUNNER_ID</key>\n    <string>${xml(values.runnerId)}</string>\n    <key>RUNNER_PATH</key>\n    <string>${xml(values.runnerPath)}</string>`
-    : "";
+  const runnerEnvironmentValues = {
+    ...(values.runnerId ? { RUNNER_ID: values.runnerId, RUNNER_PATH: values.runnerPath } : {}),
+    ...runnerCountEnvironment(values.runnerCount),
+  };
+  const runnerEnvironment = Object.entries(runnerEnvironmentValues)
+    .map(([key, value]) => `    <key>${xml(key)}</key>\n    <string>${xml(value)}</string>`)
+    .join("\n");
   rendered = rendered.replaceAll("__RUNNER_ENVIRONMENT__", runnerEnvironment);
   if (/__[A-Z_]+__/u.test(rendered)) throw new Error("launchd-service-template-has-unresolved-placeholder");
   return rendered;
+};
+
+/**
+ * The service unit deliberately receives the same environment dictionary as
+ * the LaunchAgent plist.  Keep this conversion in one place so a new
+ * environment key cannot silently land in only one platform's definition.
+ */
+export const serviceEnvironmentValues = (values) => Object.freeze({
+  PATH: values.path,
+  DEPLOY_NODE_BINARY: values.nodeBinary,
+  AGENTOS_REPOSITORY_ROOT: values.repositoryRoot,
+  AGENTOS_SHARED_ROOT: values.sharedRoot,
+  AGENTOS_SHARED_ENV_FILE: values.sharedEnvironmentPath,
+  AGENTOS_CURRENT_POINTER: "current",
+  AGENTOS_RELEASES_DIRECTORY: "releases",
+  AGENTOS_SERVICE_LABEL: values.label,
+  ...runnerCountEnvironment(values.runnerCount),
+  ...(values.runnerId
+    ? { RUNNER_ID: values.runnerId, RUNNER_PATH: values.runnerPath }
+    : {}),
+});
+
+export const autoDeployEnvironmentValues = (values) => Object.freeze({
+  AGENTOS_REPOSITORY_ROOT: values.repositoryRoot,
+  PATH: values.path,
+  QUIET_WINDOW_POLL_SECONDS: "60",
+  DEPLOY_NODE_BINARY: values.nodeBinary,
+  DEPLOY_GIT_BINARY: values.gitBinary,
+  DEPLOY_NPM_BINARY: values.npmBinary,
+  DEPLOY_SOURCE_REMOTE: values.sourceRemote,
+  ...runnerCountEnvironment(values.runnerCount),
+  ...(values.backup.mode === "host"
+    ? {
+        DEPLOY_PG_DUMP_MODE: "host",
+        DEPLOY_PG_DUMP_BINARY: values.backup.pgDumpBinary,
+      }
+    : {
+        DEPLOY_PG_DUMP_MODE: "container",
+        DEPLOY_DOCKER_BINARY: values.backup.dockerBinary,
+        DEPLOY_PG_DUMP_CONTAINER: values.backup.container,
+        DEPLOY_CONTAINER_PG_DUMP_BINARY: values.backup.pgDumpBinary,
+      }),
+});
+
+/** Escape a value for systemd's Environment= parser. Quoting every value
+ * keeps whitespace data intact; percent is doubled because systemd expands
+ * specifiers while loading unit definitions. */
+export const systemdEnvironmentEscape = (value, key = "environment") => {
+  if (typeof value !== "string" || value.includes("\0") || value.includes("\n") || value.includes("\r")) {
+    throw new Error(`systemd-environment-value-invalid:${key}`);
+  }
+  return value
+    .replaceAll("\\", "\\\\")
+    .replaceAll('"', '\\"')
+    .replaceAll("%", "%%");
+};
+
+const systemdDirectiveToken = (value, key) => {
+  if (typeof value !== "string" || value === "" || /[\0\n\r]/u.test(value)) {
+    throw new Error(`systemd-directive-value-invalid:${key}`);
+  }
+  return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"').replaceAll("%", "%%")}"`;
+};
+
+// WorkingDirectory's path parser treats surrounding quotes as path bytes on
+// older supported systemd releases, so escape whitespace without quoting it.
+const systemdPathDirective = (value, key) => {
+  if (typeof value !== "string" || value === "" || /[\0\n\r]/u.test(value)) {
+    throw new Error(`systemd-directive-value-invalid:${key}`);
+  }
+  return value
+    .replaceAll("\\", "\\\\")
+    .replaceAll("\t", "\\t")
+    .replaceAll(" ", "\\x20")
+    .replaceAll('"', '\\"')
+    .replaceAll("%", "%%");
+};
+
+export const renderSystemdEnvironment = (values) => Object.entries(values)
+  .map(([key, value]) => {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(key)) throw new Error(`systemd-environment-key-invalid:${key}`);
+    return `Environment=${key}="${systemdEnvironmentEscape(value, key)}"`;
+  })
+  .join("\n");
+
+const renderSystemdTemplate = (template, replacements, unresolvedReason) => {
+  let rendered = template;
+  for (const [placeholder, value] of Object.entries(replacements)) {
+    rendered = rendered.replaceAll(placeholder, value);
+  }
+  if (/__[A-Z_]+__/u.test(rendered)) throw new Error(unresolvedReason);
+  return rendered;
+};
+
+export const renderServiceSystemdUnit = (
+  template = readFileSync(SYSTEMD_SERVICE_TEMPLATE, "utf8"),
+  values,
+) => {
+  if (typeof values?.serviceUser !== "string" || values.serviceUser === "") {
+    throw new Error("systemd-service-user-required");
+  }
+  if (values.serviceUser === "root") throw new Error("systemd-service-user-root");
+  return renderSystemdTemplate(template, {
+    __LABEL__: values.label,
+    __NODE_BINARY__: systemdDirectiveToken(values.nodeBinary, "node-binary"),
+    __WRAPPER_PATH__: systemdDirectiveToken(values.wrapperPath, "wrapper-path"),
+    __REPOSITORY_ROOT__: systemdPathDirective(values.repositoryRoot, "repository-root"),
+    __SERVICE_USER__: values.serviceUser,
+    __ENVIRONMENT__: renderSystemdEnvironment(serviceEnvironmentValues(values)),
+  }, "systemd-service-template-has-unresolved-placeholder");
+};
+
+export const renderAutoDeploySystemdUnit = (
+  template = readFileSync(SYSTEMD_AUTO_DEPLOY_TEMPLATE, "utf8"),
+  values,
+) => {
+  if (typeof values?.serviceUser !== "string" || values.serviceUser === "") {
+    throw new Error("systemd-service-user-required");
+  }
+  if (values.serviceUser === "root") throw new Error("systemd-service-user-root");
+  return renderSystemdTemplate(template, {
+    __NODE_BINARY__: systemdDirectiveToken(values.nodeBinary, "node-binary"),
+    __DEPLOY_SCRIPT__: systemdDirectiveToken(values.deployScript, "deploy-script"),
+    __REPOSITORY_ROOT__: systemdPathDirective(values.repositoryRoot, "repository-root"),
+    __SERVICE_USER__: values.serviceUser,
+    __ENVIRONMENT__: renderSystemdEnvironment(autoDeployEnvironmentValues(values)),
+  }, "systemd-auto-deploy-template-has-unresolved-placeholder");
+};
+
+export const renderAutoDeploySystemdTimer = (
+  template = readFileSync(SYSTEMD_AUTO_DEPLOY_TIMER_TEMPLATE, "utf8"),
+) => renderSystemdTemplate(template, {}, "systemd-auto-deploy-timer-has-unresolved-placeholder");
+
+const inventoryForCount = (runnerCount) => generateServiceInventory(runnerCount);
+const unitNameForLabel = (label, inventory = SERVICE_INVENTORY_ENTRIES) => {
+  const entry = inventory.find((candidate) => candidate.label === label);
+  if (!entry) throw new Error(`service-label-unknown:${String(label)}`);
+  return entry.unitName;
+};
+
+const hasExactDirective = (text, directive, value) => {
+  const escaped = value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  return new RegExp(`^${directive}=${escaped}$`, "mu").test(text);
+};
+
+const directiveCount = (text, directive) => (text.match(new RegExp(`^${directive}=`, "gmu")) ?? []).length;
+const validInventoryLabels = (labels) => {
+  if (!Array.isArray(labels) || labels.length < 4 || new Set(labels).size !== labels.length) return false;
+  try {
+    return JSON.stringify(labels) === JSON.stringify(inventoryForCount(labels.length - 3).map(({ label }) => label));
+  } catch { return false; }
+};
+
+/** Validate the subset of unit syntax that protects the activation boundary.
+ * systemd-analyze is an optional stronger parser in the test harness; these
+ * checks are always available on both operator platforms. */
+export const verifySystemdServiceDefinitions = (definitions, labels = SERVICE_LABELS) => {
+  if (!definitions || !validInventoryLabels(labels)) {
+    throw new Error("systemd-service-inventory-invalid");
+  }
+  for (const label of labels) {
+    const rendered = definitions[label];
+    if (typeof rendered !== "string") throw new Error(`systemd-service-definition-missing:${label}`);
+    if (/__[A-Z_]+__/u.test(rendered)) throw new Error(`systemd-service-definition-unresolved:${label}`);
+    if (!hasExactDirective(rendered, "SyslogIdentifier", label)
+        || !new RegExp(`^ExecStart=.*(?:^|\\s)${label}(?:\\s|$)`, "mu").test(rendered)) {
+      throw new Error(`systemd-service-definition-label-mismatch:${label}`);
+    }
+    if (!rendered.includes("AGENTOS_CURRENT_POINTER") || !rendered.includes("Environment=AGENTOS_CURRENT_POINTER=\"current\"")) {
+      throw new Error(`systemd-service-definition-current-pointer-missing:${label}`);
+    }
+    if (/^Environment=[^=\s]+=""$/mu.test(rendered)) {
+      throw new Error(`systemd-service-definition-empty-assignment:${label}`);
+    }
+    const required = [
+      ["Type", "simple"],
+      ["Restart", "always"],
+      ["RestartSec", "10"],
+      ["StandardOutput", "journal"],
+      ["StandardError", "journal"],
+      ["After", "network-online.target"],
+      ["Wants", "network-online.target"],
+      ["WantedBy", "multi-user.target"],
+    ];
+    for (const [directive, value] of required) {
+      if (directiveCount(rendered, directive) !== 1 || !hasExactDirective(rendered, directive, value)) {
+        throw new Error(`systemd-service-definition-directive-missing:${label}:${directive}`);
+      }
+    }
+    if (directiveCount(rendered, "User") !== 1 || !/^User=(?!root$)\S+$/mu.test(rendered)) {
+      throw new Error(`systemd-service-definition-user-invalid:${label}`);
+    }
+    for (const directive of ["WorkingDirectory", "ExecStart", "SyslogIdentifier"]) {
+      if (directiveCount(rendered, directive) !== 1) {
+        throw new Error(`systemd-service-definition-directive-missing:${label}:${directive}`);
+      }
+    }
+    if (/^EnvironmentFile=/mu.test(rendered)) throw new Error(`systemd-service-environment-file-forbidden:${label}`);
+  }
+  return true;
+};
+
+export const verifySystemdAutoDeployDefinitions = ({ service, timer }) => {
+  for (const [name, rendered] of [["service", service], ["timer", timer]]) {
+    if (typeof rendered !== "string") throw new Error(`systemd-auto-deploy-definition-missing:${name}`);
+    if (/__[A-Z_]+__/u.test(rendered)) throw new Error(`systemd-auto-deploy-definition-unresolved:${name}`);
+  }
+  const required = [
+    [service, "Type", "oneshot"],
+    [service, "After", "network-online.target"],
+    [service, "Wants", "network-online.target"],
+    [timer, "OnBootSec", "60"],
+    [timer, "OnUnitActiveSec", "300"],
+    [timer, "Unit", `${LABEL}.service`],
+    [timer, "WantedBy", "timers.target"],
+  ];
+  for (const [rendered, directive, value] of required) {
+    if (directiveCount(rendered, directive) !== 1 || !hasExactDirective(rendered, directive, value)) {
+      throw new Error(`systemd-auto-deploy-definition-directive-missing:${directive}`);
+    }
+  }
+  for (const directive of ["User", "WorkingDirectory", "ExecStart"]) {
+    if (directiveCount(service, directive) !== 1) {
+      throw new Error(`systemd-auto-deploy-definition-directive-missing:${directive}`);
+    }
+  }
+  if (/^EnvironmentFile=/mu.test(service)) throw new Error("systemd-auto-deploy-environment-file-forbidden");
+  return true;
 };
 
 /** Verify the complete rendered inventory before any LaunchAgent file is
@@ -321,7 +593,7 @@ export const renderServiceLaunchdPlist = (template, values) => {
  * only the source inputs: a plist that still contains a source checkout path
  * or an unresolved placeholder must never reach launchctl. */
 export const verifyServicePlistDefinitions = (definitions, labels = SERVICE_LABELS) => {
-  if (!definitions || !Array.isArray(labels) || labels.length !== SERVICE_LABELS.length || new Set(labels).size !== labels.length) {
+  if (!definitions || !validInventoryLabels(labels)) {
     throw new Error("launchd-service-inventory-invalid");
   }
   for (const label of labels) {
@@ -495,6 +767,848 @@ const writeAtomic = (destination, contents, mode) => {
 const safeServiceFileName = (label) => label.replaceAll(/[^A-Za-z0-9_.-]/gu, "_");
 
 const serviceManifestPath = (repositoryRoot) => join(resolve(repositoryRoot), SERVICE_INSTALL_ROOT, "manifest.json");
+const autoDeployManifestPath = (repositoryRoot) => join(resolve(repositoryRoot), AUTO_DEPLOY_INSTALL_ROOT, "manifest.json");
+
+const validAccountName = (value) => typeof value === "string"
+  && /^[A-Za-z_][A-Za-z0-9_.-]*[$]?$/u.test(value);
+
+/** Resolve the account used by system-level units. The lookup is injectable so
+ * the unprivileged renderer can be exercised with a deterministic getent
+ * recorder on hosts without Linux account tooling. */
+export const resolveSystemdServiceUser = ({
+  serviceUser,
+  platform = resolveServicePlatform(),
+  lookup = null,
+  execute = execFileSync,
+} = {}) => {
+  if (platform === "darwin") {
+    if (serviceUser !== undefined && serviceUser !== null) throw new Error("systemd-service-user-not-supported-on-darwin");
+    return null;
+  }
+  if (platform !== "linux") throw new Error(`service-platform-unsupported:${platform}`);
+  if (!validAccountName(serviceUser)) throw new Error("systemd-service-user-required");
+  if (serviceUser === "root") throw new Error("systemd-service-user-root");
+  let record;
+  try {
+    record = lookup
+      ? lookup(serviceUser)
+      : execute("getent", ["passwd", serviceUser], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  } catch {
+    throw new Error(`systemd-service-user-unknown:${serviceUser}`);
+  }
+  const line = String(record ?? "").trim().split("\n", 1)[0];
+  const fields = line.split(":");
+  if (fields[0] !== serviceUser || !/^\d+$/u.test(fields[2] ?? "") || Number(fields[2]) === 0) {
+    throw new Error(`systemd-service-user-unknown:${serviceUser}`);
+  }
+  return serviceUser;
+};
+
+const systemdCommandPath = (name, configured, execute = execFileSync) => {
+  if (configured) {
+    if (!configured.startsWith("/")) throw new Error(`systemd-command-not-absolute:${name}`);
+    try { accessSync(configured, fsConstants.X_OK); } catch { throw new Error(`systemd-command-unavailable:${name}`); }
+    return configured;
+  }
+  try {
+    return requiredBinary(name);
+  } catch {
+    throw new Error(`systemd-command-unavailable:${name}`);
+  }
+};
+
+export const renderSystemdSudoers = ({ serviceUser, labels = SERVICE_LABELS, systemctlPath = "/bin/systemctl" } = {}) => {
+  if (!validAccountName(serviceUser) || serviceUser === "root") throw new Error("systemd-service-user-invalid");
+  if (!validInventoryLabels(labels)) {
+    throw new Error("systemd-service-inventory-invalid");
+  }
+  if (typeof systemctlPath !== "string" || systemctlPath === "" || !systemctlPath.startsWith("/")) {
+    throw new Error("systemd-command-not-absolute:systemctl");
+  }
+  const inventory = inventoryForCount(labels.length - 3);
+  const rules = [];
+  for (const label of labels) {
+    const unit = unitNameForLabel(label, inventory);
+    rules.push(`${systemctlPath} restart ${unit}`);
+    rules.push(`${systemctlPath} show -p ExecStart --value ${unit}`);
+    rules.push(`${systemctlPath} is-active ${unit}`);
+  }
+  return `${serviceUser} ALL=(root) NOPASSWD: ${rules.join(", ")}\n`;
+};
+
+const validateSudoers = ({ path, visudoPath, execute = execFileSync }) => {
+  try {
+    execute(visudoPath, ["-c", "-f", path], { stdio: ["ignore", "pipe", "pipe"] });
+  } catch (error) {
+    throw new Error(`systemd-sudoers-invalid:${error instanceof Error ? error.message : String(error)}`);
+  }
+  return true;
+};
+
+const fileDigest = (path) => existsSync(path) ? sha256(readFileSync(path)) : null;
+const readJsonFile = (path, reason) => {
+  try { return JSON.parse(readFileSync(path, "utf8")); }
+  catch { throw new Error(reason); }
+};
+
+const makeSystemdManifestEntry = ({ path, stagedPath, backupPath = null, mode = 0o644 }) => ({
+  path,
+  stagedPath,
+  existed: existsSync(path),
+  mode: existsSync(path) ? statSync(path).mode & 0o777 : mode,
+  backupPath: existsSync(path) ? backupPath : null,
+  originalSha256: fileDigest(path),
+  installedSha256: fileDigest(stagedPath),
+});
+
+const assertTargetPathSafe = (path, allowedRoot) => {
+  const root = resolve(allowedRoot);
+  const target = resolve(path);
+  if (target !== root && !target.startsWith(`${root}/`)) throw new Error(`systemd-target-outside-directory:${path}`);
+};
+
+const stageFileEntry = ({ entry, replaceExisting = false }) => {
+  if (!existsSync(entry.path)) return;
+  const current = fileDigest(entry.path);
+  if (current !== entry.originalSha256) throw new Error(`systemd-target-read-failed:${entry.path}`);
+  if (current !== entry.installedSha256 && !replaceExisting) {
+    throw new Error(`systemd-definition-conflict:${entry.path}`);
+  }
+};
+
+const assertContainedPath = (path, allowedRoot) => {
+  const root = resolve(allowedRoot);
+  const target = resolve(path);
+  const suffix = relative(root, target);
+  if (suffix === ".." || suffix.startsWith("../")) {
+    throw new Error(`systemd-target-outside-directory:${path}`);
+  }
+  let cursor = root;
+  for (const part of suffix.split(/[\\/]/u).filter(Boolean)) {
+    cursor = join(cursor, part);
+    if (existsSync(cursor) && lstatSync(cursor).isSymbolicLink()) {
+      throw new Error(`systemd-symlink-refused:${cursor}`);
+    }
+  }
+};
+
+const assertExactEntry = (entry, expected, reason = "systemd-service-manifest-invalid") => {
+  if (!entry || Object.entries(expected).some(([key, value]) => entry[key] !== value)) {
+    throw new Error(reason);
+  }
+};
+
+const validateDropIn = (entry, inventory) => {
+  const label = entry.unit?.replace(/\.service$/u, "");
+  const inventoryEntry = inventory.find((candidate) => candidate.label === label);
+  if (!inventoryEntry || (!inventoryEntry.runnerId && label !== "com.agentos.api")) {
+    throw new Error("systemd-service-manifest-invalid");
+  }
+  const allowed = new Set(inventoryEntry.runnerId ? [
+    "RUNNER_RUN_AS_PREFIX", "RUNNER_HOME", "RUNNER_WORKSPACE_ROOT", "RUNNER_MCP_SERVER_PATH",
+    "RUNNER_PI_EXTENSION_PATH", "RUNNER_CLAUDE_SETTINGS_PATH", "RUNNER_SESSION_CONFIG_BASELINE_ROOT", "RUNNER_PATH",
+  ] : ["RUNNER_WORKSPACE_ROOT", "RUNNER_RUN_AS_PREFIX", "RUNNER_HOME", "RUNNER_REPO_MIRROR_ROOT"]);
+  const lines = readFileSync(entry.stagedPath, "utf8").split("\n");
+  if (lines.shift() !== "[Service]") throw new Error(`systemd-drop-in-invalid:${entry.stagedPath}`);
+  for (const line of lines.filter(Boolean)) {
+    const match = line.match(/^Environment=([A-Za-z_][A-Za-z0-9_]*)="(?:[^"\\]|\\.)*"$/u);
+    if (!match || !allowed.has(match[1])) throw new Error(`systemd-drop-in-invalid:${entry.stagedPath}`);
+  }
+};
+
+const readStageEntries = ({ manifest, root, unitDirectory, sudoersPath, serviceUser, userLookup, execute }) => {
+  const runnerCount = manifest?.runnerCount;
+  let inventory;
+  try { inventory = inventoryForCount(runnerCount); } catch { throw new Error("systemd-service-manifest-invalid"); }
+  const stageRoot = resolve(root, SERVICE_INSTALL_ROOT, "staging");
+  assertContainedPath(stageRoot, root);
+  if (!manifest || manifest.schemaVersion !== 1 || manifest.platform !== "linux"
+      || manifest.repositoryRoot !== resolve(root) || manifest.stagingRoot !== stageRoot
+      || manifest.unitDirectory !== unitDirectory || manifest.sudoersPath !== sudoersPath
+      || manifest.systemctlPath !== "/bin/systemctl"
+      || !Array.isArray(manifest.entries) || manifest.entries.length !== inventory.length + 1
+      || !Array.isArray(manifest.auxiliaryEntries) || !manifest.renderInputs) {
+    throw new Error("systemd-service-manifest-invalid");
+  }
+  const account = resolveSystemdServiceUser({ serviceUser, platform: "linux", lookup: userLookup, execute });
+  if (account !== manifest.serviceUser) throw new Error("systemd-service-user-manifest-mismatch");
+  const wrapper = serviceWrapperPath(root);
+  assertContainedPath(wrapper, root);
+  const wrapperStaged = join(stageRoot, "wrapper", "agentos-service-wrapper.mjs");
+  assertExactEntry(manifest.entries[0], { kind: "wrapper", path: wrapper, stagedPath: wrapperStaged });
+  const expectedServices = inventory.map((item) => ({
+    kind: "service",
+    label: item.label,
+    unit: item.unitName,
+    path: join(unitDirectory, item.unitName),
+    stagedPath: join(stageRoot, "units", item.unitName),
+  }));
+  expectedServices.forEach((expected, index) => assertExactEntry(manifest.entries[index + 1], expected));
+  const seenAuxiliary = new Set();
+  for (const entry of manifest.auxiliaryEntries) {
+    if (entry.kind === "sudoers") {
+      assertExactEntry(entry, {
+        path: sudoersPath,
+        stagedPath: join(stageRoot, "sudoers", "anneal-service-control"),
+      });
+      if (seenAuxiliary.has("sudoers")) throw new Error("systemd-service-manifest-invalid");
+      seenAuxiliary.add("sudoers");
+    } else if (entry.kind === "drop-in") {
+      const expectedUnit = inventory.find((item) => item.unitName === entry.unit)?.unitName;
+      if (!expectedUnit) throw new Error("systemd-service-manifest-invalid");
+      assertExactEntry(entry, {
+        path: join(unitDirectory, `${expectedUnit}.d`, "os-isolation.conf"),
+        stagedPath: join(stageRoot, "units", `${expectedUnit}.d`, "os-isolation.conf"),
+      });
+      if (seenAuxiliary.has(entry.path)) throw new Error("systemd-service-manifest-invalid");
+      seenAuxiliary.add(entry.path);
+    } else throw new Error("systemd-service-manifest-invalid");
+  }
+  if (!seenAuxiliary.has("sudoers")) throw new Error("systemd-service-manifest-invalid");
+
+  const entries = [...manifest.entries, ...manifest.auxiliaryEntries];
+  for (const entry of entries) {
+    const pathRoot = entry.kind === "sudoers" ? dirname(sudoersPath) : entry.kind === "wrapper" ? dirname(wrapper) : unitDirectory;
+    assertContainedPath(entry.path, pathRoot);
+    assertContainedPath(entry.stagedPath, stageRoot);
+    if (!existsSync(entry.stagedPath) || !lstatSync(entry.stagedPath).isFile()) {
+      throw new Error(`systemd-staged-file-missing:${entry.stagedPath}`);
+    }
+    const expectedBackup = !entry.existed ? null
+      : entry.kind === "wrapper" ? join(stageRoot, "backups", "agentos-service-wrapper.mjs")
+        : entry.kind === "service" ? join(stageRoot, "backups", `${safeServiceFileName(entry.label)}.service`)
+          : entry.kind === "sudoers" ? join(stageRoot, "backups", "anneal-service-control")
+            : join(stageRoot, "backups", safeServiceFileName(relative(unitDirectory, entry.path)));
+    if (entry.backupPath !== expectedBackup) throw new Error("systemd-service-manifest-invalid");
+    if (entry.backupPath !== null) {
+      assertContainedPath(entry.backupPath, join(stageRoot, "backups"));
+      if (existsSync(entry.backupPath) && !lstatSync(entry.backupPath).isFile()) {
+        throw new Error(`systemd-symlink-refused:${entry.backupPath}`);
+      }
+    }
+  }
+  const renderInputs = manifest.renderInputs;
+  if (renderInputs.runnerCount !== runnerCount || renderInputs.nodeBinary !== resolve(renderInputs.nodeBinary)
+      || typeof renderInputs.path !== "string" || renderInputs.path === "") {
+    throw new Error("systemd-service-manifest-invalid");
+  }
+  const expectedDefinitions = linuxServiceValues({
+    root,
+    labels: inventory.map(({ label }) => label),
+    nodeBinary: renderInputs.nodeBinary,
+    path: renderInputs.path,
+    serviceUser: account,
+    wrapper,
+    runnerCount,
+  });
+  for (const item of inventory) {
+    const expected = renderServiceSystemdUnit(readFileSync(SYSTEMD_SERVICE_TEMPLATE, "utf8"), expectedDefinitions[item.label]);
+    const entry = manifest.entries.find((candidate) => candidate.label === item.label);
+    if (readFileSync(entry.stagedPath, "utf8") !== expected) throw new Error(`systemd-staged-unit-invalid:${item.unitName}`);
+  }
+  const sudoersEntry = manifest.auxiliaryEntries.find((entry) => entry.kind === "sudoers");
+  if (readFileSync(sudoersEntry.stagedPath, "utf8") !== renderSystemdSudoers({
+    serviceUser: account,
+    labels: inventory.map(({ label }) => label),
+    systemctlPath: manifest.systemctlPath,
+  })) throw new Error("systemd-staged-sudoers-invalid");
+  for (const entry of manifest.auxiliaryEntries.filter((candidate) => candidate.kind === "drop-in")) validateDropIn(entry, inventory);
+  return { entries, inventory, stageRoot };
+};
+
+const copyStagedEntry = ({ entry, unitDirectory, sudoersPath, strictOwner = true, chown = chownSync }) => {
+  if (!entry.stagedPath || !existsSync(entry.stagedPath)) throw new Error(`systemd-staged-file-missing:${entry.stagedPath ?? entry.path}`);
+  if (fileDigest(entry.stagedPath) !== entry.installedSha256) throw new Error(`systemd-staged-file-drift:${entry.stagedPath}`);
+  if (entry.kind === "wrapper") throw new Error("systemd-root-wrapper-write-refused");
+  if (entry.kind === "sudoers") assertTargetPathSafe(entry.path, dirname(sudoersPath));
+  else assertTargetPathSafe(entry.path, unitDirectory);
+  const parent = dirname(entry.path);
+  const parentExisted = existsSync(parent);
+  mkdirSync(parent, { recursive: true, mode: 0o755 });
+  copyFileSync(entry.stagedPath, entry.path);
+  chmodSync(entry.path, entry.kind === "sudoers" ? 0o440 : 0o644);
+  const ownerUid = 0;
+  const ownerGid = 0;
+  try {
+    chown(entry.path, ownerUid, ownerGid);
+    if (!parentExisted) chown(parent, ownerUid, ownerGid);
+  } catch (error) {
+    if (strictOwner) throw new Error(`systemd-install-owner-failed:${entry.path}:${error instanceof Error ? error.message : String(error)}`);
+  }
+};
+
+const runSystemctl = ({ systemctlPath, args, unit = "", execute = execFileSync }) => {
+  try {
+    return execute(systemctlPath, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  } catch (error) {
+    if (error?.code === "ENOENT") throw new Error("systemd-systemctl-unavailable");
+    const verb = args[0] ?? "command";
+    throw new Error(`systemd-control-failed:${verb}${unit ? `:${unit}` : ""}`);
+  }
+};
+
+const systemdUnitState = ({ systemctlPath, unit, execute = execFileSync }) => {
+  const query = (verb) => {
+    try { return String(execute(systemctlPath, [verb, unit], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }) ?? "").trim(); }
+    catch (error) { return String(error?.stdout ?? "").trim(); }
+  };
+  return { enabled: query("is-enabled") === "enabled", active: query("is-active") === "active" };
+};
+
+const systemdTransactionFingerprint = (manifest) => sha256(JSON.stringify({
+  runnerCount: manifest.runnerCount ?? null,
+  serviceUser: manifest.serviceUser,
+  renderInputs: manifest.renderInputs,
+  entries: [...manifest.entries, ...(manifest.auxiliaryEntries ?? [])].map((entry) => ({
+    kind: entry.kind,
+    path: entry.path,
+    stagedPath: entry.stagedPath,
+    installedSha256: entry.installedSha256,
+    existed: entry.existed,
+    parentExisted: entry.parentExisted ?? null,
+  })),
+}));
+
+const rootTransactionState = ({ statePath, manifest, entries, systemctlPath, execute, requireExisting = false }) => {
+  const expectedPaths = entries.filter((entry) => entry.kind !== "wrapper").map((entry) => entry.path);
+  const fingerprint = systemdTransactionFingerprint(manifest);
+  if (existsSync(statePath)) {
+    if (!lstatSync(statePath).isFile()) throw new Error(`systemd-transaction-state-invalid:${statePath}`);
+    const status = statSync(statePath);
+    if ((typeof process.geteuid !== "function" || process.geteuid() === 0) && (status.uid !== 0 || (status.mode & 0o777) !== 0o600)) {
+      throw new Error(`systemd-transaction-state-owner-invalid:${statePath}`);
+    }
+    let state;
+    try { state = JSON.parse(readFileSync(statePath, "utf8")); }
+    catch { throw new Error(`systemd-transaction-state-invalid:${statePath}`); }
+    if (state.schemaVersion !== 1 || state.fingerprint !== fingerprint
+        || JSON.stringify(state.entries.map(({ path }) => path)) !== JSON.stringify(expectedPaths)) {
+      throw new Error(`systemd-transaction-state-mismatch:${statePath}`);
+    }
+    return state;
+  }
+  if (requireExisting) throw new Error(`systemd-transaction-state-missing:${statePath}`);
+  const state = {
+    schemaVersion: 1,
+    fingerprint,
+    entries: entries.filter((entry) => entry.kind !== "wrapper").map((entry) => {
+      const existed = existsSync(entry.path);
+      const status = existed ? statSync(entry.path) : null;
+      return {
+        path: entry.path,
+        existed,
+        mode: status ? status.mode & 0o777 : null,
+        uid: status?.uid ?? null,
+        gid: status?.gid ?? null,
+        contents: existed ? readFileSync(entry.path).toString("base64") : null,
+        unitState: existed && entry.unit ? systemdUnitState({ systemctlPath, unit: entry.unit, execute }) : null,
+      };
+    }),
+  };
+  writeAtomic(statePath, `${JSON.stringify(state, null, 2)}\n`, 0o600);
+  if (typeof process.geteuid !== "function" || process.geteuid() === 0) chownSync(statePath, 0, 0);
+  return state;
+};
+
+const restoreRootTransactionEntry = (entry, stateEntry) => {
+  if (!stateEntry || stateEntry.path !== entry.path) throw new Error(`systemd-transaction-state-entry-invalid:${entry.path}`);
+  if (stateEntry.existed) {
+    writeFileSync(entry.path, Buffer.from(stateEntry.contents, "base64"));
+    chmodSync(entry.path, stateEntry.mode);
+    const status = statSync(entry.path);
+    if (status.uid !== stateEntry.uid || status.gid !== stateEntry.gid) chownSync(entry.path, stateEntry.uid, stateEntry.gid);
+  } else rmSync(entry.path, { force: true });
+};
+
+const systemdManifestPath = serviceManifestPath;
+
+const stagingFile = (stagingRoot, relativePath) => join(stagingRoot, relativePath);
+
+const stageSystemdDefinition = ({ stagingRoot, relativePath, contents, mode = 0o644 }) => {
+  const path = stagingFile(stagingRoot, relativePath);
+  writeAtomic(path, contents, mode);
+  return path;
+};
+
+const backupSystemdTarget = ({ stagingRoot, entry }) => {
+  if (!entry.existed) return;
+  const backup = entry.backupPath;
+  if (!backup) throw new Error(`systemd-backup-path-missing:${entry.path}`);
+  mkdirSync(dirname(backup), { recursive: true, mode: 0o700 });
+  if (existsSync(backup)) {
+    if (fileDigest(backup) !== entry.originalSha256) throw new Error(`systemd-backup-conflict:${backup}`);
+    return;
+  }
+  writeFileSync(backup, readFileSync(entry.path), { flag: "wx", mode: 0o600 });
+};
+
+const serviceUnitEntry = ({ label, unit, stagedPath, targetPath, stagingRoot }) => {
+  const existed = existsSync(targetPath);
+  const originalStatus = existed ? statSync(targetPath) : null;
+  const entry = {
+    kind: "service",
+    label,
+    unit,
+    path: targetPath,
+    stagedPath,
+    existed,
+    mode: existed ? statSync(targetPath).mode & 0o777 : 0o644,
+    originalUid: originalStatus?.uid ?? null,
+    originalGid: originalStatus?.gid ?? null,
+    backupPath: existed ? join(stagingRoot, "backups", `${safeServiceFileName(label)}.service`) : null,
+    originalSha256: existed ? sha256(readFileSync(targetPath)) : null,
+    installedSha256: sha256(readFileSync(stagedPath)),
+  };
+  return entry;
+};
+
+const wrapperEntry = ({ wrapperPath, stagedPath, stagingRoot }) => {
+  const existed = existsSync(wrapperPath);
+  const stagedStatus = statSync(stagedPath);
+  const originalStatus = existed ? statSync(wrapperPath) : null;
+  return {
+    kind: "wrapper",
+    path: wrapperPath,
+    stagedPath,
+    existed,
+    mode: existed ? statSync(wrapperPath).mode & 0o777 : 0o755,
+    originalUid: originalStatus?.uid ?? null,
+    originalGid: originalStatus?.gid ?? null,
+    stagedUid: stagedStatus.uid,
+    stagedGid: stagedStatus.gid,
+    backupPath: existed ? join(stagingRoot, "backups", "agentos-service-wrapper.mjs") : null,
+    originalSha256: existed ? sha256(readFileSync(wrapperPath)) : null,
+    installedSha256: sha256(readFileSync(stagedPath)),
+  };
+};
+
+const auxiliarySystemdEntries = ({ stagingRoot, unitDirectory, sudoersPath }) => {
+  const entries = [];
+  const unitsRoot = stagingFile(stagingRoot, "units");
+  if (existsSync(unitsRoot)) {
+    const visit = (path) => {
+      for (const name of readdirSync(path)) {
+        const child = join(path, name);
+        const status = statSync(child);
+        if (status.isDirectory()) visit(child);
+        else if (name === "os-isolation.conf" && child.includes(".service.d")) {
+          const relativePath = child.slice(unitsRoot.length + 1);
+          const targetPath = join(unitDirectory, relativePath);
+          const existed = existsSync(targetPath);
+          entries.push({
+            kind: "drop-in",
+            unit: relativePath.slice(0, relativePath.indexOf(".service.d") + ".service".length),
+            path: targetPath,
+            stagedPath: child,
+            existed,
+            mode: existed ? statSync(targetPath).mode & 0o777 : 0o644,
+            originalUid: existed ? statSync(targetPath).uid : null,
+            originalGid: existed ? statSync(targetPath).gid : null,
+            parentExisted: existsSync(dirname(targetPath)),
+            backupPath: existed ? join(stagingRoot, "backups", safeServiceFileName(relativePath)) : null,
+            originalSha256: existed ? sha256(readFileSync(targetPath)) : null,
+            installedSha256: sha256(readFileSync(child)),
+          });
+        }
+      }
+    };
+    visit(unitsRoot);
+  }
+  const stagedSudoers = stagingFile(stagingRoot, "sudoers/anneal-service-control");
+  if (existsSync(stagedSudoers)) {
+    const existed = existsSync(sudoersPath);
+    const originalStatus = existed ? statSync(sudoersPath) : null;
+    entries.push({
+      kind: "sudoers",
+      path: sudoersPath,
+      stagedPath: stagedSudoers,
+      existed,
+      mode: existed ? statSync(sudoersPath).mode & 0o777 : 0o440,
+      originalUid: originalStatus?.uid ?? null,
+      originalGid: originalStatus?.gid ?? null,
+      backupPath: existed ? join(stagingRoot, "backups", "anneal-service-control") : null,
+      originalSha256: existed ? sha256(readFileSync(sudoersPath)) : null,
+      installedSha256: sha256(readFileSync(stagedSudoers)),
+    });
+  }
+  return entries;
+};
+
+const linuxServiceValues = ({ root, labels, nodeBinary, path, serviceUser, wrapper, runnerCount }) => Object.freeze(Object.fromEntries(
+  labels.map((label) => {
+    const values = servicePlistValues({
+      label,
+      nodeBinary,
+      repositoryRoot: root,
+      sharedRoot: join(root, "shared"),
+      stdoutPath: join(root, "shared", "logs", `${safeServiceFileName(label)}.stdout.log`),
+      stderrPath: join(root, "shared", "logs", `${safeServiceFileName(label)}.stderr.log`),
+      path,
+      wrapperPath: wrapper,
+      runnerCount,
+    });
+    return [label, Object.freeze({ ...values, serviceUser })];
+  }),
+));
+
+const systemdStagePlan = ({
+  repositoryRoot,
+  nodeBinary = process.execPath,
+  gitBinary = null,
+  path = null,
+  serviceUser,
+  runnerCount = resolveRunnerCount(),
+  labels = inventoryForCount(runnerCount).map(({ label }) => label),
+  stagingRoot,
+  unitDirectory = SYSTEMD_UNIT_DIRECTORY,
+  sudoersPath = SYSTEMD_SUDOERS_PATH,
+  systemctlPath = "/bin/systemctl",
+  visudoPath = null,
+  userLookup = null,
+  execute = execFileSync,
+  apply,
+  replaceExisting = false,
+} = {}) => {
+  const root = realpathSync(resolve(repositoryRoot ?? REPOSITORY_ROOT));
+  const resolvedNode = resolve(nodeBinary);
+  const resolvedGit = gitBinary ? resolve(gitBinary) : resolvedNode;
+  const controlledPath = path ?? controlledLaunchdPath({ nodeBinary: resolvedNode, gitBinary: resolvedGit });
+  const account = resolveSystemdServiceUser({ serviceUser, platform: "linux", lookup: userLookup, execute });
+  const inventory = inventoryForCount(runnerCount);
+  if (JSON.stringify(labels) !== JSON.stringify(inventory.map(({ label }) => label))) {
+    throw new Error("systemd-service-inventory-invalid");
+  }
+  const wrapper = serviceWrapperPath(root);
+  const stageRoot = resolve(stagingRoot ?? join(root, SERVICE_INSTALL_ROOT, "staging"));
+  const resolvedUnitDirectory = resolve(unitDirectory);
+  const resolvedSudoersPath = resolve(sudoersPath);
+  const rendered = linuxServiceValues({
+    root,
+    labels,
+    nodeBinary: resolvedNode,
+    path: controlledPath,
+    serviceUser: account,
+    wrapper,
+    runnerCount,
+  });
+  const unitDefinitions = Object.freeze(Object.fromEntries(labels.map((label) => [
+    label,
+    renderServiceSystemdUnit(readFileSync(SYSTEMD_SERVICE_TEMPLATE, "utf8"), rendered[label]),
+  ])));
+  verifySystemdServiceDefinitions(unitDefinitions, labels);
+  if (!apply) return Object.freeze({
+    applied: false,
+    reverted: false,
+    platform: "linux",
+    staging: stageRoot,
+    unitDirectory: resolvedUnitDirectory,
+    serviceUser: account,
+    units: labels.map((label) => join(resolvedUnitDirectory, unitNameForLabel(label, inventory))),
+    wrapper,
+    entries: [wrapper, ...labels.map((label) => join(resolvedUnitDirectory, unitNameForLabel(label, inventory)))],
+    rendered: unitDefinitions,
+  });
+  const unitEntries = labels.map((label) => {
+    const staged = stageSystemdDefinition({
+      stagingRoot: stageRoot,
+      relativePath: `units/${unitNameForLabel(label, inventory)}`,
+      contents: unitDefinitions[label],
+    });
+    const target = join(resolvedUnitDirectory, unitNameForLabel(label, inventory));
+    const entry = serviceUnitEntry({
+      label,
+      unit: inventory.find((entry) => entry.label === label).unitName,
+      stagedPath: staged,
+      targetPath: target,
+      stagingRoot: stageRoot,
+    });
+    return entry;
+  });
+  // Stage the wrapper alongside units so a root stage can install the complete
+  // manifest atomically. The target is intentionally outside /etc and remains
+  // an explicit manifest entry, matching the LaunchAgent installer.
+  const wrapperContents = readFileSync(SERVICE_WRAPPER_SOURCE);
+  const wrapperTargetExists = existsSync(wrapper);
+  const wrapperStagedPath = stageSystemdDefinition({
+    stagingRoot: stageRoot,
+    relativePath: "wrapper/agentos-service-wrapper.mjs",
+    contents: wrapperContents,
+    mode: 0o755,
+  });
+  const wrapperManifestEntry = wrapperEntry({ wrapperPath: wrapper, stagedPath: wrapperStagedPath, stagingRoot: stageRoot });
+  if (wrapperTargetExists && fileDigest(wrapper) !== wrapperManifestEntry.installedSha256 && !replaceExisting) {
+    throw new Error(`launchd-service-wrapper-conflict:${wrapper}`);
+  }
+  const sudoers = renderSystemdSudoers({ serviceUser: account, labels, systemctlPath: "/bin/systemctl" });
+  const sudoersStaged = stageSystemdDefinition({
+    stagingRoot: stageRoot,
+    relativePath: "sudoers/anneal-service-control",
+    contents: sudoers,
+    mode: 0o440,
+  });
+  const effectiveVisudo = visudoPath ?? (apply ? systemdCommandPath("visudo", null, execute) : null);
+  if (apply && effectiveVisudo) validateSudoers({ path: sudoersStaged, visudoPath: effectiveVisudo, execute });
+  const auxiliaryEntries = auxiliarySystemdEntries({
+    stagingRoot: stageRoot,
+    unitDirectory: resolvedUnitDirectory,
+    sudoersPath: resolvedSudoersPath,
+  });
+  // The generated sudoers was written above and is included by the discovery
+  // pass. Do not count it in the primary entries: the service manifest's
+  // stable shape is wrapper + one entry per service definition.
+  const manifest = {
+    schemaVersion: 1,
+    platform: "linux",
+    repositoryRoot: root,
+    serviceUser: account,
+    runnerCount,
+    stagingRoot: stageRoot,
+    unitDirectory: resolvedUnitDirectory,
+    sudoersPath: resolvedSudoersPath,
+    systemctlPath: "/bin/systemctl",
+    renderInputs: {
+      nodeBinary: resolvedNode,
+      path: controlledPath,
+      runnerCount,
+    },
+    entries: [wrapperManifestEntry, ...unitEntries],
+    auxiliaryEntries,
+  };
+  // A stale manifest indicates an active install. Never replace it while a
+  // root stage may still be using its recorded files.
+  const manifestPath = systemdManifestPath(root);
+  if (existsSync(manifestPath)) throw new Error("launchd-service-install-active");
+  for (const entry of [...manifest.entries, ...auxiliaryEntries]) {
+    stageFileEntry({ entry, replaceExisting });
+    backupSystemdTarget({ stagingRoot: stageRoot, entry });
+  }
+  // The wrapper is operator-owned and is therefore installed by stage one.
+  // The privileged stage verifies this digest but never mutates this path.
+  writeAtomic(wrapper, wrapperContents, 0o755);
+  mkdirSync(dirname(manifestPath), { recursive: true, mode: 0o700 });
+  writeAtomic(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 0o600);
+  return Object.freeze({
+    applied: true,
+    reverted: false,
+    platform: "linux",
+    staging: stageRoot,
+    unitDirectory: resolvedUnitDirectory,
+    serviceUser: account,
+    units: unitEntries.map((entry) => entry.path),
+    wrapper,
+    entries: manifest.entries.map((entry) => entry.path),
+    manifest,
+    manifestPath,
+  });
+};
+
+export const installStagedSystemdServices = ({
+  repositoryRoot,
+  manifestPath,
+  unitDirectory = SYSTEMD_UNIT_DIRECTORY,
+  sudoersPath = SYSTEMD_SUDOERS_PATH,
+  systemctlPath = null,
+  execute = execFileSync,
+  serviceUser,
+  userLookup = null,
+  visudoPath = null,
+  chown = chownSync,
+  effectiveUid = typeof process.geteuid === "function" ? process.geteuid() : process.getuid(),
+  revert = false,
+  apply = true,
+  } = {}) => {
+  const platform = resolveServicePlatform();
+  if (platform !== "linux") throw new Error("systemd-installer-unsupported:darwin");
+  if (effectiveUid !== 0) throw new Error("systemd-installer-requires-root");
+  const root = realpathSync(resolve(repositoryRoot ?? REPOSITORY_ROOT));
+  const path = manifestPath ?? systemdManifestPath(root);
+  if (!existsSync(path)) throw new Error("systemd-service-manifest-missing");
+  const manifest = readJsonFile(path, "systemd-service-manifest-invalid");
+  const resolvedUnitDirectory = resolve(unitDirectory ?? manifest.unitDirectory ?? SYSTEMD_UNIT_DIRECTORY);
+  const resolvedSudoersPath = resolve(sudoersPath ?? manifest.sudoersPath ?? SYSTEMD_SUDOERS_PATH);
+  const validated = readStageEntries({
+    manifest,
+    root,
+    unitDirectory: resolvedUnitDirectory,
+    sudoersPath: resolvedSudoersPath,
+    serviceUser,
+    userLookup,
+    execute,
+  });
+  const entries = validated.entries;
+  const systemctl = systemctlPath ?? systemdCommandPath("systemctl", null, execute);
+  if (!apply) return Object.freeze({
+    applied: false,
+    reverted: false,
+    platform: "linux",
+    staging: validated.stageRoot,
+    unitDirectory: resolvedUnitDirectory,
+    units: validated.inventory.map(({ unitName }) => unitName),
+    entries: entries.map((entry) => entry.path),
+  });
+  for (const entry of entries) {
+    const currentSha = fileDigest(entry.path);
+    const recognized = currentSha === entry.installedSha256
+      || (entry.existed && currentSha === entry.originalSha256)
+      || (!entry.existed && currentSha === null);
+    if (!recognized) throw new Error(`systemd-service-definition-drift:${entry.path}`);
+    if (entry.existed && currentSha === entry.installedSha256) {
+      if (!entry.backupPath || !existsSync(entry.backupPath) || fileDigest(entry.backupPath) !== entry.originalSha256) {
+        throw new Error(`systemd-service-backup-missing:${entry.path}`);
+      }
+    }
+    if (!revert && fileDigest(entry.stagedPath) !== entry.installedSha256) {
+      throw new Error(`systemd-staged-file-drift:${entry.stagedPath}`);
+    }
+  }
+  const transactionStatePath = join(resolvedUnitDirectory, ".anneal-service-transaction.json");
+  const transactionState = rootTransactionState({
+    statePath: transactionStatePath,
+    manifest,
+    entries,
+    systemctlPath: systemctl,
+    execute,
+    requireExisting: revert,
+  });
+  if (!revert) {
+    const effectiveVisudo = visudoPath ?? systemdCommandPath("visudo", null, execute);
+    validateSudoers({
+      path: manifest.auxiliaryEntries.find((entry) => entry.kind === "sudoers").stagedPath,
+      visudoPath: effectiveVisudo,
+      execute,
+    });
+    const wrapperEntry = manifest.entries[0];
+    if (fileDigest(wrapperEntry.path) !== wrapperEntry.installedSha256) {
+      throw new Error(`systemd-wrapper-drift:${wrapperEntry.path}`);
+    }
+    for (const entry of entries.filter((candidate) => candidate.kind !== "wrapper")) copyStagedEntry({
+      entry,
+      unitDirectory: resolvedUnitDirectory,
+      sudoersPath: resolvedSudoersPath,
+      strictOwner: typeof process.geteuid !== "function" || process.geteuid() === 0,
+      chown,
+    });
+    runSystemctl({ systemctlPath: systemctl, args: ["daemon-reload"], execute });
+    for (const entry of manifest.entries.filter((item) => item.kind === "service")) {
+      runSystemctl({ systemctlPath: systemctl, args: ["enable", "--now", entry.unit], unit: entry.unit, execute });
+    }
+    return Object.freeze({
+      applied: true,
+      reverted: false,
+      platform: "linux",
+      staging: validated.stageRoot,
+      unitDirectory: resolvedUnitDirectory,
+      units: validated.inventory.map(({ unitName }) => unitName),
+      entries: entries.map((entry) => entry.path),
+    });
+  }
+  if (manifest.wrapperReverted !== true) throw new Error("systemd-wrapper-revert-required");
+  const serviceEntries = manifest.entries.filter((entry) => entry.kind === "service");
+  for (const entry of serviceEntries) {
+    const stateEntry = transactionState.entries.find((candidate) => candidate.path === entry.path);
+    runSystemctl({
+      systemctlPath: systemctl,
+      args: stateEntry?.existed ? ["stop", entry.unit] : ["disable", "--now", entry.unit],
+      unit: entry.unit,
+      execute,
+    });
+  }
+  for (const [index, entry] of entries.filter((candidate) => candidate.kind !== "wrapper").entries()) {
+    const stateEntry = transactionState.entries[index];
+    restoreRootTransactionEntry(entry, stateEntry);
+    if (!stateEntry.existed) {
+      if (entry.kind === "drop-in" && entry.parentExisted === false) {
+        try { rmdirSync(dirname(entry.path)); } catch (error) {
+          if (error?.code !== "ENOTEMPTY" && error?.code !== "ENOENT") throw error;
+        }
+      }
+    }
+    if (entry.backupPath) rmSync(entry.backupPath, { force: true });
+  }
+  runSystemctl({ systemctlPath: systemctl, args: ["daemon-reload"], execute });
+  for (const entry of serviceEntries.filter((candidate) => transactionState.entries.find((state) => state.path === candidate.path)?.existed)) {
+    const stateEntry = transactionState.entries.find((candidate) => candidate.path === entry.path);
+    runSystemctl({
+      systemctlPath: systemctl,
+      args: [stateEntry?.unitState?.enabled ? "enable" : "disable", entry.unit],
+      unit: entry.unit,
+      execute,
+    });
+    runSystemctl({
+      systemctlPath: systemctl,
+      args: [stateEntry?.unitState?.active ? "start" : "stop", entry.unit],
+      unit: entry.unit,
+      execute,
+    });
+  }
+  rmSync(path, { force: true });
+  rmSync(transactionStatePath, { force: true });
+  rmSync(validated.stageRoot, { recursive: true, force: true });
+  return Object.freeze({
+    applied: true,
+    reverted: true,
+    platform: "linux",
+    staging: validated.stageRoot,
+    unitDirectory: resolvedUnitDirectory,
+    units: validated.inventory.map(({ unitName }) => unitName),
+    entries: entries.map((entry) => entry.path),
+  });
+};
+
+const installLinuxServices = (options = {}) => {
+  const platform = resolveServicePlatform();
+  if (platform !== "linux") throw new Error("systemd-installer-unsupported:darwin");
+  const { installUnits = false, revert = false, apply = false } = options;
+  if (installUnits) {
+    if (options.replaceExisting) throw new Error("installer-option-invalid:--replace-existing-with-install-units");
+    return installStagedSystemdServices({ ...options, apply: true });
+  }
+  if (revert) {
+    const root = realpathSync(resolve(options.repositoryRoot ?? REPOSITORY_ROOT));
+    const path = options.manifestPath ?? systemdManifestPath(root);
+    if (!existsSync(path)) throw new Error("systemd-service-manifest-missing");
+    const manifest = readJsonFile(path, "systemd-service-manifest-invalid");
+    const resolvedUnitDirectory = resolve(options.unitDirectory ?? manifest.unitDirectory ?? SYSTEMD_UNIT_DIRECTORY);
+    const resolvedSudoersPath = resolve(options.sudoersPath ?? manifest.sudoersPath ?? SYSTEMD_SUDOERS_PATH);
+    const validated = readStageEntries({
+      manifest,
+      root,
+      unitDirectory: resolvedUnitDirectory,
+      sudoersPath: resolvedSudoersPath,
+      serviceUser: options.serviceUser,
+      userLookup: options.userLookup,
+      execute: options.execute ?? execFileSync,
+    });
+    if (apply) {
+      const callerUid = options.effectiveUid
+        ?? (typeof process.geteuid === "function" ? process.geteuid() : process.getuid());
+      if (callerUid === 0) throw new Error("launchd-installer-refuses-root");
+      const wrapper = manifest.entries[0];
+      if (fileDigest(wrapper.path) !== wrapper.installedSha256) throw new Error(`systemd-wrapper-drift:${wrapper.path}`);
+      if (wrapper.existed) {
+        if (!wrapper.backupPath || fileDigest(wrapper.backupPath) !== wrapper.originalSha256) {
+          throw new Error(`systemd-service-backup-missing:${wrapper.path}`);
+        }
+        writeAtomic(wrapper.path, readFileSync(wrapper.backupPath), wrapper.mode ?? 0o755);
+      } else rmSync(wrapper.path, { force: true });
+      manifest.wrapperReverted = true;
+      writeAtomic(path, `${JSON.stringify(manifest, null, 2)}\n`, 0o600);
+    }
+    return Object.freeze({
+      applied: apply,
+      reverted: false,
+      platform: "linux",
+      staging: validated.stageRoot,
+      unitDirectory: resolvedUnitDirectory,
+      units: validated.inventory.map(({ unitName }) => unitName),
+      entries: validated.entries.map((entry) => entry.path),
+    });
+  }
+  const callerUid = options.effectiveUid
+    ?? (typeof process.geteuid === "function" ? process.geteuid() : process.getuid());
+  if (callerUid === 0) throw new Error("launchd-installer-refuses-root");
+  return systemdStagePlan(options);
+};
 
 const validateServiceManifest = (manifest, repositoryRoot) => {
   if (!manifest || manifest.schemaVersion !== 1 || manifest.repositoryRoot !== resolve(repositoryRoot)) {
@@ -518,7 +1632,46 @@ export const installLaunchdServices = ({
   apply = false,
   revert = false,
   replaceExisting = false,
+  installUnits = false,
+  serviceUser,
+  stagingRoot,
+  unitDirectory,
+  sudoersPath,
+  systemctlPath,
+  visudoPath,
+  chown,
+  userLookup,
+  effectiveUid,
+  execute = execFileSync,
 } = {}) => {
+  const platform = resolveServicePlatform();
+  if (platform === "linux") return installLinuxServices({
+    repositoryRoot,
+    nodeBinary,
+    gitBinary,
+    path,
+    apply,
+    revert,
+    replaceExisting,
+    installUnits,
+    serviceUser,
+    stagingRoot,
+    unitDirectory,
+    sudoersPath,
+    systemctlPath,
+    visudoPath,
+    chown,
+    userLookup,
+    effectiveUid,
+    execute,
+  });
+  const callerUid = effectiveUid
+    ?? (typeof process.geteuid === "function" ? process.geteuid() : process.getuid());
+  if (callerUid === 0) {
+    throw new Error("launchd-installer-refuses-root");
+  }
+  if (installUnits) throw new Error("systemd-installer-unsupported:darwin");
+  if (serviceUser !== undefined && serviceUser !== null) throw new Error("systemd-service-user-not-supported-on-darwin");
   const root = realpathSync(resolve(repositoryRoot ?? REPOSITORY_ROOT));
   const home = resolve(userHome ?? homedir());
   const launchAgents = join(home, "Library/LaunchAgents");
@@ -655,9 +1808,114 @@ export const installLaunchdServices = ({
   };
 };
 
-export const installLaunchd = (args) => {
-  const { apply, backup: requestedBackup } = parseInstallerArgs(args);
-  if (process.getuid() === 0) throw new Error("launchd-installer-refuses-root");
+export const installLaunchd = (args, context = {}) => {
+  const {
+    apply,
+    installUnits,
+    revert,
+    serviceUser,
+    backup: requestedBackup,
+  } = parseInstallerArgs(args);
+  const platform = resolveServicePlatform({
+    platform: context.platform,
+    environment: context.environment ?? process.env,
+  });
+  if (platform === "linux") {
+    if (serviceUser !== undefined && serviceUser !== null) {
+      resolveSystemdServiceUser({ serviceUser, platform, lookup: context.userLookup, execute: context.execute ?? execFileSync });
+    }
+    if (installUnits) {
+      installStagedSystemdAutoDeploy({
+        repositoryRoot: context.repositoryRoot,
+        manifestPath: context.manifestPath,
+        unitDirectory: context.unitDirectory,
+        sudoersPath: context.sudoersPath,
+        systemctlPath: context.systemctlPath,
+        execute: context.execute ?? execFileSync,
+        chown: context.chown,
+        serviceUser,
+        userLookup: context.userLookup,
+        effectiveUid: context.effectiveUid,
+        revert,
+        apply: true,
+      });
+      const phase = revert ? "REVERT" : "APPLY";
+      process.stdout.write(`${phase} platform=linux\n`);
+      process.stdout.write(`${phase} unit-directory=${context.unitDirectory ?? SYSTEMD_UNIT_DIRECTORY}\n`);
+      process.stdout.write(`${phase} units=2\n`);
+      process.stdout.write(`${phase} staging=${context.stagingRoot ?? "recorded"}\n`);
+      return 0;
+    }
+    if (revert) {
+      installStagedSystemdAutoDeploy({
+        repositoryRoot: context.repositoryRoot,
+        manifestPath: context.manifestPath,
+        unitDirectory: context.unitDirectory,
+        sudoersPath: context.sudoersPath,
+        systemctlPath: context.systemctlPath,
+        execute: context.execute ?? execFileSync,
+        serviceUser,
+        userLookup: context.userLookup,
+        effectiveUid: context.effectiveUid,
+        revert: true,
+        apply,
+      });
+      process.stdout.write(`${apply ? "REVERT" : "PLAN"} platform=linux\n`);
+      process.stdout.write(`${apply ? "REVERT" : "PLAN"} unit-directory=${context.unitDirectory ?? SYSTEMD_UNIT_DIRECTORY}\n`);
+      process.stdout.write(`${apply ? "REVERT" : "PLAN"} units=2\n`);
+      process.stdout.write(`${apply ? "REVERT" : "PLAN"} staging=${context.stagingRoot ?? "recorded"}\n`);
+      if (!apply) process.stdout.write("PLAN no files or systemd state changed\n");
+      return 0;
+    }
+    const callerUid = context.effectiveUid
+      ?? (typeof process.geteuid === "function" ? process.geteuid() : process.getuid());
+    if (callerUid === 0) throw new Error("launchd-installer-refuses-root");
+    const root = realpathSync(resolve(context.repositoryRoot ?? REPOSITORY_ROOT));
+    const nodeBinary = realpathSync(context.nodeBinary ?? process.execPath);
+    const gitBinary = context.gitBinary ? realpathSync(context.gitBinary) : requiredBinary("git");
+    const npmBinary = context.npmBinary ? realpathSync(context.npmBinary) : requiredBinary("npm");
+    const values = {
+      nodeBinary,
+      deployScript: join(root, "current/scripts/deploy/quiet-window-deploy.mjs"),
+      repositoryRoot: root,
+      sourceRemote: context.sourceRemote ?? execFileSync(gitBinary, ["-C", root, "remote", "get-url", "origin"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }).trim(),
+      path: context.path ?? controlledLaunchdPath({ nodeBinary, gitBinary }),
+      gitBinary,
+      npmBinary,
+      backup: requestedBackup ? verifyBackupConfiguration(requestedBackup, context.execute ?? execFileSync) : null,
+      runnerCount: resolveRunnerCount(context.environment ?? process.env),
+    };
+    if (!values.backup) throw new Error("backup-configuration-invalid:pg-dump-mode-must-be-host-or-container");
+    verifyRenderedToolchain(values, context.execute ?? execFileSync);
+    const result = planSystemdAutoDeploy({
+      ...values,
+      serviceUser,
+      repositoryRoot: root,
+      stagingRoot: context.stagingRoot,
+      unitDirectory: context.unitDirectory,
+      sudoersPath: context.sudoersPath,
+      apply,
+      effectiveUid: context.effectiveUid,
+      userLookup: context.userLookup,
+      execute: context.execute ?? execFileSync,
+    });
+    process.stdout.write(`${apply ? "APPLY" : "PLAN"} platform=linux\n`);
+    process.stdout.write(`${apply ? "APPLY" : "PLAN"} unit-directory=${context.unitDirectory ?? SYSTEMD_UNIT_DIRECTORY}\n`);
+    process.stdout.write(`${apply ? "APPLY" : "PLAN"} units=2\n`);
+    process.stdout.write(`${apply ? "APPLY" : "PLAN"} staging=${result.staging}\n`);
+    if (!apply) process.stdout.write("PLAN no files or systemd state changed\n");
+    else process.stdout.write(`NEXT sudo node ${shellQuote(process.argv[1])} --install-units --service-user ${shellQuote(serviceUser)}\n`);
+    return 0;
+  }
+  if (installUnits) throw new Error("systemd-installer-unsupported:darwin");
+  if (revert) throw new Error("launchd-auto-deploy-revert-unsupported");
+  if (serviceUser !== undefined && serviceUser !== null) throw new Error("systemd-service-user-not-supported-on-darwin");
+  if (typeof process.geteuid === "function" ? process.geteuid() === 0 : process.getuid() === 0) {
+    throw new Error("launchd-installer-refuses-root");
+  }
   const userHome = homedir();
   const launchAgents = join(userHome, "Library/LaunchAgents");
   const logs = join(userHome, "Library/Logs/Anneal");
@@ -679,6 +1937,7 @@ export const installLaunchd = (args) => {
     gitBinary,
     npmBinary,
     backup: verifyBackupConfiguration(requestedBackup),
+    runnerCount: resolveRunnerCount(),
   };
   verifyRenderedToolchain(values);
   const rendered = renderLaunchdPlist(readFileSync(TEMPLATE, "utf8"), values);
@@ -733,6 +1992,287 @@ export const installLaunchd = (args) => {
     }
     return 0;
   }
+};
+
+const autoDeployStageEntry = ({ path, stagedPath, backupPath = null, mode = 0o644, kind = "auto-deploy" }) => {
+  const existed = existsSync(path);
+  const originalStatus = existed ? statSync(path) : null;
+  return {
+    kind,
+    path,
+    stagedPath,
+    existed,
+    mode: existed ? statSync(path).mode & 0o777 : mode,
+    originalUid: originalStatus?.uid ?? null,
+    originalGid: originalStatus?.gid ?? null,
+    backupPath: existed ? backupPath : null,
+    originalSha256: existed ? sha256(readFileSync(path)) : null,
+    installedSha256: sha256(readFileSync(stagedPath)),
+  };
+};
+
+const autoDeployDefinitionValues = ({
+  root,
+  nodeBinary,
+  gitBinary,
+  npmBinary,
+  path,
+  sourceRemote,
+  backup,
+  serviceUser,
+  runnerCount,
+}) => Object.freeze({
+  nodeBinary,
+  gitBinary,
+  npmBinary,
+  path,
+  sourceRemote,
+  backup,
+  serviceUser,
+  repositoryRoot: root,
+  deployScript: join(root, "current/scripts/deploy/quiet-window-deploy.mjs"),
+  runnerCount,
+});
+
+export const planSystemdAutoDeploy = ({
+  repositoryRoot,
+  nodeBinary,
+  gitBinary,
+  npmBinary,
+  path,
+  sourceRemote,
+  backup,
+  serviceUser,
+  stagingRoot,
+  unitDirectory = SYSTEMD_UNIT_DIRECTORY,
+  sudoersPath = SYSTEMD_SUDOERS_PATH,
+  apply = false,
+  effectiveUid = typeof process.geteuid === "function" ? process.geteuid() : process.getuid(),
+  userLookup = null,
+  execute = execFileSync,
+  runnerCount = resolveRunnerCount(),
+} = {}) => {
+  const platform = resolveServicePlatform();
+  if (platform !== "linux") throw new Error("systemd-installer-unsupported:darwin");
+  if (effectiveUid === 0) throw new Error("launchd-installer-refuses-root");
+  const root = realpathSync(resolve(repositoryRoot ?? REPOSITORY_ROOT));
+  const account = resolveSystemdServiceUser({ serviceUser, platform: "linux", lookup: userLookup, execute });
+  const values = autoDeployDefinitionValues({
+    root,
+    nodeBinary,
+    gitBinary,
+    npmBinary,
+    path,
+    sourceRemote,
+    backup,
+    serviceUser: account,
+    runnerCount,
+  });
+  const service = renderAutoDeploySystemdUnit(readFileSync(SYSTEMD_AUTO_DEPLOY_TEMPLATE, "utf8"), values);
+  const timer = renderAutoDeploySystemdTimer(readFileSync(SYSTEMD_AUTO_DEPLOY_TIMER_TEMPLATE, "utf8"));
+  verifySystemdAutoDeployDefinitions({ service, timer });
+  const stage = resolve(stagingRoot ?? join(root, AUTO_DEPLOY_INSTALL_ROOT, "staging"));
+  const targetRoot = resolve(unitDirectory);
+  const servicePath = join(targetRoot, `${LABEL}.service`);
+  const timerPath = join(targetRoot, `${LABEL}.timer`);
+  if (!apply) return Object.freeze({
+    applied: false,
+    reverted: false,
+    platform: "linux",
+    staging: stage,
+    unitDirectory: targetRoot,
+    serviceUser: account,
+    entries: [servicePath, timerPath],
+    definitions: { service, timer },
+    values,
+  });
+  const manifestPath = autoDeployManifestPath(root);
+  if (existsSync(manifestPath)) throw new Error("systemd-auto-deploy-install-active");
+  stageSystemdDefinition({ stagingRoot: stage, relativePath: `${LABEL}.service`, contents: service });
+  stageSystemdDefinition({ stagingRoot: stage, relativePath: `${LABEL}.timer`, contents: timer });
+  const entries = [
+    {
+      ...autoDeployStageEntry({
+        path: servicePath,
+        stagedPath: stagingFile(stage, `${LABEL}.service`),
+        backupPath: join(stage, "backups", `${LABEL}.service`),
+      }),
+      unit: `${LABEL}.service`,
+    },
+    {
+      ...autoDeployStageEntry({
+        path: timerPath,
+        stagedPath: stagingFile(stage, `${LABEL}.timer`),
+        backupPath: join(stage, "backups", `${LABEL}.timer`),
+      }),
+      unit: `${LABEL}.timer`,
+    },
+  ];
+  for (const entry of entries) {
+    entry.installedSha256 = fileDigest(entry.stagedPath);
+    stageFileEntry({ entry });
+    backupSystemdTarget({ stagingRoot: stage, entry });
+  }
+  const manifest = {
+    schemaVersion: 1,
+    platform: "linux",
+    repositoryRoot: root,
+    serviceUser: account,
+    runnerCount,
+    stagingRoot: stage,
+    unitDirectory: targetRoot,
+    sudoersPath: resolve(sudoersPath),
+    renderInputs: {
+      nodeBinary,
+      gitBinary,
+      npmBinary,
+      path,
+      sourceRemote,
+      backup,
+      runnerCount,
+    },
+    entries,
+    auxiliaryEntries: [],
+  };
+  writeAtomic(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 0o600);
+  return Object.freeze({
+    applied: true,
+    reverted: false,
+    platform: "linux",
+    staging: stage,
+    unitDirectory: targetRoot,
+    serviceUser: account,
+    entries: entries.map((entry) => entry.path),
+    manifest,
+    manifestPath,
+  });
+};
+
+export const installStagedSystemdAutoDeploy = ({
+  repositoryRoot,
+  manifestPath,
+  unitDirectory = SYSTEMD_UNIT_DIRECTORY,
+  sudoersPath = SYSTEMD_SUDOERS_PATH,
+  systemctlPath = null,
+  execute = execFileSync,
+  chown = chownSync,
+  serviceUser,
+  userLookup = null,
+  effectiveUid = typeof process.geteuid === "function" ? process.geteuid() : process.getuid(),
+  revert = false,
+  apply = true,
+} = {}) => {
+  const platform = resolveServicePlatform();
+  if (platform !== "linux") throw new Error("systemd-installer-unsupported:darwin");
+  if (apply && effectiveUid !== 0) throw new Error("systemd-installer-requires-root");
+  const root = realpathSync(resolve(repositoryRoot ?? REPOSITORY_ROOT));
+  const path = manifestPath ?? autoDeployManifestPath(root);
+  if (!existsSync(path)) throw new Error("systemd-auto-deploy-manifest-missing");
+  const manifest = readJsonFile(path, "systemd-auto-deploy-manifest-invalid");
+  const targetRoot = resolve(unitDirectory ?? manifest.unitDirectory ?? SYSTEMD_UNIT_DIRECTORY);
+  const expectedStage = join(root, AUTO_DEPLOY_INSTALL_ROOT, "staging");
+  assertContainedPath(expectedStage, root);
+  const account = resolveSystemdServiceUser({ serviceUser, platform: "linux", lookup: userLookup, execute });
+  if (manifest.schemaVersion !== 1 || manifest.platform !== "linux" || manifest.repositoryRoot !== root
+      || manifest.serviceUser !== account || manifest.stagingRoot !== expectedStage
+      || manifest.unitDirectory !== targetRoot || !Array.isArray(manifest.entries) || manifest.entries.length !== 2
+      || !Array.isArray(manifest.auxiliaryEntries) || !manifest.renderInputs) {
+    throw new Error("systemd-auto-deploy-manifest-invalid");
+  }
+  const entries = [...manifest.entries, ...(Array.isArray(manifest.auxiliaryEntries) ? manifest.auxiliaryEntries : [])];
+  const targetSudoers = resolve(sudoersPath ?? manifest.sudoersPath ?? SYSTEMD_SUDOERS_PATH);
+  if (entries.length !== 2 || manifest.auxiliaryEntries.length !== 0) throw new Error("systemd-auto-deploy-manifest-invalid");
+  const expectedEntries = [
+    { kind: "auto-deploy", unit: `${LABEL}.service`, path: join(targetRoot, `${LABEL}.service`), stagedPath: join(expectedStage, `${LABEL}.service`) },
+    { kind: "auto-deploy", unit: `${LABEL}.timer`, path: join(targetRoot, `${LABEL}.timer`), stagedPath: join(expectedStage, `${LABEL}.timer`) },
+  ];
+  expectedEntries.forEach((expected, index) => assertExactEntry(entries[index], expected, "systemd-auto-deploy-manifest-invalid"));
+  for (const entry of entries) {
+    assertContainedPath(entry.path, targetRoot);
+    assertContainedPath(entry.stagedPath, expectedStage);
+    const expectedBackup = entry.existed ? join(expectedStage, "backups", entry.unit) : null;
+    if (entry.backupPath !== expectedBackup || !existsSync(entry.stagedPath) || !lstatSync(entry.stagedPath).isFile()) {
+      throw new Error("systemd-auto-deploy-manifest-invalid");
+    }
+    if (entry.backupPath) assertContainedPath(entry.backupPath, join(expectedStage, "backups"));
+  }
+  const values = autoDeployDefinitionValues({ root, serviceUser: account, ...manifest.renderInputs });
+  const expectedService = renderAutoDeploySystemdUnit(readFileSync(SYSTEMD_AUTO_DEPLOY_TEMPLATE, "utf8"), values);
+  const expectedTimer = renderAutoDeploySystemdTimer(readFileSync(SYSTEMD_AUTO_DEPLOY_TIMER_TEMPLATE, "utf8"));
+  if (readFileSync(entries[0].stagedPath, "utf8") !== expectedService) throw new Error("systemd-staged-unit-invalid:com.agentos.auto-deploy.service");
+  if (readFileSync(entries[1].stagedPath, "utf8") !== expectedTimer) throw new Error("systemd-staged-unit-invalid:com.agentos.auto-deploy.timer");
+  if (!apply) return Object.freeze({
+    applied: false,
+    reverted: false,
+    platform: "linux",
+    staging: expectedStage,
+    unitDirectory: targetRoot,
+    units: entries.map((entry) => entry.unit),
+    entries: entries.map((entry) => entry.path),
+  });
+  const systemctl = systemctlPath ?? systemdCommandPath("systemctl", null, execute);
+  for (const entry of entries) {
+    const current = fileDigest(entry.path);
+    const recognized = current === entry.installedSha256
+      || (entry.existed && current === entry.originalSha256)
+      || (!entry.existed && current === null);
+    if (!recognized) throw new Error(`systemd-auto-deploy-definition-drift:${entry.path}`);
+    if (entry.existed && current === entry.installedSha256
+        && (!entry.backupPath || !existsSync(entry.backupPath) || fileDigest(entry.backupPath) !== entry.originalSha256)) {
+      throw new Error(`systemd-auto-deploy-backup-missing:${entry.path}`);
+    }
+    if (!revert && fileDigest(entry.stagedPath) !== entry.installedSha256) {
+      throw new Error(`systemd-staged-file-drift:${entry.stagedPath}`);
+    }
+  }
+  const transactionStatePath = join(targetRoot, ".anneal-auto-deploy-transaction.json");
+  const transactionState = rootTransactionState({
+    statePath: transactionStatePath,
+    manifest,
+    entries,
+    systemctlPath: systemctl,
+    execute,
+    requireExisting: revert,
+  });
+  if (!revert) {
+    for (const entry of entries) copyStagedEntry({
+      entry,
+      unitDirectory: targetRoot,
+      sudoersPath: targetSudoers,
+      strictOwner: typeof process.geteuid !== "function" || process.geteuid() === 0,
+      chown,
+    });
+    runSystemctl({ systemctlPath: systemctl, args: ["daemon-reload"], execute });
+    runSystemctl({ systemctlPath: systemctl, args: ["enable", "--now", `${LABEL}.timer`], unit: `${LABEL}.timer`, execute });
+    return Object.freeze({
+      applied: true, reverted: false, platform: "linux", staging: expectedStage,
+      unitDirectory: targetRoot, units: entries.map((entry) => entry.unit), entries: entries.map((entry) => entry.path),
+    });
+  }
+  const timerEntry = manifest.entries[1];
+  const timerState = transactionState.entries[1];
+  runSystemctl({
+    systemctlPath: systemctl,
+    args: timerState.existed ? ["stop", timerEntry.unit] : ["disable", "--now", timerEntry.unit],
+    unit: timerEntry.unit,
+    execute,
+  });
+  for (const [index, entry] of entries.entries()) {
+    restoreRootTransactionEntry(entry, transactionState.entries[index]);
+    if (entry.backupPath) rmSync(entry.backupPath, { force: true });
+  }
+  runSystemctl({ systemctlPath: systemctl, args: ["daemon-reload"], execute });
+  if (timerState.existed) {
+    runSystemctl({ systemctlPath: systemctl, args: [timerState.unitState?.enabled ? "enable" : "disable", timerEntry.unit], unit: timerEntry.unit, execute });
+    runSystemctl({ systemctlPath: systemctl, args: [timerState.unitState?.active ? "start" : "stop", timerEntry.unit], unit: timerEntry.unit, execute });
+  }
+  rmSync(path, { force: true });
+  rmSync(transactionStatePath, { force: true });
+  rmSync(expectedStage, { recursive: true, force: true });
+  return Object.freeze({
+    applied: true, reverted: true, platform: "linux", staging: expectedStage,
+    unitDirectory: targetRoot, units: entries.map((entry) => entry.unit), entries: entries.map((entry) => entry.path),
+  });
 };
 
 const isEntryPoint = (() => {

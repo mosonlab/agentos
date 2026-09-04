@@ -13,7 +13,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
@@ -49,12 +49,15 @@ import {
 } from "./quiet-window-escalation-record.mjs";
 import { renderLaunchdPlist } from "./install-launchd.mjs";
 import { assembleReleaseDirectory } from "./release-directory.mjs";
+import { resolveServiceInvocation } from "./launchd-service-wrapper.mjs";
 import { buildReleaseArtifact, findReleaseArtifact, verifyReleaseArtifact } from "./release-artifact.mjs";
 import {
   autoDeployNoticeBody,
   canonicalSyncNoticeRecord,
   canonicalSyncRefusedLines,
+  createDeployHost,
   deployRootFromEnvironment,
+  verifyStableServicePaths,
 } from "./quiet-window-deploy.mjs";
 
 const revisions = { from: "a".repeat(40), to: "b".repeat(40) };
@@ -654,6 +657,135 @@ test("service inventory covers the thirteen production labels", () => {
   assert.equal(SERVICE_LABELS.length, 13);
   assert.equal(SERVICE_LABELS[0], "com.agentos.api");
   assert.equal(SERVICE_LABELS.at(-1), "com.agentos.web");
+});
+
+test("the deploy host restarts and restores every Linux unit in inventory order", async () => {
+  const calls = [];
+  const serviceControl = {
+    platform: "linux",
+    restart: async (label, options) => { calls.push({ label, options }); },
+    isRunning: async () => true,
+    describe: async () => "",
+  };
+  let recoveryVerified = false;
+  const host = createDeployHost({
+    serviceControl,
+    verifyRecoveredServices: async (control) => {
+      assert.equal(control, serviceControl);
+      recoveryVerified = true;
+    },
+  });
+
+  await host.restartServices();
+  assert.deepEqual(calls.map(({ label }) => label), SERVICE_LABELS);
+  assert.deepEqual(calls.map(({ options }) => options.reason), SERVICE_LABELS.map(() => "service-restart-failed"));
+
+  calls.length = 0;
+  await host.restorePreviousServices();
+  assert.deepEqual(calls.map(({ label }) => label), SERVICE_LABELS);
+  assert.deepEqual(calls.map(({ options }) => options.reason), SERVICE_LABELS.map(() => "previous-service-restore-failed"));
+  assert.equal(recoveryVerified, true);
+});
+
+test("rollback re-proves liveness, wrapper binding, and prior API identity on both platforms", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "agentos-rollback-proof-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const release = "a".repeat(40);
+  const releaseRoot = join(root, "releases", release);
+  for (const path of [
+    "packages/api/dist/index.js",
+    "packages/inbox/dist/index.js",
+    "packages/runner/dist/index.js",
+    "node_modules/vite/bin/vite.js",
+  ]) {
+    const file = join(releaseRoot, path);
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, "fixture\n");
+  }
+  mkdirSync(join(releaseRoot, "apps/web"), { recursive: true });
+  mkdirSync(join(root, "shared"), { recursive: true });
+  writeFileSync(join(root, "shared/.env"), "DATABASE_URL=configured\n");
+  symlinkSync(releaseRoot, join(root, "current"));
+  const wrapper = join(root, "shared/bin/agentos-service-wrapper.mjs");
+  const fetchImpl = async (url) => url.endsWith("/health")
+    ? { ok: true }
+    : { ok: true, json: async () => ({ commit: release, dirty: false }) };
+  assert.equal(resolveServiceInvocation({
+    repositoryRoot: root,
+    label: "com.agentos.api",
+    environment: { DEPLOY_NODE_BINARY: "/usr/bin/node" },
+  }).releaseCommit, release);
+
+  for (const platform of ["linux", "darwin"]) {
+    const calls = [];
+    const control = {
+      platform,
+      restart: async (label) => { calls.push(["restart", label]); },
+      isRunning: async (label) => { calls.push(["is-active", label]); return true; },
+      describe: async (label) => {
+        calls.push(["show", label]);
+        return `${platform === "darwin" ? "state = running\n" : ""}/usr/bin/node ${wrapper} ${label}\n`;
+      },
+    };
+    const host = createDeployHost({
+      serviceControl: control,
+      verifyRecoveredServices: (serviceControl) => {
+        assert.equal(existsSync(join(root, "current")), true);
+        return verifyStableServicePaths(serviceControl, {
+          repositoryRoot: root,
+          environment: { DEPLOY_NODE_BINARY: "/usr/bin/node" },
+          fetchImpl,
+        });
+      },
+    });
+    await host.restorePreviousServices();
+    const expected = [
+      ...SERVICE_LABELS.map((label) => ["restart", label]),
+      ...SERVICE_LABELS.flatMap((label) => platform === "linux"
+        ? [["is-active", label], ["show", label]]
+        : [["show", label]]),
+    ];
+    assert.deepEqual(calls, expected);
+  }
+  for (const failure of ["inactive", "wrong-wrapper"]) {
+    const control = {
+      platform: "linux",
+      restart: async () => {},
+      isRunning: async () => failure !== "inactive",
+      describe: async (label) => `/usr/bin/node ${failure === "wrong-wrapper" ? "/wrong/wrapper.mjs" : wrapper} ${label}\n`,
+    };
+    const host = createDeployHost({
+      serviceControl: control,
+      verifyRecoveredServices: (serviceControl) => verifyStableServicePaths(serviceControl, {
+        repositoryRoot: root,
+        environment: { DEPLOY_NODE_BINARY: "/usr/bin/node" },
+        fetchImpl,
+      }),
+    });
+    await assert.rejects(host.restorePreviousServices(), /service-start-failed:com\.agentos\.api/u);
+  }
+});
+
+test("a Linux service-control denial aborts restart traversal", async () => {
+  const calls = [];
+  const serviceControl = {
+    platform: "linux",
+    restart: async (label) => {
+      calls.push(label);
+      throw new DeployFailure("service-control-denied", `${label}.service`);
+    },
+    isRunning: async () => true,
+    describe: async () => "",
+  };
+  const host = createDeployHost({ serviceControl });
+
+  await assert.rejects(
+    host.restartServices(),
+    (error) => error instanceof DeployFailure
+      && error.reason === "service-control-denied"
+      && error.detail === "com.agentos.api.service",
+  );
+  assert.deepEqual(calls, ["com.agentos.api"]);
 });
 
 test("quiet-window predicate blocks only active run states", () => {

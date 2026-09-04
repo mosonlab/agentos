@@ -1,16 +1,18 @@
 # Quiet-window auto-deploy
 
 > **Audience and support status.** This runbook documents the repository
-> maintainer's macOS appliance-deployment profile. It is published for
-> auditability and reproducibility, but it is not part of the Developer Preview
-> Quickstart, the supported installation shape, or a production-support
-> commitment.
+> maintainer's macOS appliance-deployment profile and its Linux systemd
+> deployment profile. It is published for auditability and reproducibility, but
+> it is not part of the Developer Preview Quickstart, the supported installation
+> shape, or a production-support commitment.
 
-This job advances the macOS appliance from the release named by `current` to an
-exact `main` commit. It controls `com.agentos.api`, `com.agentos.inbox`, ten
-runner labels, and `com.agentos.web`. The release artifact also carries the
-resident merge-executor runtime, but that process is outside this thirteen-label
-activation set. The job never deploys an Anneal run workspace.
+On macOS, this job advances the appliance from the release named by `current`
+to an exact `main` commit. It controls `com.agentos.api`, `com.agentos.inbox`,
+the configured runner labels (ten by default), and `com.agentos.web`; that is
+thirteen labels at the default count. The Linux systemd profile below uses the
+same generated inventory. The release artifact also carries the resident
+merge-executor runtime, but that process is outside this activation set. The
+job never deploys an Anneal run workspace.
 
 ## Runtime layout
 
@@ -49,7 +51,7 @@ root. Require:
 - `shared/.env` to be mode 0600 and contain `DATABASE_URL`,
   `FEISHU_DEFAULT_CHAT_ID`, and the five absolute persistent paths beneath
   `shared/`;
-- all thirteen service labels to use `shared/bin/agentos-service-wrapper.mjs`;
+- all configured service labels to use `shared/bin/agentos-service-wrapper.mjs`;
 - the configured PostgreSQL container and its `pg_dump` binary to be running;
 - the source remote, Node, npm CLI, Git, and Docker paths recorded in the
   auto-deploy plist to remain executable.
@@ -156,6 +158,155 @@ source remote and absolute toolchain, logs under `~/Library/Logs/Anneal`, runs
 at load, and repeats every five minutes. The installer refuses to overwrite a
 different existing definition.
 
+## Linux systemd
+
+Linux uses system-level systemd units and selects this profile with
+`AGENTOS_SERVICE_PLATFORM=linux`. The platform resolver accepts only `darwin`
+or `linux`; an unsupported value stops the operation rather than selecting the
+macOS profile. The Linux installer is a two-stage operation: rendering and
+staging are unprivileged, while copying into `/etc/systemd/system`, changing
+systemd state, and installing the control grant are root-only.
+The merge executor is installed by hand under its separate operator runbook;
+it is not generated, enabled, restarted, or rolled back by this activation set.
+
+### Two-stage install
+
+Set an existing, non-root Linux service account in `SERVICE_USER`. The
+`--service-user` value is required on Linux, is validated before rendering,
+and is refused when it names an unknown account or `root`. Keep the staging
+directory operator-owned; it lives below the existing `.agentos-deploy/`
+install root.
+
+First plan, then render both installer manifests as the operator. The
+auto-deploy command below uses the host `pg_dump` mode; set its absolute path
+in `DEPLOY_PG_DUMP_BINARY` before running it.
+
+```sh
+export AGENTOS_SERVICE_PLATFORM=linux
+export SERVICE_USER="${SERVICE_USER:?set an existing non-root service account}"
+export DEPLOY_PG_DUMP_BINARY="${DEPLOY_PG_DUMP_BINARY:?set an absolute pg_dump path}"
+
+scripts/os-isolation/patch-runner-plists.sh --dry-run
+scripts/os-isolation/patch-runner-plists.sh --apply
+
+node scripts/deploy/install-launchd-services.mjs \
+  --service-user "$SERVICE_USER" \
+  --replace-existing
+node scripts/deploy/install-launchd-services.mjs \
+  --service-user "$SERVICE_USER" \
+  --replace-existing --apply
+
+node scripts/deploy/install-launchd.mjs \
+  --service-user "$SERVICE_USER" \
+  --pg-dump-mode host \
+  --pg-dump-binary "$DEPLOY_PG_DUMP_BINARY"
+node scripts/deploy/install-launchd.mjs \
+  --service-user "$SERVICE_USER" \
+  --pg-dump-mode host \
+  --pg-dump-binary "$DEPLOY_PG_DUMP_BINARY" \
+  --apply
+```
+
+The plan prints `PLAN platform=linux`, the system unit directory, the
+count-derived unit total, the staging path, and
+`PLAN no files or systemd state changed`. A stage-one apply writes only the
+rendered service units, the auto-deploy oneshot and timer, the staged
+os-isolation drop-ins, the stable wrapper, and their digest-and-backup
+manifests below `.agentos-deploy/`. It does not write `/etc`, call
+`systemctl`, or require privilege. Each installer prints the exact root
+command for its second stage; run those commands as printed, with
+`--install-units`, rather than constructing a different path by hand.
+
+Stage two verifies the already operator-installed stable wrapper, copies only
+the system-owned staged files to `/etc/systemd/system` as `root:root` with
+mode 0644, independently validates the rendered units and generated
+`/etc/sudoers.d/anneal-service-control` with `visudo -c`, runs
+`systemctl daemon-reload`, and then enables the generated inventory. The
+sudoers grant names only the generated unit names and only the verbs
+`restart`, `show`, and `is-active`. It does not grant `enable`, `disable`, or
+`daemon-reload`; those operations remain in the root install stage. A
+non-root control call uses `sudo -n`, and a denied command is a deployment
+failure rather than a successful no-op.
+
+Before replacing an existing system file, stage two records its bytes,
+ownership, mode, and enabled/active state in a root-owned mode-0600 transaction
+record beside the unit definitions. The unprivileged staging manifest cannot
+rewrite that record. A successful revert consumes and removes it after the
+final `daemon-reload`.
+
+The service installer manifest includes the stable wrapper as its first entry
+and one entry for every generated service definition. The separate
+auto-deploy installer owns its own definition manifest: one plist on macOS,
+and a `Type=oneshot` service plus its timer on Linux. The oneshot service is
+installed but is never enabled or started directly: `enable --now` is applied
+to the timer so installation cannot trigger an immediate deployment.
+
+### Runner count, accounts, and logs
+
+`AGENTOS_RUNNER_COUNT` controls the generated inventory and defaults to 10;
+valid values are integers from 1 through 64. The service labels remain in
+inventory order: API, inbox, `com.agentos.runner` for runner 1,
+`com.agentos.runner-2` through the configured count, then web. The
+os-isolation scripts use `ACCOUNT_COUNT` (default 8) for the account pool and
+map runner `i` to account `((i - 1) % ACCOUNT_COUNT) + 1`. Thus a count of 16
+places two runners on each of the eight accounts, with runners 1 and 9 on
+account 1. Each account keeps its own mode-700 home and its own Git and CLI
+state; no account's credentials are copied or shared with another account.
+
+At the default count there are thirteen long-running service units. At a
+count of 16 there are nineteen. Stage two runs `systemctl enable --now
+<label>.service` for every long-running service and
+`systemctl enable --now com.agentos.auto-deploy.timer`; it never enables or
+starts `com.agentos.auto-deploy.service` directly.
+
+Linux service output is in the systemd journal, not in
+`~/Library/Logs/Anneal`. Inspect a service with:
+
+```sh
+journalctl --no-pager -u <label>.service
+```
+
+No deployment code parses per-service log files on Linux. The auto-deploy
+oneshot's output is likewise inspected through its journal unit.
+
+### Activation and rollback
+
+The release and pointer workflow is unchanged. After the verified `current`
+pointer is activated, the Linux control adapter performs the following checks
+for each generated service label, in inventory order:
+
+```sh
+sudo -n systemctl restart <label>.service
+sudo -n systemctl is-active <label>.service
+sudo -n systemctl show -p ExecStart --value <label>.service
+```
+
+`is-active` must return `active`, and the `ExecStart` value must contain both
+the stable wrapper path and the label. The HTTP readiness probes, release
+identity checks, and deploy barrier remain the same as on macOS. If
+verification fails after activation, atomically point `current` back to
+`previous`, then repeat the same `restart`, `is-active`, and wrapper-boundary
+checks for the prior release. The auto-deploy oneshot is not restarted as part
+of service rollback; its timer remains the scheduler.
+
+To undo the service installation, first run the unprivileged wrapper-revert
+stage; it restores only the operator-owned stable wrapper and prints the exact
+root command that reverts the system-owned files:
+
+```sh
+node scripts/deploy/install-launchd-services.mjs \
+  --service-user "$SERVICE_USER" --revert --apply
+```
+
+Run that printed `--install-units --revert` command, then use the separate
+auto-deploy installer's `--install-units --revert` mode for its oneshot and
+timer. The recorded manifests are authoritative: a digest
+drift refuses the revert without changing anything; otherwise the installer
+restores or removes every recorded file, records `systemctl disable --now` for
+units it removes, and finishes with `systemctl daemon-reload`. This restores
+the system-unit files, timer, staged drop-ins, wrapper, and generated control
+grant to their recorded pre-install state.
+
 ## Activation sequence
 
 For a new remote commit, the job records `STARTED`, invokes the explicit
@@ -170,7 +321,7 @@ builder, and then performs exactly this sequence:
    recovery.
 3. Copy the verified release to a disposable writable operation workspace.
    This is not a Git checkout and is never published.
-4. Prove the thirteen loaded services are running through the stable wrapper
+4. Prove every configured service is running through the stable wrapper
    and still identify the old `current` release.
 5. Stream a custom-format `pg_dump` to a mode-0600 temporary host file, fsync
    it, and rename it only after a successful non-empty result. Record
@@ -184,7 +335,7 @@ builder, and then performs exactly this sequence:
 8. Recheck the deploy barrier and blocking statuses, then reverify the original
    immutable artifact.
 9. Atomically update `previous` and `current`, durably record `ACTIVATED`, and
-   restart all thirteen labels.
+   restart every configured label.
 10. Require all labels running, `/health` successful, and `/version` reporting
     the target clean commit. Record `VERIFIED` and `SUCCEEDED` and write the
     success Inbox record.
