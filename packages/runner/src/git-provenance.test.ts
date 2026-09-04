@@ -40,6 +40,7 @@ const config = (root: string, identity: RunnerConfig["gitIdentity"] = HUMAN): Ru
   apiUrl: "http://api.invalid",
   runnerToken: "runner-token",
   runnerId: "runner-provenance",
+  servedKinds: null,
   daemonVersion: "0.0.0-test",
   pollIntervalMs: 5_000,
   claimMaxLoadAverage: 1.5,

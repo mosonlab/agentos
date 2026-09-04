@@ -149,6 +149,7 @@ const config = (workspaceRoot: string, agentBinary: string): RunnerConfig => ({
   apiUrl: "http://api.invalid",
   runnerToken: "runner-token",
   runnerId: "runner-1",
+  servedKinds: null,
   daemonVersion: "0.0.0-test",
   pollIntervalMs: 5_000,
   claimMaxLoadAverage: 1.5,
