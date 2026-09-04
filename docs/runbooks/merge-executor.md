@@ -282,6 +282,13 @@ do not fall back to a per-user LaunchAgent, the API user, or root.
 
 ### Linux systemd
 
+The merge-executor unit in this section remains operator-installed and is
+outside the quiet-window service inventory. The service inventory's Linux
+systemd installer, sudoers control grant, activation, and rollback procedure
+is documented in [Quiet-window auto-deploy — Linux systemd](quiet-window-auto-deploy.md#linux-systemd);
+that installer covers the API, inbox, runner, web, and auto-deploy units, not
+the merge executor. Keep this executor unit as a separate operator procedure.
+
 systemd reads the root-only environment file before dropping privileges, so it
 can remain mode 0600. Create `/etc/systemd/system/agentos-merge-executor.service`
 as root after substituting the user, group, and Node path:

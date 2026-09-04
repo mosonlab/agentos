@@ -1,0 +1,38 @@
+{
+  "baselineCommit": "9a52c6ad",
+  "renderedPlistSha256": {
+    "com.agentos.api": "abf32c0c6d2b3d5a941bcca53e7ae372b0bd6aa6325d9fda8b5df6a23f95c058",
+    "com.agentos.inbox": "51e3f6c74254334d28ecef911d43e741f4f4b7d3710142ea991df3043797d677",
+    "com.agentos.runner": "bef79627a81d836211c8b936ebfa1aaf70c3aa66df9d8fa8e8290a915720cf46",
+    "com.agentos.runner-2": "e6feece3a4159b89a1974e5d278207a33a322b99342bd3227e719665505d462a",
+    "com.agentos.runner-3": "dedca26b935204e82679992b1e1cc6b56c32fe176a703df4e08fc3472d03cff7",
+    "com.agentos.runner-4": "9e1e0647cb117e273876e3ca51bd2517087c8530a34304a9cc4db6d413776fe1",
+    "com.agentos.runner-5": "0f35f0aa78ccb3e1ce724fbddb75edde0f624a385c3c1668442a6b164b1a1c55",
+    "com.agentos.runner-6": "8b10af381922f1f8ce23b42815fc31f4f546f2d83a51abd60ae0b7e89d81b419",
+    "com.agentos.runner-7": "964f6d6f5d5a4863dedb08427898b8113fd39f83dd21b9ee2e794f732fb0c7a2",
+    "com.agentos.runner-8": "51524a340ad818b96e6ec66eaf728a2fd4f95dbf975bac28746793678a63f3e7",
+    "com.agentos.runner-9": "901fe12f5823bf8bf5e7603e6b66ffa1a303235cc0d3d56e40241ef305649173",
+    "com.agentos.runner-10": "a94363fa5912d8e2dca34343aeb3e2841ac3d157288a41041cb61b8380f5ecf2",
+    "com.agentos.web": "6431345192453213373b818ac1b7d929d62d5d9367b4974cf3fbfb9b25d9e7b3"
+  },
+  "autoDeployPlistSha256": "92edeacaa6c0c5024313f686f1901c53c58ee873ebf42ef91d3323f99783c99b",
+  "autoDeployPlanStdout": "PLAN label=com.agentos.auto-deploy\nPLAN destination=<HOME>/Library/LaunchAgents/com.agentos.auto-deploy.plist\nPLAN repository=<ROOT>\nPLAN node=<NODE>\nPLAN path=<CONTROLLED_PATH>\nPLAN git=<GIT>\nPLAN npm=<NPM>\nPLAN rendered_toolchain=verified\nPLAN pg_dump_mode=host\nPLAN pg_dump=/usr/bin/true\nPLAN no files or launchd state changed\n",
+  "serviceManifestEntries": [
+    "<ROOT>/shared/bin/agentos-service-wrapper.mjs",
+    "<ROOT>/fixture-home/Library/LaunchAgents/com.agentos.api.plist",
+    "<ROOT>/fixture-home/Library/LaunchAgents/com.agentos.inbox.plist",
+    "<ROOT>/fixture-home/Library/LaunchAgents/com.agentos.runner.plist",
+    "<ROOT>/fixture-home/Library/LaunchAgents/com.agentos.runner-2.plist",
+    "<ROOT>/fixture-home/Library/LaunchAgents/com.agentos.runner-3.plist",
+    "<ROOT>/fixture-home/Library/LaunchAgents/com.agentos.runner-4.plist",
+    "<ROOT>/fixture-home/Library/LaunchAgents/com.agentos.runner-5.plist",
+    "<ROOT>/fixture-home/Library/LaunchAgents/com.agentos.runner-6.plist",
+    "<ROOT>/fixture-home/Library/LaunchAgents/com.agentos.runner-7.plist",
+    "<ROOT>/fixture-home/Library/LaunchAgents/com.agentos.runner-8.plist",
+    "<ROOT>/fixture-home/Library/LaunchAgents/com.agentos.runner-9.plist",
+    "<ROOT>/fixture-home/Library/LaunchAgents/com.agentos.runner-10.plist",
+    "<ROOT>/fixture-home/Library/LaunchAgents/com.agentos.web.plist"
+  ],
+  "autoDeployManifestEntries": ["<HOME>/Library/LaunchAgents/com.agentos.auto-deploy.plist"],
+  "servicePlanStdout": "PLAN service-wrapper=<ROOT>/shared/bin/agentos-service-wrapper.mjs\nPLAN service-definitions=14\nPLAN no files or launchd state changed\n"
+}

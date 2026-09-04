@@ -69,6 +69,8 @@ import { findReleaseArtifact, verifyReleaseArtifact } from "./release-artifact.m
 import { activateReleasePointer, rollbackReleasePointer } from "./release-pointer.mjs";
 import { verifyServiceInventory } from "./launchd-service-wrapper.mjs";
 import { serviceWrapperPath } from "./install-launchd.mjs";
+import { createServiceControl, describesStableWrapper } from "./service-control.mjs";
+import { resolveServicePlatform } from "./service-platform.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -357,19 +359,6 @@ const sleep = (milliseconds) => {
   });
 };
 
-const launchctl = async (reason, args, options = {}) => checked(reason, "/bin/launchctl", args, {
-  capture: true,
-  timeoutMs: DEPLOY_STEP_TIMEOUT_MS.serviceRestart,
-  timeoutReason: `${reason}-timeout`,
-  ...options,
-});
-const domain = () => `gui/${process.getuid()}`;
-const launchctlPrint = (label) => command("/bin/launchctl", ["print", `${domain()}/${label}`], {
-  capture: true,
-  timeoutMs: DEPLOY_STEP_TIMEOUT_MS.serviceInspection,
-  timeoutReason: "service-inspection-timeout",
-});
-
 const acquireDeployBarrier = async () => {
   throwIfInterrupted();
   const module = await import("@prisma/client").catch(() => fail("database-client-unavailable", "prisma-client-import-failed"));
@@ -521,11 +510,21 @@ const pruneHistory = () => {
   return { ...result, releases };
 };
 
-const serviceState = async () => {
+export const createDefaultServiceControl = () => createServiceControl({
+  platform: resolveServicePlatform(),
+  run: command,
+  checked,
+  wrapperPath: serviceWrapperPath(REPOSITORY_ROOT),
+  timeoutMs: {
+    restart: DEPLOY_STEP_TIMEOUT_MS.serviceRestart,
+    inspect: DEPLOY_STEP_TIMEOUT_MS.serviceInspection,
+  },
+});
+
+const serviceState = async (serviceControl) => {
   const unavailable = [];
   for (const label of SERVICE_LABELS) {
-    const result = await launchctlPrint(label);
-    if (result.code !== 0 || !/^\s*state = running\s*$/mu.test(result.stdout)) unavailable.push(label);
+    if (!await serviceControl.isRunning(label)) unavailable.push(label);
   }
   return { ok: unavailable.length === 0, unavailable };
 };
@@ -534,22 +533,40 @@ const serviceState = async () => {
  * loaded definition must name the stable shared wrapper, each label must still
  * be running from the old current target, and the API must report that exact
  * current release commit. */
-const verifyStableServicePaths = async () => {
-  const wrapper = serviceWrapperPath(REPOSITORY_ROOT);
+export const verifyStableServicePaths = async (serviceControl, {
+  repositoryRoot = REPOSITORY_ROOT,
+  environment = process.env,
+  fetchImpl = fetch,
+} = {}) => {
+  const wrapper = serviceWrapperPath(repositoryRoot);
   try {
     return await verifyServiceInventory({
-      repositoryRoot: REPOSITORY_ROOT,
+      repositoryRoot,
+      environment,
       start: async (invocation) => {
-        const result = await launchctlPrint(invocation.label);
-        const running = result.code === 0 && /^\s*state = running\s*$/mu.test(result.stdout);
-        const wrapped = result.stdout.includes(wrapper) && result.stdout.includes(invocation.label);
+        let description;
+        let running;
+        if (serviceControl.platform === "darwin") {
+          // launchctl print supplies both facts in one output. Keep the
+          // existing one-command inspection on the frozen macOS path.
+          description = await serviceControl.describe(invocation.label);
+          running = /^\s*state = running\s*$/mu.test(description);
+        } else {
+          running = await serviceControl.isRunning(invocation.label);
+          description = await serviceControl.describe(invocation.label);
+        }
+        const wrapped = describesStableWrapper({
+          description,
+          label: invocation.label,
+          wrapperPath: wrapper,
+        });
         return { ok: running && wrapped, targetReleaseId: invocation.releaseIdentity };
       },
       readiness: async ({ label, invocation }) => {
         if (label !== "com.agentos.api") return { ok: true, releaseIdentity: invocation.releaseIdentity };
         const port = process.env.API_PORT ?? "3000";
-        const health = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2_000) });
-        const version = await fetch(`http://127.0.0.1:${port}/version`, { signal: AbortSignal.timeout(2_000) });
+        const health = await fetchImpl(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2_000) });
+        const version = await fetchImpl(`http://127.0.0.1:${port}/version`, { signal: AbortSignal.timeout(2_000) });
         const payload = version.ok ? await version.json() : {};
         return {
           ok: health.ok && version.ok && payload.commit === invocation.releaseCommit && payload.dirty === false,
@@ -572,7 +589,10 @@ const makeWritable = (root) => {
   visit(root);
 };
 
-const createDeployHost = () => {
+export const createDeployHost = ({
+  serviceControl = createDefaultServiceControl(),
+  verifyRecoveredServices = verifyStableServicePaths,
+} = {}) => {
   let canonicalSyncRefusals = [];
   const notifyDeployOutcome = async (record) => notify(canonicalSyncNoticeRecord(record, canonicalSyncRefusals));
   return createProductionHost({
@@ -599,7 +619,7 @@ const createDeployHost = () => {
         return { ok: false, reason: failure.reason };
       }
     },
-    serviceState,
+    serviceState: () => serviceState(serviceControl),
     backupState: async () => {
       const requested = loadBinaries().backup;
       try {
@@ -717,7 +737,7 @@ const createDeployHost = () => {
       };
     },
     verifyStableServicePaths: async () => {
-      await verifyStableServicePaths();
+      await verifyStableServicePaths(serviceControl);
     },
     backup: async (attempt) => {
       const revisions = attempt.requireFact("revisions");
@@ -835,15 +855,20 @@ const createDeployHost = () => {
       };
     },
     restartServices: async () => {
-      for (const label of SERVICE_LABELS) await launchctl("service-restart-failed", ["kickstart", "-k", `${domain()}/${label}`]);
+      for (const label of SERVICE_LABELS) {
+        await serviceControl.restart(label, { reason: "service-restart-failed" });
+      }
     },
     verifyServices: async (attempt) => {
       const revisions = attempt.requireFact("revisions");
       const deadline = Date.now() + 30_000;
       let lastReason = "not-ready";
       while (Date.now() < deadline) {
-        const state = await serviceState();
-        if (!state.ok) lastReason = `launchd-unavailable-${state.unavailable.join(",")}`;
+        const state = await serviceState(serviceControl);
+        if (!state.ok) {
+          const manager = serviceControl.platform === "linux" ? "systemd" : "launchd";
+          lastReason = `${manager}-unavailable-${state.unavailable.join(",")}`;
+        }
         else {
           try {
             const port = process.env.API_PORT ?? "3000";
@@ -874,12 +899,17 @@ const createDeployHost = () => {
     },
     restorePreviousServices: async () => {
       for (const label of SERVICE_LABELS) {
-        await launchctl("previous-service-restore-failed", ["kickstart", "-k", `${domain()}/${label}`], {
+        await serviceControl.restart(label, {
+          reason: "previous-service-restore-failed",
           allowAfterInterrupt: true,
           timeoutMs: DEPLOY_STEP_TIMEOUT_MS.previousServiceRestore,
           timeoutReason: "previous-service-restore-timeout",
         });
       }
+      // The pointer has already been restored by the transaction coordinator.
+      // Re-run the complete loaded-definition and readiness proof before the
+      // rollback is allowed to become a proven recovery outcome.
+      await verifyRecoveredServices(serviceControl);
     },
     escalate: writeEscalation,
     markEscalationNotified: async () => markEscalationNotified({ path: ESCALATION_PATH }),

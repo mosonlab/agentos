@@ -17,6 +17,13 @@
 #   sudo scripts/os-isolation/rollback.sh --apply
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=../deploy/service-platform.sh
+source "$SCRIPT_DIR/../deploy/service-platform.sh"
+if ! SERVICE_PLATFORM="$(agentos_service_platform)"; then
+  exit 64
+fi
+
 APPLY=0
 FORCE=0
 for arg in "$@"; do
@@ -29,7 +36,15 @@ for arg in "$@"; do
   esac
 done
 
-RUNNER_COUNT="${RUNNER_COUNT:-8}"
+ACCOUNT_COUNT="${ACCOUNT_COUNT:-8}"
+SERVICE_RUNNER_COUNT="${AGENTOS_RUNNER_COUNT-10}"
+case "$SERVICE_RUNNER_COUNT" in
+  ''|*[!0-9]*) echo "runner-count-invalid:$SERVICE_RUNNER_COUNT" >&2; exit 64 ;;
+esac
+if [ "$SERVICE_RUNNER_COUNT" -lt 1 ] || [ "$SERVICE_RUNNER_COUNT" -gt 64 ]; then
+  echo "runner-count-invalid:$SERVICE_RUNNER_COUNT" >&2
+  exit 64
+fi
 ACCOUNT_PREFIX="${ACCOUNT_PREFIX:-_agentos}"
 GROUP_NAME="${GROUP_NAME:-agentos-runners}"
 AGENTOS_PREFIX="${AGENTOS_PREFIX:-/opt/agentos}"
@@ -38,7 +53,9 @@ HOME_BASE="${HOME_BASE:-$AGENTOS_PREFIX/accounts}"
 SUDOERS_FILE="${SUDOERS_FILE:-/etc/sudoers.d/agentos-runners}"
 if [ -z "${AGENT_DIR:-}" ]; then
   # Under sudo, $HOME is root's. The plists belong to the operator.
-  if [ -n "${SUDO_USER:-}" ]; then
+  if [ "$SERVICE_PLATFORM" = "linux" ]; then
+    AGENT_DIR=""
+  elif [ -n "${SUDO_USER:-}" ]; then
     operator_home="$(dscl . -read "/Users/$SUDO_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
     AGENT_DIR="${operator_home:-$HOME}/Library/LaunchAgents"
   else
@@ -68,16 +85,38 @@ printf 'Anneal OS isolation rollback — %s\n' "$([ "$APPLY" = 1 ] && echo APPLY
 
 step "1. is any runner still configured to use these accounts?"
 still_wired=0
-for file in "$AGENT_DIR"/com.agentos.runner*.plist; do
-  [ -f "$file" ] || continue
-  prefix="$(/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:RUNNER_RUN_AS_PREFIX" "$file" 2>/dev/null || true)"
-  case "$prefix" in
-    *"$ACCOUNT_PREFIX"*)
-      warn "$(basename "$file" .plist) still has RUNNER_RUN_AS_PREFIX=$prefix"
-      still_wired=$((still_wired + 1))
-      ;;
-  esac
-done
+if [ "$SERVICE_PLATFORM" = "linux" ]; then
+  SYSTEMCTL="${SYSTEMCTL_BIN:-systemctl}"
+  if ! command -v "$SYSTEMCTL" >/dev/null 2>&1; then
+    echo "systemd-systemctl-unavailable" >&2
+    exit 1
+  fi
+  for i in $(seq 1 "$SERVICE_RUNNER_COUNT"); do
+    if [ "$i" = 1 ]; then label=com.agentos.runner; else label="com.agentos.runner-$i"; fi
+    unit="$label.service"
+    if ! environment_output="$("$SYSTEMCTL" show -p Environment --value "$unit" 2>/dev/null)"; then
+      echo "systemd-runner-inspection-failed:$unit" >&2
+      exit 1
+    fi
+    case "$environment_output" in
+      *RUNNER_RUN_AS_PREFIX=*"$ACCOUNT_PREFIX"*)
+        warn "$label still has RUNNER_RUN_AS_PREFIX naming a managed account"
+        still_wired=$((still_wired + 1))
+        ;;
+    esac
+  done
+else
+  for file in "$AGENT_DIR"/com.agentos.runner*.plist; do
+    [ -f "$file" ] || continue
+    prefix="$(/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:RUNNER_RUN_AS_PREFIX" "$file" 2>/dev/null || true)"
+    case "$prefix" in
+      *"$ACCOUNT_PREFIX"*)
+        warn "$(basename "$file" .plist) still has RUNNER_RUN_AS_PREFIX=$prefix"
+        still_wired=$((still_wired + 1))
+        ;;
+    esac
+  done
+fi
 if [ "$still_wired" -gt 0 ] && [ "$FORCE" != 1 ]; then
   echo
   echo "Refusing to delete accounts that $still_wired runner(s) still launch as: every task would fail" >&2
@@ -85,7 +124,7 @@ if [ "$still_wired" -gt 0 ] && [ "$FORCE" != 1 ]; then
   echo "or pass --force if the plists are already gone." >&2
   exit 1
 fi
-if [ "$still_wired" -eq 0 ]; then ok "no runner plist references these accounts"; fi
+if [ "$still_wired" -eq 0 ]; then ok "no runner service references these accounts"; fi
 
 step "2. sudoers grant"
 if [ -f "$SUDOERS_FILE" ]; then
@@ -95,10 +134,23 @@ else
 fi
 
 step "3. accounts and group"
-for i in $(seq 1 "$RUNNER_COUNT"); do
+for i in $(seq 1 "$ACCOUNT_COUNT"); do
   account="${ACCOUNT_PREFIX}${i}"
-  if dscl . -read "/Users/$account" UniqueID >/dev/null 2>&1; then
-    run dscl . -delete "/Users/$account"
+  if [ "$SERVICE_PLATFORM" = "linux" ]; then
+    account_exists=0
+    getent passwd "$account" >/dev/null 2>&1 && account_exists=1 || true
+  else
+    account_exists=0
+    dscl . -read "/Users/$account" UniqueID >/dev/null 2>&1 && account_exists=1 || true
+  fi
+  if [ "$account_exists" = 1 ]; then
+    if [ "$SERVICE_PLATFORM" = "linux" ]; then
+      # Never use userdel -r: account homes hold operator-established CLI,
+      # Git and GitHub state and are deliberately retained for inspection.
+      run userdel "$account"
+    else
+      run dscl . -delete "/Users/$account"
+    fi
   else
     ok "$account is already gone"
   fi
@@ -107,8 +159,19 @@ for i in $(seq 1 "$RUNNER_COUNT"); do
   # no longer exists.
   if [ -d "$HOME_BASE/$account" ]; then warn "$HOME_BASE/$account left in place (holds that account's CLI login)"; fi
 done
-if dscl . -read "/Groups/$GROUP_NAME" PrimaryGroupID >/dev/null 2>&1; then
-  run dscl . -delete "/Groups/$GROUP_NAME"
+if [ "$SERVICE_PLATFORM" = "linux" ]; then
+  group_exists=0
+  getent group "$GROUP_NAME" >/dev/null 2>&1 && group_exists=1 || true
+else
+  group_exists=0
+  dscl . -read "/Groups/$GROUP_NAME" PrimaryGroupID >/dev/null 2>&1 && group_exists=1 || true
+fi
+if [ "$group_exists" = 1 ]; then
+  if [ "$SERVICE_PLATFORM" = "linux" ]; then
+    run groupdel "$GROUP_NAME"
+  else
+    run dscl . -delete "/Groups/$GROUP_NAME"
+  fi
 else
   ok "group $GROUP_NAME is already gone"
 fi
