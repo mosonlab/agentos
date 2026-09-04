@@ -1842,8 +1842,8 @@ test("a resumed Codex child carries one session id through queued events and rem
     ]);
     assert.match(resumeCalls[1]?.input ?? "", /task_output/u);
     assert.ok(emittedIds.length > 0, "the queued and resume events must be emitted");
-    assert.deepEqual(emittedIds, emittedIds.map(() => "thread-session-id"));
     assert.equal(emittedIds.includes(null), false, "a later child must not publish null over the session id");
+    assert.deepEqual(emittedIds, emittedIds.map(() => "thread-session-id"));
     assert.equal(controlPlane.completions.at(-1)?.outcome.case, "succeeded");
   } finally {
     await cleanupTestSession(root);
