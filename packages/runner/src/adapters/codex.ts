@@ -63,8 +63,7 @@ export const isCodexInRunResumeCandidate = (
     || evidence.signal !== null
     || evidence.terminationReason !== null
     || providerConversationId === null
-    || evidence.sawNonReconnectProviderError === true
-    || evidence.firstNonReconnectProviderError != null) return false;
+    || evidence.sawNonReconnectProviderError) return false;
 
   if (NON_RESUMABLE_FAILURE_CLASSES.has(classifyRuntimeError(evidence).failureClass)) return false;
 

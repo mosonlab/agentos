@@ -32,9 +32,9 @@ export type ExitEvidence = {
   finalOutput: string | null;
   providerError: string | null;
   /** Whether this child reported any non-reconnect provider error. */
-  sawNonReconnectProviderError?: boolean | undefined;
+  sawNonReconnectProviderError: boolean;
   /** The first non-reconnect provider error, when one had a message. */
-  firstNonReconnectProviderError?: string | null | undefined;
+  firstNonReconnectProviderError: string | null;
   stdout: string;
   stderr: string;
 };
@@ -67,8 +67,8 @@ export type AdapterState = {
   providerError: string | null;
   /** A reconnect status is provisional; this flag preserves a real error
    *  observed earlier in the same provider child. */
-  sawNonReconnectProviderError?: boolean | undefined;
-  firstNonReconnectProviderError?: string | null | undefined;
+  sawNonReconnectProviderError: boolean;
+  firstNonReconnectProviderError: string | null;
   providerState: unknown;
   finalOutput: string | null;
   stdout: string;

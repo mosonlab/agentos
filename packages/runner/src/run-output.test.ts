@@ -393,6 +393,8 @@ const resumeQualifiedExit: ExitEvidence = {
   terminationReason: null,
   finalOutput: null,
   providerError: "Reconnecting... 3/5 (stream disconnected before completion: tls handshake eof)",
+  sawNonReconnectProviderError: false,
+  firstNonReconnectProviderError: null,
   stdout: "",
   stderr: "",
 };
@@ -417,6 +419,8 @@ const syntheticRuntimeHandle = (
     terminationReason: evidence.terminationReason,
     sawError: false,
     providerError: evidence.providerError,
+    sawNonReconnectProviderError: evidence.sawNonReconnectProviderError,
+    firstNonReconnectProviderError: evidence.firstNonReconnectProviderError,
     providerState: null,
     finalOutput: evidence.finalOutput,
     stdout: evidence.stdout,
@@ -1174,6 +1178,8 @@ test("the original Run budget continues through remediation", async () => {
               terminationReason: null,
               finalOutput: null,
               providerError: remediationSetupState,
+              sawNonReconnectProviderError: false,
+              firstNonReconnectProviderError: null,
               stdout: "",
               stderr: remediationSetupState,
             });
@@ -1202,6 +1208,8 @@ test("the original Run budget continues through remediation", async () => {
           terminationReason: reason,
           finalOutput: null,
           providerError: null,
+          sawNonReconnectProviderError: false,
+          firstNonReconnectProviderError: null,
           stdout: "",
           stderr: "",
         });
@@ -1369,6 +1377,60 @@ test("a qualifying Codex disconnect with delivered result does not resume", asyn
     const events = controlPlane.eventBatches.flat();
     assert.equal(events.filter(({ type }) => type === "POST_DELIVERY_DISCONNECT_ACCEPTED").length, 1);
     assert.equal(events.some(({ type }) => type === "PROVIDER_RESUME_STARTED"), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an inconclusive delivered-output probe fails closed and does not resume", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-resume-delivered-probe-error-"));
+  try {
+    const remote = await seedRemote(root);
+    const claimed = resultOutputClaim(remote);
+    claimed.runner = "CODEX";
+    claimed.agent = { ...claimed.agent, model: "gpt-5.6-sol" };
+    claimed.run = { ...claimed.run, model: "gpt-5.6-sol" };
+    let resumeCalls = 0;
+    const adapter: CliAdapter = {
+      ...adapters.CODEX,
+      preflight: async () => ({ ok: true, cliVersion: "test", authMode: "test", capabilities: {} }),
+      start: async ({ workingDirectory }) => {
+        await writeFile(join(workingDirectory, "runner-fixture.txt"), "delivered fixture change\n");
+        git(workingDirectory, "add", "runner-fixture.txt");
+        git(workingDirectory, "commit", "-m", "test: create delivered change");
+        return syntheticRuntimeHandle(resumeQualifiedExit);
+      },
+      resume: async () => {
+        resumeCalls += 1;
+        throw new Error("an inconclusive product probe must not resume");
+      },
+      heartbeat: async (handle) => ({
+        processAlive: false,
+        lastProcessAliveAt: handle.lastProcessAliveAt,
+        lastProgressEventAt: handle.lastProgressEventAt,
+        inFlightTool: null,
+      }),
+      kill: async () => ({ signal: null, processAlive: false }),
+    };
+    let outputStatusReads = 0;
+    const controlPlane = createControlPlaneDouble({
+      outputStatus: async () => {
+        outputStatusReads += 1;
+        if (outputStatusReads === 1) throw new ControlPlaneError(503, "status temporarily unavailable");
+        return deliveredResult(root);
+      },
+    });
+
+    await executeClaim(
+      config(join(root, "workspaces"), join(root, "unused-codex")),
+      claimed,
+      { adapter, controlPlane: controlPlane.controlPlane, provisionSessionConfig: async () => undefined },
+    );
+
+    assert.equal(resumeCalls, 0);
+    assert.equal(outputStatusReads, 2, "the established settling path retries the status read after the probe fails closed");
+    assert.equal(controlPlane.completions.at(-1)?.outcome.case, "delivered-then-disconnected");
+    assert.ok(controlPlane.eventBatches.flat().some(({ type }) => type === "POST_DELIVERY_DISCONNECT_ACCEPTED"));
   } finally {
     await rm(root, { recursive: true, force: true });
   }

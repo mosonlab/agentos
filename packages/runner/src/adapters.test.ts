@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
 
-import { agentExecutionSucceeded } from "@anneal/db";
+import { agentExecutionSucceeded, isCodexReconnectStatus } from "@anneal/db";
 
 import {
   adapters, argsForRunner, buildChildEnvironment, buildPrompt, createAdapterState, failureReasonFromEvidence,
@@ -1465,6 +1465,8 @@ test("exit code zero without a provider terminal event is failure", () => {
     terminalEventSeen: false,
     finalOutput: null,
     providerError: null,
+    sawNonReconnectProviderError: false,
+    firstNonReconnectProviderError: null,
     terminalSuccess: false,
     terminationReason: null,
     stdout: "",
@@ -1597,6 +1599,7 @@ test("Codex preserves reconnect evidence when the stream ends before completion"
 
 test("Codex in-Run resume predicate covers reconnect, network, and disqualifying exits", () => {
   const reconnectMessage = "Reconnecting... 3/5 (stream disconnected before completion: tls handshake eof)";
+  const bareDisconnectMessage = "stream disconnected before completion: tls handshake eof";
   const base: ExitEvidence = {
     exitCode: 0,
     signal: null,
@@ -1605,6 +1608,8 @@ test("Codex in-Run resume predicate covers reconnect, network, and disqualifying
     terminationReason: null,
     finalOutput: null,
     providerError: null,
+    sawNonReconnectProviderError: false,
+    firstNonReconnectProviderError: null,
     stdout: "",
     stderr: "",
   };
@@ -1613,9 +1618,11 @@ test("Codex in-Run resume predicate covers reconnect, network, and disqualifying
   // network retry pattern list; the Codex-owned status predicate recognizes it.
   assert.equal(isTransientNetworkError(reconnectMessage), false);
   assert.equal(isCodexInRunResumeCandidate({ ...base, providerError: reconnectMessage }, "thread-1"), true);
+  assert.equal(isCodexReconnectStatus(bareDisconnectMessage), false);
+  assert.equal(isTransientNetworkError(bareDisconnectMessage), false);
   assert.equal(isCodexInRunResumeCandidate({
     ...base,
-    providerError: "stream disconnected before completion: tls handshake eof",
+    providerError: bareDisconnectMessage,
   }, "thread-1"), true);
   assert.equal(isCodexInRunResumeCandidate({ ...base, stderr: "fetch failed" }, "thread-1"), true);
 
@@ -1747,6 +1754,8 @@ test("source text cannot misclassify a provider failure as a missing binary", ()
     terminationReason: null,
     finalOutput: null,
     providerError: "request rejected by provider policy",
+    sawNonReconnectProviderError: true,
+    firstNonReconnectProviderError: "request rejected by provider policy",
     stdout: "throw new Error('No such file or directory')",
     stderr: "models cache warning",
   };
@@ -1763,6 +1772,8 @@ test("workspace TLS failures remain retryable after command retries are exhauste
     terminationReason: null,
     finalOutput: null,
     providerError: null,
+    sawNonReconnectProviderError: false,
+    firstNonReconnectProviderError: null,
     stdout: "",
     stderr: "git failed (128): LibreSSL SSL_connect: SSL_ERROR_SYSCALL in connection to github.com:443",
   };
@@ -1785,6 +1796,8 @@ test("a mid-response connection loss classifies TRANSIENT_PROVIDER, not AUTH_REQ
     terminationReason: null,
     finalOutput: "API Error: Connection lost mid-response. The response above may be incomplete.",
     providerError: "API Error: Connection lost mid-response. The response above may be incomplete.",
+    sawNonReconnectProviderError: false,
+    firstNonReconnectProviderError: null,
     stdout: "",
     stderr: "",
   };
@@ -1805,6 +1818,8 @@ test("a literal 401 in agent stdout does not classify as AUTH_REQUIRED", () => {
     terminationReason: null,
     finalOutput: null,
     providerError: null,
+    sawNonReconnectProviderError: false,
+    firstNonReconnectProviderError: null,
     stdout: 'return context.json({ error: "Stale fencing token" }, 401);',
     stderr: "",
   };
@@ -1820,6 +1835,8 @@ test("an auth failure that also mentions a dropped connection is AUTH_REQUIRED, 
     terminationReason: null,
     finalOutput: null,
     providerError: "authentication_failed: connection lost while refreshing credentials",
+    sawNonReconnectProviderError: false,
+    firstNonReconnectProviderError: null,
     stdout: "",
     stderr: "",
   };
@@ -1835,6 +1852,8 @@ test("a genuine auth failure on stderr still classifies AUTH_REQUIRED", () => {
     terminationReason: null,
     finalOutput: null,
     providerError: null,
+    sawNonReconnectProviderError: false,
+    firstNonReconnectProviderError: null,
     stdout: "",
     stderr: "authentication_failed: not logged in",
   };
@@ -1864,6 +1883,8 @@ test("a local CLI preflight timeout stays a deterministic failure, not a provide
     terminationReason: null,
     finalOutput: null,
     providerError: null,
+    sawNonReconnectProviderError: false,
+    firstNonReconnectProviderError: null,
     stderr: "\npreflight timed out after 30 seconds",
     stdout: "",
   };

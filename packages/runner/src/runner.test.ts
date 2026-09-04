@@ -18,6 +18,7 @@ import {
   PROVIDER_RESUME_BACKOFF_CEILING_MS,
   PROVIDER_RESUME_MAX_ATTEMPTS,
   PROVIDER_RESUME_MIN_LEASE_TTL_MS,
+  PROVIDER_RESUME_MIN_WALLTIME_MS,
   providerDisconnectResumeInput,
   reportCliAvailabilityHeartbeat as reportCliAvailabilityHeartbeatProduction,
   runStartupPreflight as runStartupPreflightProduction,
@@ -336,6 +337,8 @@ test("a review step records the dependency skip before fake adapter preflight an
           terminationReason: null,
           sawError: false,
           providerError: null,
+          sawNonReconnectProviderError: false,
+          firstNonReconnectProviderError: null,
           providerState: null,
           finalOutput: null,
           stdout: "",
@@ -348,6 +351,8 @@ test("a review step records the dependency skip before fake adapter preflight an
             terminationReason: null,
             finalOutput: null,
             providerError: null,
+            sawNonReconnectProviderError: false,
+            firstNonReconnectProviderError: null,
             stdout: "",
             stderr: "",
           }),
@@ -442,6 +447,8 @@ test("an implementation step provisions dependencies without recording the revie
           terminationReason: null,
           sawError: false,
           providerError: null,
+          sawNonReconnectProviderError: false,
+          firstNonReconnectProviderError: null,
           providerState: null,
           finalOutput: null,
           stdout: "",
@@ -454,6 +461,8 @@ test("an implementation step provisions dependencies without recording the revie
             terminationReason: null,
             finalOutput: null,
             providerError: null,
+            sawNonReconnectProviderError: false,
+            firstNonReconnectProviderError: null,
             stdout: "",
             stderr: "",
           }),
@@ -859,6 +868,8 @@ const regressionBlockAdapter = async (
     terminationReason: null,
     sawError: false,
     providerError: null,
+    sawNonReconnectProviderError: false,
+    firstNonReconnectProviderError: null,
     providerState: null,
     finalOutput: null,
     stdout: "",
@@ -871,6 +882,8 @@ const regressionBlockAdapter = async (
       terminationReason: null,
       finalOutput: null,
       providerError: null,
+      sawNonReconnectProviderError: false,
+      firstNonReconnectProviderError: null,
       stdout: "",
       stderr: "",
     }),
@@ -966,6 +979,8 @@ test("a Regression missing-output refusal without a block record keeps its exist
           terminationReason: null,
           sawError: false,
           providerError: null,
+          sawNonReconnectProviderError: false,
+          firstNonReconnectProviderError: null,
           providerState: null,
           finalOutput: null,
           stdout: "",
@@ -978,6 +993,8 @@ test("a Regression missing-output refusal without a block record keeps its exist
             terminationReason: null,
             finalOutput: null,
             providerError: null,
+            sawNonReconnectProviderError: false,
+            firstNonReconnectProviderError: null,
             stdout: "",
             stderr: "",
           }),
@@ -1419,7 +1436,6 @@ const executeCodexResumeScenario = async (
     claim?: ClaimedTask;
     controlPlaneOverrides?: ControlPlaneOverrides;
     providerResumeBackoff?: (attempt: number) => Promise<void>;
-    providerResumeNow?: () => number;
     runLeaseClock?: RunLeaseClock;
     adapter?: (claim: ClaimedTask, resumeCalls: ResumeCall[]) => CliAdapter;
   } = {},
@@ -1437,7 +1453,6 @@ const executeCodexResumeScenario = async (
     materializeRuntimeTools: async () => undefined,
     provisionSessionConfig: async () => undefined,
     ...(options.providerResumeBackoff ? { providerResumeBackoff: options.providerResumeBackoff } : {}),
-    ...(options.providerResumeNow ? { providerResumeNow: options.providerResumeNow } : {}),
     ...(options.runLeaseClock ? { runLeaseClock: options.runLeaseClock } : {}),
   });
   return { claim, controlPlane, resumeCalls };
@@ -1489,7 +1504,6 @@ test("a qualifying Codex disconnect resumes once with the continuation input", a
       { evidence: successfulResumeEvidence(), providerConversationId: null },
     ], {
       providerResumeBackoff: async () => undefined,
-      providerResumeNow: clock.now,
       runLeaseClock: clock,
     });
 
@@ -1535,12 +1549,24 @@ test("three Codex resume attempts exhaust on the fourth disconnect and preserve 
     const fourthEvidence = reconnectEvidence({
       providerError: "Reconnecting... 5/5 (stream disconnected before completion: tls handshake eof)",
     });
+    let outputStatusReads = 0;
     const { controlPlane, resumeCalls } = await executeCodexResumeScenario(root, remote, [
       { evidence: reconnectEvidence(), providerConversationId: "thread-resume" },
       { evidence: reconnectEvidence(), providerConversationId: null },
       { evidence: reconnectEvidence(), providerConversationId: null },
       { evidence: fourthEvidence, providerConversationId: null },
-    ], { providerResumeBackoff: async () => undefined });
+    ], {
+      providerResumeBackoff: async () => undefined,
+      controlPlaneOverrides: {
+        outputStatus: async () => {
+          outputStatusReads += 1;
+          return {
+            satisfaction: { case: "absent", outputKind: "result", remediable: false },
+            prHandoff: { case: "not-a-pr-delivery" },
+          };
+        },
+      },
+    });
 
     assert.equal(resumeCalls.length, PROVIDER_RESUME_MAX_ATTEMPTS);
     const exhausted = controlPlane.eventBatches.flat().filter(({ type }) => type === "PROVIDER_RESUME_EXHAUSTED");
@@ -1556,6 +1582,7 @@ test("three Codex resume attempts exhaust on the fourth disconnect and preserve 
     // Codex capability is exposed; the resume loop must not alter the verdict.
     const { isInRunResumeCandidate: _capability, ...withoutCapability } = adapters.CODEX;
     assert.equal(withoutCapability.classifyError(fourthEvidence).failureClass, expectedClass);
+    assert.equal(outputStatusReads, 2, "the terminal-product probe runs once, followed by the settling-path read");
   } finally {
     await cleanupTestSession(root);
     await rm(root, { recursive: true, force: true });
@@ -1650,7 +1677,6 @@ test("Codex resume backoff uses attempts one, two, and three within the seven-se
       { evidence: reconnectEvidence(), providerConversationId: null },
     ] as const;
     const { controlPlane, resumeCalls } = await executeCodexResumeScenario(root, remote, planned, {
-      providerResumeNow: clock.now,
       runLeaseClock: clock,
       providerResumeBackoff: async (attempt) => {
         waits.push(attempt);
@@ -1685,7 +1711,6 @@ test("a lease with fifteen seconds remaining does not relaunch a disconnected pr
       evidence: reconnectEvidence(),
       providerConversationId: "thread-resume",
     }], {
-      providerResumeNow: clock.now,
       runLeaseClock: clock,
       providerResumeBackoff: async () => { await clock.advanceBy(45_000); },
     });
@@ -1703,41 +1728,103 @@ test("a lease with fifteen seconds remaining does not relaunch a disconnected pr
   }
 });
 
-test("a refused or unacknowledged renewal never relaunches a disconnected provider", async () => {
-  for (const mode of ["refused", "unacknowledged"] as const) {
-    const root = await mkdtemp(join(tmpdir(), `runner-codex-in-run-resume-${mode}-`));
-    try {
-      const remote = await seedRemote(root);
-      let heartbeatCalls = 0;
-      const result = await executeCodexResumeScenario(root, remote, [{
-        evidence: reconnectEvidence(),
-        providerConversationId: "thread-resume",
-      }], {
-        providerResumeBackoff: async () => undefined,
-        controlPlaneOverrides: {
-          heartbeat: async () => {
-            heartbeatCalls += 1;
-            if (mode === "unacknowledged") throw new Error("renewal unavailable");
-            return { held: false, reason: "revoked" };
-          },
-        },
-      });
+test("an execute budget with only the minimum attempt window remaining does not relaunch", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-codex-in-run-resume-walltime-floor-"));
+  const clock = new ResumeFakeClock();
+  try {
+    const remote = await seedRemote(root);
+    const claim = codexResumeClaim(remote, root);
+    const startedAt = new Date(
+      clock.now() - claim.run.maxDurationMin * 60_000 + PROVIDER_RESUME_MIN_WALLTIME_MS,
+    );
+    const { controlPlane, resumeCalls } = await executeCodexResumeScenario(root, remote, [{
+      evidence: reconnectEvidence(),
+      providerConversationId: "thread-resume",
+      startedAt,
+    }], {
+      claim,
+      runLeaseClock: clock,
+      providerResumeBackoff: async () => undefined,
+    });
 
-      assert.equal(result.resumeCalls.length, 0, `${mode} renewal must block relaunch`);
-      // A refused renewal ends the lease immediately. A transport error leaves
-      // the cached authority held, so the unchanged deliver-phase checkpoint
-      // performs its usual second attempt while settling the failure.
-      assert.equal(heartbeatCalls, mode === "refused" ? 1 : 2, `${mode} gate should perform an explicit renewal before stopping`);
-      assert.equal(result.controlPlane.eventBatches.flat().some(({ type }) => type === "PROVIDER_RESUME_STARTED"), false);
-      if (mode === "unacknowledged") {
-        assert.equal(result.controlPlane.completions.at(-1)?.outcome.case, "provider-failure");
-      } else {
-        assert.equal(result.controlPlane.completions.length, 0, "revoked authority follows the existing lease-loss path");
-      }
-    } finally {
-      await cleanupTestSession(root);
-      await rm(root, { recursive: true, force: true });
-    }
+    assert.equal(resumeCalls.length, 0);
+    assert.equal(
+      controlPlane.eventBatches.flat().some(({ type }) => type === "PROVIDER_RESUME_STARTED"),
+      false,
+    );
+    assert.equal(controlPlane.completions.at(-1)?.outcome.case, "provider-failure");
+  } finally {
+    await cleanupTestSession(root);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a refused renewal never relaunches a disconnected provider", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-codex-in-run-resume-refused-"));
+  try {
+    const remote = await seedRemote(root);
+    let heartbeatCalls = 0;
+    const result = await executeCodexResumeScenario(root, remote, [{
+      evidence: reconnectEvidence(),
+      providerConversationId: "thread-resume",
+    }], {
+      providerResumeBackoff: async () => undefined,
+      controlPlaneOverrides: {
+        heartbeat: async () => {
+          heartbeatCalls += 1;
+          return { held: false, reason: "revoked" };
+        },
+      },
+    });
+
+    assert.equal(result.resumeCalls.length, 0, "refused renewal must block relaunch");
+    assert.equal(heartbeatCalls, 1, "the gate performs one explicit renewal before stopping");
+    assert.equal(result.controlPlane.eventBatches.flat().some(({ type }) => type === "PROVIDER_RESUME_STARTED"), false);
+    assert.equal(result.controlPlane.completions.length, 0, "revoked authority follows the existing lease-loss path");
+  } finally {
+    await cleanupTestSession(root);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an unacknowledged renewal during pending backoff never spawns a resume child", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-codex-in-run-resume-unacknowledged-"));
+  try {
+    const remote = await seedRemote(root);
+    let releaseBackoff!: () => void;
+    const backoffPending = new Promise<void>((resolve) => { releaseBackoff = resolve; });
+    let renewalAttempted!: () => void;
+    const renewalAttempt = new Promise<void>((resolve) => { renewalAttempted = resolve; });
+    let observedResumeCalls: ResumeCall[] | null = null;
+    const planned = [{ evidence: reconnectEvidence(), providerConversationId: "thread-resume" }] as const;
+    const execution = executeCodexResumeScenario(root, remote, planned, {
+      providerResumeBackoff: async () => backoffPending,
+      adapter: (claim, calls) => {
+        observedResumeCalls = calls;
+        return fakeCodexAdapter(claim, planned, calls);
+      },
+      controlPlaneOverrides: {
+        heartbeat: async () => {
+          renewalAttempted();
+          throw new Error("renewal unavailable");
+        },
+      },
+    });
+
+    await renewalAttempt;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal((observedResumeCalls as ResumeCall[] | null)?.length ?? 0, 0, "renewal failure must not launch while backoff is pending");
+    releaseBackoff();
+    const result = await execution;
+    assert.equal(result.resumeCalls.length, 0);
+    assert.equal(result.controlPlane.completions.at(-1)?.outcome.case, "provider-failure");
+    assert.equal(
+      envelopeOf(result.controlPlane.completions.at(-1)?.outcome).runnerClass,
+      adapters.CODEX.classifyError(planned[0].evidence).failureClass,
+    );
+  } finally {
+    await cleanupTestSession(root);
+    await rm(root, { recursive: true, force: true });
   }
 });
 
@@ -1752,7 +1839,6 @@ test("cancellation observed during resume backoff ends the Run without another c
       evidence: reconnectEvidence(),
       providerConversationId: "thread-resume",
     }], {
-      providerResumeNow: clock.now,
       runLeaseClock: clock,
       providerResumeBackoff: async () => {
         cancellationReady = true;
@@ -1896,7 +1982,6 @@ test("a resumed child inherits an execute-phase stall deadline from its predeces
       materializeRuntimeTools: async () => undefined,
       provisionSessionConfig: async () => undefined,
       providerResumeBackoff: async () => undefined,
-      providerResumeNow: clock.now,
       runLeaseClock: clock,
     });
 
