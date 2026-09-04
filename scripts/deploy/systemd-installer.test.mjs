@@ -1707,6 +1707,53 @@ test("auto-deploy systemd stage renders a oneshot and timer, enabling only the t
   });
 });
 
+test("runner role is recorded and rendered into both auto-deploy service formats", async () => {
+  await withLinux(() => {
+    const root = mkdtempSync(join(tmpdir(), "agentos-auto-runner-role-"));
+    const unitDirectory = join(root, "etc/systemd/system");
+    const options = {
+      repositoryRoot: root,
+      nodeBinary: "/usr/bin/node",
+      gitBinary: "/usr/bin/git",
+      npmBinary: "/usr/bin/npm",
+      path: "/usr/bin:/bin",
+      sourceRemote: "configured-remote",
+      backup: null,
+      serviceUser: "anneal-test",
+      userLookup: accountLookup,
+      unitDirectory,
+      sudoersPath: join(root, "etc/sudoers.d/anneal-service-control"),
+      deployRole: "runner",
+      apply: true,
+      effectiveUid: 501,
+    };
+    try {
+      const staged = planSystemdAutoDeploy(options);
+      assert.equal(staged.manifest.renderInputs.deployRole, "runner");
+      assert.match(staged.manifest.entries[0].stagedPath, /com\.agentos\.auto-deploy\.service$/u);
+      assert.match(readFileSync(staged.manifest.entries[0].stagedPath, "utf8"), /^Environment=AGENTOS_DEPLOY_ROLE="runner"$/mu);
+      const plist = renderLaunchdPlist(
+        readFileSync(new URL("./com.agentos.auto-deploy.plist.in", import.meta.url), "utf8"),
+        { ...staged.manifest.renderInputs, repositoryRoot: root, deployScript: "/deploy", stdoutPath: "/out", stderrPath: "/err" },
+      );
+      assert.match(plist, /<key>AGENTOS_DEPLOY_ROLE<\/key>\s*<string>runner<\/string>/u);
+
+      const calls = [];
+      assert.throws(() => installStagedSystemdAutoDeploy({
+        ...options,
+        deployRole: undefined,
+        manifestPath: staged.manifestPath,
+        effectiveUid: 0,
+        environment: { AGENTOS_DEPLOY_ROLE: "control-plane" },
+        execute: (_command, args) => { calls.push(args); return ""; },
+      }), /systemd-auto-deploy-deploy-role-manifest-mismatch/u);
+      assert.deepEqual(calls, []);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 test("privileged auto-deploy install rejects tampered targets and root service content", async () => {
   await withLinux(() => {
     for (const variant of ["target", "root-unit"]) {

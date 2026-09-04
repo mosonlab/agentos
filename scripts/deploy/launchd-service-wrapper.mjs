@@ -415,7 +415,13 @@ export const verifyServiceInventory = async ({
   start = async () => ({ ok: true }),
   readiness = async () => ({ ok: true }),
 } = {}) => {
-  if (!Array.isArray(labels) || labels.length !== SERVICE_INVENTORY_ENTRIES.length || new Set(labels).size !== labels.length) {
+  const expectedLabels = generateServiceInventory(
+    resolveRunnerCount(environment),
+    resolveRunnerIdPrefix(environment),
+    resolveDeployRole(environment),
+  ).map(({ label }) => label);
+  if (!Array.isArray(labels) || JSON.stringify(labels) !== JSON.stringify(expectedLabels)
+      || new Set(labels).size !== labels.length) {
     throw new Error("service-inventory-invalid");
   }
   const verified = [];

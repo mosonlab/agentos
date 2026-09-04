@@ -1,4 +1,6 @@
-export const DEPLOY_ROLES = Object.freeze(["control-plane", "runner"]);
+import { DEPLOY_ROLES } from "./deploy-role.mjs";
+
+export { DEPLOY_ROLES };
 
 const phase = (scope, name, hostMethod, mutating, ledgerState = null, roles = DEPLOY_ROLES) => Object.freeze({
   scope,

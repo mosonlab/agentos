@@ -1,4 +1,5 @@
 import { DeployFailure } from "./quiet-window-lib.mjs";
+import { resolveDeployRole as resolveConfiguredDeployRole } from "./deploy-role.mjs";
 
 const SHA = /^[0-9a-f]{40}$/u;
 const API_SERVICES = new Set(["@anneal/api", "@agentos/api"]);
@@ -6,9 +7,11 @@ const API_SERVICES = new Set(["@anneal/api", "@agentos/api"]);
 const fail = (reason, detail = "") => { throw new DeployFailure(reason, detail); };
 
 export const resolveDeployRole = (environment = process.env) => {
-  const role = environment.AGENTOS_DEPLOY_ROLE ?? "control-plane";
-  if (role !== "control-plane" && role !== "runner") fail("deploy-role-invalid", String(role));
-  return role;
+  try {
+    return resolveConfiguredDeployRole(environment);
+  } catch {
+    fail("deploy-role-invalid", String(environment.AGENTOS_DEPLOY_ROLE));
+  }
 };
 
 export const controlPlaneApiBaseUrl = (environment = process.env) => {
@@ -55,8 +58,9 @@ export const readRunnerTargetRevision = async ({
   } catch {
     fail("control-plane-version-invalid", "response-is-not-json");
   }
-  if (payload?.dirty !== false) fail("control-plane-build-dirty", String(payload?.commit ?? "unknown"));
-  if (payload?.stamped !== true || !API_SERVICES.has(payload?.service) || !SHA.test(payload?.commit ?? "")) {
+  if (payload?.dirty === true) fail("control-plane-build-dirty", String(payload?.commit ?? "unknown"));
+  if (payload?.dirty !== false || payload?.stamped !== true
+      || !API_SERVICES.has(payload?.service) || !SHA.test(payload?.commit ?? "")) {
     fail("control-plane-version-invalid", "clean-stamped-api-commit-required");
   }
 

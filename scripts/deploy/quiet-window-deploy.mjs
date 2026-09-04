@@ -328,9 +328,10 @@ const loadBinaries = () => {
         git: resolveExecutable("DEPLOY_GIT_BINARY", "git"),
         node: resolveExecutable("DEPLOY_NODE_BINARY", "node"),
         npm: resolveExecutable("DEPLOY_NPM_BINARY", "npm"),
-        backup: backupConfigurationFromEnvironment(),
+        backup: resolveDeployRole() === "control-plane" ? backupConfigurationFromEnvironment() : null,
       });
     } catch (error) {
+      if (error instanceof DeployFailure) throw error;
       fail("environment-unreadable", error instanceof Error ? error.message : String(error));
     }
   }
@@ -1036,7 +1037,7 @@ export const createDeployHost = ({
     markEscalationNotified: async () => markEscalationNotified({ path: ESCALATION_PATH }),
     notify: notifyDeployOutcome,
     log,
-  });
+  }, deployRole);
 };
 
 // The failure path outside the deployment attempt has to know whether this

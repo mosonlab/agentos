@@ -27,6 +27,7 @@ import {
   deployedBuildStampRefusal,
   dryRunDecision,
   executeUpgrade,
+  generateServiceInventory,
   parseDeployArguments,
   quietWindowIsOpen,
 } from "./quiet-window-lib.mjs";
@@ -720,6 +721,13 @@ test("service inventory covers the thirteen production labels", () => {
   assert.equal(SERVICE_LABELS.at(-1), "com.agentos.web");
 });
 
+test("runner role inventory contains only the configured local runners", () => {
+  assert.deepEqual(generateServiceInventory(2, "mac-", "runner"), [
+    { label: "com.agentos.runner", runnerId: "mac-runner-1", unitName: "com.agentos.runner.service" },
+    { label: "com.agentos.runner-2", runnerId: "mac-runner-2", unitName: "com.agentos.runner-2.service" },
+  ]);
+});
+
 test("runner quiet-window SQL admits only exact local runner ids", () => {
   const defaults = blockingRunsStatement();
   assert.equal(defaults.sql.includes('"runnerId"'), false);
@@ -782,6 +790,56 @@ test("the deploy host restarts and restores every Linux unit in inventory order"
   assert.deepEqual(calls.map(({ label }) => label), SERVICE_LABELS);
   assert.deepEqual(calls.map(({ options }) => options.reason), SERVICE_LABELS.map(() => "previous-service-restore-failed"));
   assert.equal(recoveryVerified, true);
+});
+
+test("runner deploy host restarts only local runners and verifies a newer target-build registration", async () => {
+  const targetCommit = "b".repeat(40);
+  const restarts = [];
+  const requests = [];
+  let snapshot = 0;
+  const environment = {
+    AGENTOS_DEPLOY_ROLE: "runner",
+    AGENTOS_RUNNER_COUNT: "2",
+    AGENTOS_RUNNER_ID_PREFIX: "mac-",
+    RUNNER_API_URL: "http://control-plane.example.test",
+    OPERATOR_TOKEN: "operator-test-token",
+  };
+  const response = (lastSeenAt) => ({
+    ok: true,
+    json: async () => ({ daemons: [
+      { runnerId: "mac-runner-1", online: true, daemonVersion: targetCommit, lastSeenAt },
+      { runnerId: "mac-runner-2", online: true, daemonVersion: targetCommit, lastSeenAt },
+      { runnerId: "vm-runner-1", online: true, daemonVersion: "old", lastSeenAt },
+    ] }),
+  });
+  const host = createDeployHost({
+    deployRole: "runner",
+    environment,
+    serviceControl: {
+      platform: "darwin",
+      restart: async (label) => { restarts.push(label); },
+      isRunning: async () => true,
+      describe: async () => "state = running",
+    },
+    fetchImpl: async (url, options) => {
+      requests.push({ url, authorization: options.headers.authorization });
+      snapshot += 1;
+      return response(snapshot === 1 ? "2026-09-04T12:00:00.000Z" : "2026-09-04T12:01:00.000Z");
+    },
+  });
+  const attempt = openDeploymentAttempt({ deployRoot: "/fixture", targetCommit, transactionId: "runner-verification" });
+  attempt.establish({ revisions: { from: "a".repeat(40), to: targetCommit } });
+  attempt.establish(await host.restartServices(attempt));
+  const verified = await host.verifyServices(attempt);
+  assert.deepEqual(restarts, ["com.agentos.runner", "com.agentos.runner-2"]);
+  assert.deepEqual(verified.serviceVerification, {
+    runnerIds: ["mac-runner-1", "mac-runner-2"],
+    activatedBuildCommit: targetCommit,
+  });
+  assert.deepEqual(requests, [
+    { url: "http://control-plane.example.test/runners", authorization: "Bearer operator-test-token" },
+    { url: "http://control-plane.example.test/runners", authorization: "Bearer operator-test-token" },
+  ]);
 });
 
 test("rollback re-proves liveness, wrapper binding, and prior API identity on both platforms", async (t) => {
@@ -1066,6 +1124,15 @@ test("service verification failure rolls back before restoring services", async 
   const result = await executeUpgrade(host, attempt);
   assert.equal(result.ok, false);
   assert.equal(state.serving, "previous");
+  assert.ok(calls.indexOf("rollback-build") < calls.indexOf("restore-services"));
+});
+
+test("runner registration verification failure uses the same rollback and restart recovery", async () => {
+  const { host, attempt, calls, phaseCalls, state } = fixture({ failure: "verify-services" });
+  const result = await executeUpgrade(host, attempt, "runner");
+  assert.equal(result.ok, false);
+  assert.equal(state.serving, "previous");
+  assert.deepEqual(phaseCalls, RUNNER_PHASES);
   assert.ok(calls.indexOf("rollback-build") < calls.indexOf("restore-services"));
 });
 
