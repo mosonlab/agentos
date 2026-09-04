@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { type Prisma } from "@anneal/db";
+
 import {
   isCanonicalAgentStep,
   isCanonicalBlindFindingsStep,
@@ -8,6 +10,7 @@ import {
   isCanonicalSolFindingsStep,
   isCanonicalFixStep,
   canonicalOutputRefusal,
+  persistSessionTaskOutput,
   requiredOutputKind,
 } from "./canonical-task-output.js";
 
@@ -16,6 +19,124 @@ const step = (template: string, stepIndex: number, outputKind: string) => ({
   stepIndex,
   outputKind,
 });
+
+type ReviewKind = "sol-findings" | "blind-findings";
+
+type ReviewTask = {
+  id: string;
+  templateStep: {
+    stepIndex: number;
+    outputKind: ReviewKind;
+    taskTemplate: { name: string };
+  };
+  stepOutput: {
+    runId: string | null;
+    kind: string;
+    body: string;
+    commitSha: string | null;
+    run: { taskId: string } | null;
+  } | null;
+};
+
+const FIX_HEAD = "a".repeat(40);
+const REVIEW_HEAD = "b".repeat(40);
+const REVIEW_BASE = "c".repeat(40);
+
+const reviewBody = (kind: ReviewKind, reviewedBase = REVIEW_BASE): string => JSON.stringify({
+  schemaVersion: 1,
+  headSha: REVIEW_HEAD,
+  reviewedBase,
+  reviewedHead: REVIEW_HEAD,
+  findings: [],
+  ...(kind === "sol-findings" ? { commandsRun: ["git diff --check"] } : {}),
+});
+
+const fixedBody = (): string => JSON.stringify({
+  schemaVersion: 1,
+  headSha: FIX_HEAD,
+  sourceHead: REVIEW_HEAD,
+  dispositions: [],
+  closedFindings: [],
+  testsRun: ["focused"],
+  residualRisks: [],
+});
+
+const reviewTask = (
+  id: string,
+  kind: ReviewKind,
+  output: ReviewTask["stepOutput"] = {
+    runId: `${id}-run`,
+    kind,
+    body: reviewBody(kind),
+    commitSha: REVIEW_HEAD,
+    run: { taskId: id },
+  },
+): ReviewTask => ({
+  id,
+  templateStep: {
+    stepIndex: kind === "sol-findings" ? 3 : 4,
+    outputKind: kind,
+    taskTemplate: { name: "direct-engineer-workflow" },
+  },
+  stepOutput: output,
+});
+
+const persistFixedOutput = async (input: {
+  reviewTasks: ReviewTask[];
+  successfulSiblingRuns?: Array<{ taskId: string; headSha: string }>;
+  body?: string;
+}) => {
+  const fixTask = {
+    id: "fix-task",
+    projectId: "project-1",
+    chainId: "chain-1",
+    chainIndex: 5,
+    chainLayer: 3,
+    status: "IN_PROGRESS",
+    templateStep: {
+      stepIndex: 5,
+      outputKind: "fixed-implementation",
+      taskTemplate: { name: "direct-engineer-workflow" },
+    },
+  };
+  const tx = {
+    $queryRaw: async () => [{ id: "locked" }],
+    run: {
+      findFirst: async (args: { select?: Record<string, unknown> }) => (
+        args.select && "taskId" in args.select
+          ? { taskId: fixTask.id }
+          : { task: fixTask }
+      ),
+      findMany: async () => input.successfulSiblingRuns ?? input.reviewTasks
+        .flatMap((task) => task.stepOutput?.runId
+          ? [{ taskId: task.id, headSha: task.stepOutput.commitSha ?? REVIEW_HEAD }]
+          : []),
+    },
+    task: {
+      findFirst: async () => ({ chainLayer: 2 }),
+      findMany: async () => input.reviewTasks,
+    },
+    taskStepOutput: {
+      findUnique: async () => null,
+      upsert: async ({ create }: { create: Record<string, unknown> }) => ({
+        id: "fixed-output",
+        ...create,
+        metadata: create.metadata ?? null,
+      }),
+    },
+  } as unknown as Prisma.TransactionClient;
+  return persistSessionTaskOutput(tx, {
+    task: { id: fixTask.id },
+    fence: {
+      runId: "fix-run",
+      fencingToken: "fence-token",
+      at: new Date("2026-01-01T00:00:00.000Z"),
+    },
+    kind: "fixed-implementation",
+    body: input.body ?? fixedBody(),
+    commitSha: FIX_HEAD,
+  });
+};
 
 test("agent-authored roles stop before readiness and integrator roles", () => {
   for (const outputKind of ["implementation", "blind-findings", "fixed-implementation", "regression-verification-v2"]) {
@@ -218,4 +339,59 @@ test("a fixed-implementation output must close exactly the findings it adopted",
     ],
     closedFindings: [{ id: "SOL-1", status: "CLOSED", codeEvidence: "patch", testEvidence: "test" }],
   })), "");
+});
+
+const persistenceRefusal = (
+  result: Awaited<ReturnType<typeof persistFixedOutput>>,
+): string | null => "ok" in result ? (result.ok ? null : result.reason) : result.reason;
+
+test("a fixed-implementation output accepts a sole Sol review sibling", async () => {
+  const result = await persistFixedOutput({
+    reviewTasks: [reviewTask("sol-task", "sol-findings")],
+  });
+
+  assert.equal(persistenceRefusal(result), null);
+});
+
+test("a present blind review sibling without output keeps its exact refusal", async () => {
+  const result = await persistFixedOutput({
+    reviewTasks: [
+      reviewTask("sol-task", "sol-findings"),
+      reviewTask("blind-task", "blind-findings", null),
+    ],
+  });
+
+  assert.equal(
+    persistenceRefusal(result),
+    "fixed-implementation requires exactly one immutable blind-findings sibling output",
+  );
+});
+
+test("a fixed-implementation output refuses a review layer with no review sibling", async () => {
+  const result = await persistFixedOutput({ reviewTasks: [] });
+
+  assert.equal(
+    persistenceRefusal(result),
+    "fixed-implementation requires at least one immutable review sibling output",
+  );
+});
+
+test("present review siblings must agree on their reviewed base", async () => {
+  const result = await persistFixedOutput({
+    reviewTasks: [
+      reviewTask("sol-task", "sol-findings"),
+      reviewTask("blind-task", "blind-findings", {
+        runId: "blind-task-run",
+        kind: "blind-findings",
+        body: reviewBody("blind-findings", "d".repeat(40)),
+        commitSha: REVIEW_HEAD,
+        run: { taskId: "blind-task" },
+      }),
+    ],
+  });
+
+  assert.equal(
+    persistenceRefusal(result),
+    "fixed-implementation sibling reviews disagree on the reviewed base",
+  );
 });
