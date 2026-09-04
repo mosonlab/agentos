@@ -29,6 +29,7 @@ import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
   cpSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -411,6 +412,9 @@ const waitFor = async (condition, message, timeoutMs = 10_000) => {
   assert.fail(message);
 };
 
+const startupLineFor = (stderr, path) =>
+  stderr.split(/\r?\n/u).find((line) => line.includes(path));
+
 // A cache root with the named slots already taken, so a case states its queue
 // as a precondition instead of racing one into place.
 const busyCache = (t, busySlots = []) => {
@@ -614,6 +618,109 @@ test("local capacity is named local-1 through local-N and an extra dispatch wait
       await Promise.allSettled(active.map((run) => run.done));
     }
   }
+});
+
+test("local slots are shared by sessions of one runner account", async (t) => {
+  const calls = join(scratch(t), "account-slot-calls.log");
+  const release = join(scratch(t), "account-slot-release");
+  writeFileSync(calls, "");
+  const repo = fixtureRepo(t, {
+    mergeGate: `
+      printf '%s\\n' "$$" >> "$GATE_FIXTURE_CALLS"
+      while [ ! -e "$GATE_FIXTURE_RELEASE" ]; do sleep 0.05; done
+      printf 'MERGE GATE: PASS account-slot-%s\\n' "$$"
+      exit 0
+    `,
+    mirrorPush: 'printf "REMOTE MUST NOT RUN\\n"; exit 1',
+    remoteGate: 'printf "REMOTE MUST NOT RUN\\n"; exit 1',
+  });
+  const runnerHome = join(scratch(t), "runner-home");
+  const homeOne = join(scratch(t), "home-one");
+  const homeTwo = join(scratch(t), "home-two");
+  const cacheOne = join(scratch(t), "cache-one");
+  const cacheTwo = join(scratch(t), "cache-two");
+  mkdirSync(runnerHome, { recursive: true });
+  mkdirSync(homeOne, { recursive: true });
+  mkdirSync(homeTwo, { recursive: true });
+  const args = [repo.head, "--master", repo.head, "--allow-local"];
+  const envFor = (home) => ({
+    AGENTOS_GATE_PRIMARY_SERVER: "",
+    AGENTOS_GATE_FALLBACK_SERVER: "",
+    AGENTOS_GATE_LOCAL_SLOTS: "1",
+    AGENTOS_RUNNER_HOME: runnerHome,
+    // Give the two sessions distinct legacy roots as well. With the account
+    // root unset, the old implementation would therefore give each process
+    // an independent local slot despite their different HOME values.
+    XDG_CACHE_HOME: undefined,
+    HOME: home,
+    GATE_FIXTURE_CALLS: calls,
+    GATE_FIXTURE_RELEASE: release,
+  });
+  const sharedSlots = join(runnerHome, ".cache", "gate-dispatch");
+  const active = [];
+  let second;
+
+  try {
+    const first = startDispatch(repo, cacheOne, args, envFor(homeOne));
+    active.push(first);
+    await waitFor(
+      () => readFileSync(calls, "utf8").trim().split("\n").filter(Boolean).length === 1,
+      "the first local gate did not start",
+    );
+    await waitFor(
+      () => existsSync(join(sharedSlots, "local-1.slot")),
+      "the first local gate did not hold the runner-account slot",
+    );
+
+    const firstRootLine = startupLineFor(first.stderr, sharedSlots);
+    assert.ok(firstRootLine, first.stderr);
+    assert.match(firstRootLine, /AGENTOS_RUNNER_HOME/u);
+
+    second = startDispatch(repo, cacheTwo, args, envFor(homeTwo));
+    active.push(second);
+    await waitFor(
+      () => second.stderr.includes("1 slot(s) busy"),
+      "the second session did not wait for the runner-account slot",
+    );
+    assert.equal(second.child.exitCode, null);
+    assert.equal(readFileSync(calls, "utf8").trim().split("\n").filter(Boolean).length, 1);
+    assert.ok(existsSync(join(sharedSlots, "local-1.slot")));
+
+    writeFileSync(release, "release\n");
+    const results = await Promise.all(active.map((run) => run.done));
+    for (const result of results) {
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      assert.match(result.stdout, /MERGE GATE: PASS account-slot/u);
+      assert.doesNotMatch(result.stdout + result.stderr, /REMOTE MUST NOT RUN/u);
+    }
+    assert.equal(readFileSync(calls, "utf8").trim().split("\n").filter(Boolean).length, 2);
+  } finally {
+    writeFileSync(release, "release\n");
+    for (const run of active) {
+      if (run.child.exitCode === null && run.child.signalCode === null) run.child.kill("SIGTERM");
+    }
+    await Promise.allSettled(active.map((run) => run.done));
+  }
+});
+
+test("without a runner account home, local slots remain under HOME", (t) => {
+  const repo = fixtureRepo(t, {});
+  const home = join(scratch(t), "legacy-home");
+  const cache = join(scratch(t), "legacy-xdg-cache");
+  mkdirSync(home, { recursive: true });
+  const result = dispatch(t, repo, [repo.head, "--master", repo.head, "--allow-local"], {
+    AGENTOS_RUNNER_HOME: undefined,
+    XDG_CACHE_HOME: undefined,
+    HOME: home,
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+
+  const homeSlots = join(home, ".cache", "gate-dispatch");
+  const rootLine = startupLineFor(result.stderr, homeSlots);
+  assert.ok(rootLine, result.stderr);
+  assert.match(rootLine, /HOME/u);
+  assert.ok(existsSync(homeSlots));
+  assert.equal(existsSync(join(cache, "gate-dispatch")), false);
 });
 
 test("an invalid local slot count is a usage error before any lock is touched", (t) => {
