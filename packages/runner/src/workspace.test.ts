@@ -9,7 +9,7 @@ import test from "node:test";
 import type { RunnerConfig } from "./config.js";
 import type { DependencyProvisioningDecision } from "./dependency-provisioning.js";
 import { CLONE_CREATION_TIMEOUT_MS, CLONE_OPERATION_BUDGET_MS } from "./network-retry.js";
-import { bindCommandRunner, runCommand, type CommandRunner } from "./exec.js";
+import { bindCommandRunner, KILL_OVERHEAD_MS, runCommand, type CommandRunner } from "./exec.js";
 import { runtimeToolPaths } from "./runtime-tools.js";
 import {
   cleanupAgentScratch, materializeRuntimeTools, provisionAgentScratch, provisionSessionConfig, provisionWorkspace, sessionConfigBaselineRoot,
@@ -567,7 +567,7 @@ test("the first mirror clone uses one long creation fetch", async () => {
     // A first clone cannot resume safely from a partial staged mirror, so it
     // gets one creation attempt instead of restarting the transfer on retry.
     assert.equal(fetchCalls, 1);
-    assert.equal(fetchTimeoutMs, CLONE_CREATION_TIMEOUT_MS);
+    assert.equal(fetchTimeoutMs, CLONE_CREATION_TIMEOUT_MS - KILL_OVERHEAD_MS);
     assert.ok(CLONE_CREATION_TIMEOUT_MS > CLONE_OPERATION_BUDGET_MS);
     assert.equal(cloneCalls, 1);
     assert.equal(workspace.baseSha, "base-sha");
@@ -626,7 +626,7 @@ test("the mirror's remote fetch carries a per-command ceiling while local git co
     const ceiling = (name: string): number | undefined => calls.find(({ args }) => args[0] === name)?.timeoutMs;
     // The only command still talking to GitHub is the mirror's fetch, and a
     // hung one is what nothing else bounds before the agent starts.
-    assert.equal(ceiling("fetch"), CLONE_CREATION_TIMEOUT_MS);
+    assert.equal(ceiling("fetch"), CLONE_CREATION_TIMEOUT_MS - KILL_OVERHEAD_MS);
     // The clone now reads local disk. Capping it would kill a working run on a
     // large repository to protect against a network that is no longer in play.
     assert.equal(ceiling("clone"), undefined);
@@ -686,7 +686,7 @@ test("the pinned range is fetched out of the mirror, and only the mirror's own f
     });
     const remoteFetch = calls.find(({ args }) => args[0] === "fetch" && args.includes("origin"));
     const rangeFetch = calls.find(({ args }) => args[0] === "fetch" && args.includes("pinned-sha"));
-    assert.equal(remoteFetch?.timeoutMs, CLONE_CREATION_TIMEOUT_MS);
+    assert.equal(remoteFetch?.timeoutMs, CLONE_CREATION_TIMEOUT_MS - KILL_OVERHEAD_MS);
     // Both endpoints were already in the mirror, so the range is assembled from
     // local disk: slow on a long history, but it cannot hang.
     assert.equal(rangeFetch?.timeoutMs, undefined);
