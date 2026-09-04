@@ -844,7 +844,11 @@ export const openRun = async (
             task.templateId ? { branch: prior?.branch ?? null } : null,
           )
           : {
-            branch: null,
+            // Publication evidence answers the base; the prior Run's head
+            // answers the publish target. A null head delegates to the
+            // runner's per-Run fallback and is reserved for tasks that never
+            // declared a publish head.
+            branch: prior?.branch ?? null,
             targetBranch: prior
               ? await resolveRequeueBase(tx, { ...task, repo: task.repo }, prior)
               : task.targetBranch ?? task.repo.defaultBranch,
