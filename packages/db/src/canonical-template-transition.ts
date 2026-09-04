@@ -13,7 +13,7 @@ export type LegacyStepRecord = Readonly<{
   approvalGate: boolean;
   /**
    * Defaults to false: generations registered before optional steps existed
-   * predate optional steps.
+   * have no optional step, and their deployed rows are all optional = false.
    */
   optional?: boolean;
   outputKind: string;

@@ -73,7 +73,7 @@ const persistedGeneration = (
   assigneeType: step.assigneeType,
   layer: step.layer,
   approvalGate: step.approvalGate,
-  optional: false,
+  optional: step.optional ?? false,
   outputKind: step.outputKind,
   attachmentsFromPrevious: step.attachmentsFromPrevious,
   priorOutputKinds: [],
@@ -115,29 +115,30 @@ test("registered generations require an explicit true dependency-provisioning va
 
 test("legacy generation shapes match each step's optional flag", () => {
   const baseGeneration = generationOf("direct-engineer-workflow", "pre-adjudication");
+  const optionalStepIndex = baseGeneration.shape.findIndex((step) => step.outputKind === "blind-findings");
+  assert.notEqual(optionalStepIndex, -1);
+  const withOptional = (steps: PersistedTransitionStep[], optional: boolean) =>
+    steps.map((step, index) => (index === optionalStepIndex ? { ...step, optional } : step));
   const optionalGeneration = {
     marker: "synthetic-optional",
     shape: baseGeneration.shape.map((step, index) => (
-      index === 0 ? { ...step, optional: true } : step
+      index === optionalStepIndex ? { ...step, optional: true } : step
     )),
   };
-  const optionalRows = persistedGeneration(optionalGeneration, true)
-    .map((step, index) => (index === 0 ? { ...step, optional: true } : step));
+  const optionalRows = persistedGeneration(optionalGeneration, true);
 
   assert.equal(legacyGenerationMatches(optionalGeneration, optionalRows), true);
   assert.equal(
     legacyGenerationMatches(
       optionalGeneration,
-      optionalRows.map((step, index) => (index === 0 ? { ...step, optional: false } : step)),
+      withOptional(optionalRows, false),
     ),
     false,
   );
   assert.equal(
     legacyGenerationMatches(
       baseGeneration,
-      persistedGeneration(baseGeneration, true).map((step, index) => (
-        index === 0 ? { ...step, optional: true } : step
-      )),
+      withOptional(persistedGeneration(baseGeneration, true), true),
     ),
     false,
   );
