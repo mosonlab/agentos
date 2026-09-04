@@ -24,8 +24,15 @@ export const GATE_ENV_PREFIXES = ["AGENTOS_GATE_", "AGENTOS_RUN_", "GATE_DISPATC
 // run-gate.sh's two are not prefixed but are read the same way: GATE_HOME
 // relocates the whole gate directory a fixture built for itself — at the real
 // worker's mirror, worktrees and logs — and STALE_WORKTREE_MINUTES decides what
-// its sweep reclaims.
-export const GATE_ENV_NAMES = ["AGENTOS_WORKSPACE_PATH", "GATE_HOME", "STALE_WORKTREE_MINUTES"];
+// its sweep reclaims. AGENTOS_RUNNER_HOME is likewise a runner-provided account
+// root for shared local gate slots; a fixture must set it explicitly when that
+// accounting behavior is under test, never inherit the host's account root.
+export const GATE_ENV_NAMES = [
+  "AGENTOS_WORKSPACE_PATH",
+  "AGENTOS_RUNNER_HOME",
+  "GATE_HOME",
+  "STALE_WORKTREE_MINUTES",
+];
 
 // The other half of the same question, and the reason for each entry. Every
 // name the gate scripts read is either stripped by isHostGateConfig or stated
