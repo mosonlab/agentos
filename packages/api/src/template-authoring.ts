@@ -1,5 +1,6 @@
 import {
   canonicalTemplateIdentity,
+  gateSlotOf,
   integratorBindingRefusal,
   lockTemplateRow,
   lockTemplateStepRows,
@@ -26,6 +27,7 @@ export type ReplaceTemplateStepInput = {
   assigneeAgentId: string | null;
   prompt: string;
   approvalGate: boolean;
+  optional: boolean;
   attachmentsFromPrevious: boolean;
   priorOutputKinds: string[];
   spawnPolicy: unknown | null;
@@ -118,7 +120,20 @@ const validateTemplateGraph = (
     };
   }
 
-  // 3. first_layer_not_single. A parallel first layer has no unique starting
+  // 3. first_step_optional. The first Step is the chain entry point and must
+  // remain present so it can carry the afterTaskId binding and default branch.
+  if (first.optional) {
+    return {
+      refusal: authoringRefusal(
+        "first_step_optional",
+        "The first template step cannot be optional",
+        first.stepIndex,
+      ),
+      warnings: [],
+    };
+  }
+
+  // 4. first_layer_not_single. A parallel first layer has no unique starting
   // Step and therefore cannot be materialized as a runnable graph.
   const firstLayerSteps = steps.filter((step) => step.layer === first.layer);
   if (firstLayerSteps.length > 1) {
@@ -132,7 +147,7 @@ const validateTemplateGraph = (
     };
   }
 
-  // 4. layer_order_invalid. Step indexes are assigned from array order, so a
+  // 5. layer_order_invalid. Step indexes are assigned from array order, so a
   // lower layer after a higher one is the first offending position.
   for (let index = 1; index < steps.length; index += 1) {
     const previous = steps[index - 1]!;
@@ -149,7 +164,7 @@ const validateTemplateGraph = (
     }
   }
 
-  // 5. base_step_invalid. A base is a positional reference, but its semantic
+  // 6. base_step_invalid. A base is a positional reference, but its semantic
   // contract is stricter: it must point to an earlier Step in a lower layer.
   const stepsByIndex = new Map(steps.map((step) => [step.stepIndex, step]));
   for (const step of steps) {
@@ -167,7 +182,56 @@ const validateTemplateGraph = (
     }
   }
 
-  // 6. prior_kind_unproduced. A prior attachment is available only when a
+  // 7. base_step_optional. An omitted Step cannot provide the stable base
+  // commit range required by a retained Step.
+  for (const step of steps) {
+    if (step.baseFromStepIndex === null) continue;
+    const base = stepsByIndex.get(step.baseFromStepIndex);
+    if (base?.optional) {
+      return {
+        refusal: authoringRefusal(
+          "base_step_optional",
+          `Template step ${step.stepIndex} baseFromStepIndex cannot reference optional step ${base.stepIndex}`,
+          step.stepIndex,
+        ),
+        warnings: [],
+      };
+    }
+  }
+
+  // 8. gate_slot_step_optional. Both configurable gate slots must have a
+  // materialized owner whenever the template is instantiated.
+  for (const step of steps) {
+    if (!step.optional) continue;
+    const slot = gateSlotOf(step);
+    if (slot === null) continue;
+    return {
+      refusal: authoringRefusal(
+        "gate_slot_step_optional",
+        `Template step ${step.stepIndex} cannot be optional because it occupies the ${slot} gate slot`,
+        step.stepIndex,
+      ),
+      warnings: [],
+    };
+  }
+
+  // 9. optional_step_precedes_merge_tail. Merge-tail readers resolve their
+  // predecessor by exact chainIndex - 1, so that predecessor cannot be omitted.
+  for (const step of steps) {
+    if (!step.optional) continue;
+    const successor = stepsByIndex.get(step.stepIndex + 1);
+    if (successor?.outputKind !== "merge-authorization" && successor?.outputKind !== "merge-result") continue;
+    return {
+      refusal: authoringRefusal(
+        "optional_step_precedes_merge_tail",
+        `Template step ${step.stepIndex} cannot be optional immediately before merge-tail step ${successor.stepIndex}`,
+        step.stepIndex,
+      ),
+      warnings: [],
+    };
+  }
+
+  // 10. prior_kind_unproduced. A prior attachment is available only when a
   // producer has completed an earlier layer. Unknown kinds are fine when they
   // are not consumed; this check only rejects a missing producer for a kind a
   // Step explicitly names.
@@ -189,7 +253,7 @@ const validateTemplateGraph = (
     }
   }
 
-  // 7. output_kind_duplicate. Output kinds identify the attachment a consumer
+  // 11. output_kind_duplicate. Output kinds identify the attachment a consumer
   // receives, so one producer must own each kind. The later producer is the
   // offending Step.
   const outputKinds = new Set<string>();
@@ -207,7 +271,7 @@ const validateTemplateGraph = (
     outputKinds.add(step.outputKind);
   }
 
-  // 8. prior_kind_duplicate. A duplicate declaration in one Step is a typo,
+  // 12. prior_kind_duplicate. A duplicate declaration in one Step is a typo,
   // even if a valid producer exists for that kind.
   for (const step of steps) {
     const priorKinds = new Set<string>();
@@ -226,7 +290,7 @@ const validateTemplateGraph = (
     }
   }
 
-  // 9. approval_gate_in_parallel_layer. Approval is a single decision point;
+  // 13. approval_gate_in_parallel_layer. Approval is a single decision point;
   // placing it alongside another Step would leave the layer with no unique
   // gate owner.
   const layerSizes = new Map<number, number>();
@@ -244,7 +308,7 @@ const validateTemplateGraph = (
     }
   }
 
-  // 10. assignee_invalid. Authoring validates only identity facts that are
+  // 14. assignee_invalid. Authoring validates only identity facts that are
   // independent of a Repo. Repo grants remain an instantiation concern.
   for (const step of steps) {
     const agent = step.assigneeAgentId === null ? undefined : agents.get(step.assigneeAgentId);
@@ -266,7 +330,7 @@ const validateTemplateGraph = (
     }
   }
 
-  // 11. integrator_binding_invalid. This delegates the bidirectional sentinel
+  // 15. integrator_binding_invalid. This delegates the bidirectional sentinel
   // invariant to the platform's canonical predicate; authoring must not grow
   // a second, subtly different interpretation of the merge Step.
   for (const step of steps) {
@@ -407,6 +471,7 @@ export const cloneTemplate = async (
               assigneeType: step.assigneeType,
               prompt: step.prompt,
               approvalGate: step.approvalGate,
+              optional: step.optional,
               attachmentsFromPrevious: step.attachmentsFromPrevious,
               priorOutputKinds: step.priorOutputKinds,
               spawnPolicy: cloneJson(step.spawnPolicy),
@@ -514,6 +579,7 @@ export const replaceTemplateSteps = async (
       assigneeAgentId: step.assigneeAgentId,
       prompt: step.prompt,
       approvalGate: step.approvalGate,
+      optional: step.optional,
       attachmentsFromPrevious: step.attachmentsFromPrevious,
       priorOutputKinds: step.priorOutputKinds,
       spawnPolicy: cloneJson(step.spawnPolicy),

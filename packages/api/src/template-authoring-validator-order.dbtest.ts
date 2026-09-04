@@ -94,6 +94,45 @@ test("layers are non-decreasing and every base points to an earlier lower layer"
   assert.equal(valid.status, 200, JSON.stringify(valid.body));
 });
 
+test("optional steps obey entry, base, gate-slot, and merge-tail invariants", async () => {
+  const seed = await seedAuthoringTemplate(db, "order-optional");
+  await assertRefusal(
+    seed,
+    [stepPayload(seed, 1, { layer: 1, optional: true })],
+    "first_step_optional",
+    1,
+  );
+  await assertRefusal(
+    seed,
+    [
+      stepPayload(seed, 1, { layer: 1, outputKind: "base" }),
+      stepPayload(seed, 2, { layer: 2, outputKind: "optional", optional: true }),
+      stepPayload(seed, 3, { layer: 3, outputKind: "consumer", baseFromStepIndex: 2 }),
+    ],
+    "base_step_optional",
+    3,
+  );
+  await assertRefusal(
+    seed,
+    [
+      stepPayload(seed, 1, { layer: 1, outputKind: "start" }),
+      stepPayload(seed, 2, { layer: 2, outputKind: "spec", optional: true }),
+    ],
+    "gate_slot_step_optional",
+    2,
+  );
+  await assertRefusal(
+    seed,
+    [
+      stepPayload(seed, 1, { layer: 1, outputKind: "start" }),
+      stepPayload(seed, 2, { layer: 2, outputKind: "optional", optional: true }),
+      stepPayload(seed, 3, { layer: 3, outputKind: "merge-authorization" }),
+    ],
+    "optional_step_precedes_merge_tail",
+    2,
+  );
+});
+
 test("fixed validator order returns only the earliest rule on repeated submissions", async () => {
   const seed = await seedAuthoringTemplate(db, "order-precedence");
   const before = await readStepSnapshots(db, seed.template.id);

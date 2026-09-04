@@ -69,6 +69,7 @@ const replaceTemplateStepInput = z.object({
   assigneeAgentId: id.nullable(),
   prompt: z.string().max(500_000),
   approvalGate: z.boolean(),
+  optional: z.boolean(),
   attachmentsFromPrevious: z.boolean(),
   priorOutputKinds: z.array(z.string().trim().min(1).max(200)).max(64),
   spawnPolicy: z.record(z.string(), z.unknown()).nullable(),

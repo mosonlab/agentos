@@ -148,6 +148,7 @@ const stepProjection = (step: any) => ({
   assigneeAgentId: step.assigneeAgentId,
   prompt: step.prompt,
   approvalGate: step.approvalGate,
+  optional: step.optional,
   attachmentsFromPrevious: step.attachmentsFromPrevious,
   priorOutputKinds: step.priorOutputKinds,
   spawnPolicy: step.spawnPolicy,
