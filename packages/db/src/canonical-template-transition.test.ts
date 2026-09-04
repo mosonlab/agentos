@@ -113,6 +113,36 @@ test("registered generations require an explicit true dependency-provisioning va
   }
 });
 
+test("legacy generation shapes match each step's optional flag", () => {
+  const baseGeneration = generationOf("direct-engineer-workflow", "pre-adjudication");
+  const optionalGeneration = {
+    marker: "synthetic-optional",
+    shape: baseGeneration.shape.map((step, index) => (
+      index === 0 ? { ...step, optional: true } : step
+    )),
+  };
+  const optionalRows = persistedGeneration(optionalGeneration, true)
+    .map((step, index) => (index === 0 ? { ...step, optional: true } : step));
+
+  assert.equal(legacyGenerationMatches(optionalGeneration, optionalRows), true);
+  assert.equal(
+    legacyGenerationMatches(
+      optionalGeneration,
+      optionalRows.map((step, index) => (index === 0 ? { ...step, optional: false } : step)),
+    ),
+    false,
+  );
+  assert.equal(
+    legacyGenerationMatches(
+      baseGeneration,
+      persistedGeneration(baseGeneration, true).map((step, index) => (
+        index === 0 ? { ...step, optional: true } : step
+      )),
+    ),
+    false,
+  );
+});
+
 test("every registered compound generation derives its repair Step ordinals", () => {
   for (const generation of LEGACY_TEMPLATE_GENERATIONS["compound-engineer-workflow"]) {
     const ordinals = canonicalStepOrdinals("compound-engineer-workflow", generation.marker);

@@ -11,6 +11,11 @@ export type LegacyStepRecord = Readonly<{
   agentName: string | null;
   assigneeType: AssigneeType;
   approvalGate: boolean;
+  /**
+   * Defaults to false: generations registered before optional steps existed
+   * predate optional steps.
+   */
+  optional?: boolean;
   outputKind: string;
   attachmentsFromPrevious: boolean;
   opensPullRequest: boolean;
@@ -650,7 +655,7 @@ const shapeMatches = (
       || (step.assigneeAgent?.name ?? null) !== expectedStep.agentName
       || step.assigneeType !== expectedStep.assigneeType
       || step.approvalGate !== expectedStep.approvalGate
-      || step.optional !== false
+      || step.optional !== (expectedStep.optional ?? false)
       || step.outputKind !== expectedStep.outputKind
       || step.attachmentsFromPrevious !== expectedStep.attachmentsFromPrevious
       || step.opensPullRequest !== expectedStep.opensPullRequest
