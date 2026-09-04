@@ -1058,8 +1058,13 @@ const readStageEntries = ({
   }
   let inventory;
   try { inventory = inventoryForCount(runnerCount, recordedRunnerIdPrefix); } catch { invalidManifest(reason, manifestPath, "renderInputs"); }
-  const stageRoot = resolve(manifest?.stagingRoot ?? join(root, SERVICE_INSTALL_ROOT, "staging"));
+  const recordedStageRoot = typeof manifest.stagingRoot === "string"
+    ? manifest.stagingRoot
+    : join(root, SERVICE_INSTALL_ROOT, "staging");
+  const stageRoot = resolve(recordedStageRoot);
   assertContainedPath(stageRoot, join(root, SERVICE_INSTALL_ROOT));
+  if (!Array.isArray(manifest.entries)) invalidManifest(reason, manifestPath, "entries");
+  if (!Array.isArray(manifest.auxiliaryEntries)) invalidManifest(reason, manifestPath, "auxiliaryEntries");
   if (!manifest || manifest.schemaVersion !== 1 || manifest.platform !== "linux"
       || manifest.repositoryRoot !== resolve(root) || manifest.stagingRoot !== stageRoot
       || manifest.unitDirectory !== unitDirectory || manifest.sudoersPath !== sudoersPath
@@ -1075,6 +1080,13 @@ const readStageEntries = ({
     reason,
     manifestPath,
     requireLabel: (entry) => entry.kind === "service",
+  });
+  validateManifestEntries({
+    entries: manifest.auxiliaryEntries,
+    arrayName: "auxiliaryEntries",
+    reason,
+    manifestPath,
+    requireLabel: () => false,
   });
   if (manifest.retiredEntries !== undefined) {
     if (!Array.isArray(manifest.retiredEntries)) invalidManifest(reason, manifestPath, "retiredEntries");
@@ -1549,7 +1561,10 @@ const systemdStagePlan = ({
     ? readJsonFile(manifestPath, "systemd-service-manifest-invalid")
     : null;
   const requestedStageRoot = resolve(stagingRoot ?? join(root, SERVICE_INSTALL_ROOT, "staging"));
-  const stageRoot = previousManifest && requestedStageRoot === resolve(previousManifest.stagingRoot)
+  const previousStageRoot = typeof previousManifest?.stagingRoot === "string"
+    ? resolve(previousManifest.stagingRoot)
+    : null;
+  const stageRoot = previousManifest && requestedStageRoot === previousStageRoot
     ? join(root, SERVICE_INSTALL_ROOT, `staging-${randomUUID()}`)
     : requestedStageRoot;
   assertContainedPath(stageRoot, join(root, SERVICE_INSTALL_ROOT));
@@ -1808,8 +1823,14 @@ export const installStagedSystemdServices = ({
   const writeServiceManifest = (contents) => writeAtomic(path, contents, manifestMode, manifestOwnership, chown);
   const manifest = readJsonFile(path, "systemd-service-manifest-invalid");
   const runnerIdPrefix = resolveRunnerIdPrefix(environment);
-  const resolvedUnitDirectory = resolve(unitDirectory ?? manifest.unitDirectory ?? SYSTEMD_UNIT_DIRECTORY);
-  const resolvedSudoersPath = resolve(sudoersPath ?? manifest.sudoersPath ?? SYSTEMD_SUDOERS_PATH);
+  const recordedUnitDirectory = typeof manifest?.unitDirectory === "string"
+    ? manifest.unitDirectory
+    : SYSTEMD_UNIT_DIRECTORY;
+  const recordedSudoersPath = typeof manifest?.sudoersPath === "string"
+    ? manifest.sudoersPath
+    : SYSTEMD_SUDOERS_PATH;
+  const resolvedUnitDirectory = resolve(unitDirectory ?? recordedUnitDirectory);
+  const resolvedSudoersPath = resolve(sudoersPath ?? recordedSudoersPath);
   const validated = readStageEntries({
     manifest,
     manifestPath: path,
@@ -2059,8 +2080,14 @@ const installLinuxServices = (options = {}) => {
     const path = options.manifestPath ?? systemdManifestPath(root);
     if (!existsSync(path)) throw new Error("systemd-service-manifest-missing");
     const manifest = readJsonFile(path, "systemd-service-manifest-invalid");
-    const resolvedUnitDirectory = resolve(options.unitDirectory ?? manifest.unitDirectory ?? SYSTEMD_UNIT_DIRECTORY);
-    const resolvedSudoersPath = resolve(options.sudoersPath ?? manifest.sudoersPath ?? SYSTEMD_SUDOERS_PATH);
+    const recordedUnitDirectory = typeof manifest?.unitDirectory === "string"
+      ? manifest.unitDirectory
+      : SYSTEMD_UNIT_DIRECTORY;
+    const recordedSudoersPath = typeof manifest?.sudoersPath === "string"
+      ? manifest.sudoersPath
+      : SYSTEMD_SUDOERS_PATH;
+    const resolvedUnitDirectory = resolve(options.unitDirectory ?? recordedUnitDirectory);
+    const resolvedSudoersPath = resolve(options.sudoersPath ?? recordedSudoersPath);
     const validated = readStageEntries({
       manifest,
       manifestPath: path,
