@@ -618,7 +618,7 @@ test("local capacity is named local-1 through local-N and an extra dispatch wait
 
 test("an invalid local slot count is a usage error before any lock is touched", (t) => {
   const repo = fixtureRepo(t, {});
-  for (const value of ["0", "-1", "not-a-number", "1025", "9223372036854775808"]) {
+  for (const value of ["", "0", "-1", "not-a-number", "1025", "9223372036854775808"]) {
     const cache = busyCache(t);
     const result = runDispatch(repo, cache, [repo.head, "--master", repo.head, "--allow-local"], {
       AGENTOS_GATE_PRIMARY_SERVER: "",
