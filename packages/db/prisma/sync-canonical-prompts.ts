@@ -458,6 +458,7 @@ const syncCanonicalTemplates = async (
           assigneeAgent: { select: { name: true } },
           assigneeType: true,
           approvalGate: true,
+          optional: true,
           outputKind: true,
           attachmentsFromPrevious: true,
           priorOutputKinds: true,

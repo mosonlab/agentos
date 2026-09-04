@@ -314,6 +314,7 @@ const main = async (): Promise<void> => {
           assigneeType: true,
           prompt: true,
           approvalGate: true,
+          optional: true,
           attachmentsFromPrevious: true,
           priorOutputKinds: true,
           spawnPolicy: true,

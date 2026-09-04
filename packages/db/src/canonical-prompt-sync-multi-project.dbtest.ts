@@ -237,7 +237,7 @@ const assertSummaryShape = (summary: CanonicalSyncSummary): void => {
     const roles = Object.values(counter.updatedRoles).reduce((sum, count) => sum + count, 0);
     const scalar = counter.createdCanonicalTemplates + counter.createdAgents + counter.createdAgentRepoGrants
       + counter.adoptedAssignees + counter.adoptedStepBases + counter.adoptedPriorOutputDeclarations
-      + counter.adoptedDependencyProvisioning
+      + counter.adoptedDependencyProvisioning + counter.adoptedOptionalSteps
       + counter.renamedSteps + counter.migratedTasks + counter.adoptedAgentDefaults + counter.runtimeDriftNotices;
     assert.equal(counter.updated, scalar + nested + roles);
   }

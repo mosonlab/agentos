@@ -20,6 +20,7 @@ const project = (overrides: Partial<Project> = {}): Project => ({
   maxSessionsPerTask: 3,
   specGateDefault: true,
   mergeGateDefault: false,
+  skipOptionalSteps: false,
   spendCap: null,
   createdAt: "2026-09-01T00:00:00.000Z",
   updatedAt: "2026-09-01T00:00:00.000Z",

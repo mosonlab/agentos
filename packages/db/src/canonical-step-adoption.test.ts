@@ -182,6 +182,26 @@ test("every canonical review step adopts the canonical absence of dependency pro
   }
 });
 
+test("the two canonical blind reviews adopt the optional flag from the additive default", () => {
+  for (const [templateName, stepIndex] of [
+    ["compound-engineer-workflow", 7],
+    ["direct-engineer-workflow", 4],
+  ] as const) {
+    const source = sourceStep(templateName, stepIndex);
+    assert.equal(source.optional, true);
+    assert.deepEqual(onlyAdoption(templateName, { ...asPersisted(source), optional: false }, source), {
+      difference: "optional",
+      counter: "adoptedOptionalSteps",
+      refusesReferencedStep: false,
+      write: { kind: "set-columns", data: { optional: true } },
+    });
+  }
+
+  const required = sourceStep("pr-engineer-workflow", 3);
+  assert.equal(required.optional, false);
+  refuses("pr-engineer-workflow", { ...asPersisted(required), optional: true }, required, "optional");
+});
+
 test("the retired all-output handoff marker is adopted wherever it survives", () => {
   for (const [templateName, steps] of sources) {
     for (const source of steps) {

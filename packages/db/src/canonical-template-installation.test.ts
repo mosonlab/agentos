@@ -120,7 +120,7 @@ test("installation planning decides successor drift, half migrations, and spawnP
   }
 });
 
-test("current installation adopts dependency provisioning only on the six review steps", async () => {
+test("current installation adopts review provisioning and the optional-step additive default", async () => {
   const sources = await loadTemplateStepSources("direct-engineer-workflow");
   const sourceMap: CanonicalInstallationSources = new Map([
     ["direct-engineer-workflow", sources],
@@ -132,6 +132,21 @@ test("current installation adopts dependency provisioning only on the six review
     projectId: "project",
     rowId: "template",
   }]);
+
+  const migrationDefaults = allTrue.map((step) => ({ ...step, optional: false }));
+  assert.deepEqual(planCanonicalInstallation([row(migrationDefaults)], sourceMap), [{
+    kind: "current",
+    templateName: "direct-engineer-workflow",
+    projectId: "project",
+    rowId: "template",
+  }]);
+
+  const requiredStepOptional = allTrue.map((step) => step.stepIndex === 3
+    ? { ...step, optional: true }
+    : step);
+  const optionalRefusal = planCanonicalInstallation([row(requiredStepOptional)], sourceMap);
+  assert.equal(optionalRefusal[0]?.kind, "refused");
+  assert.match(optionalRefusal[0]?.kind === "refused" ? optionalRefusal[0].reason : "", /optional/u);
 
   const nonReviewFalse = allTrue.map((step) => step.stepIndex === 2
     ? { ...step, provisionDependencies: false }

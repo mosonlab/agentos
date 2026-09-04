@@ -117,9 +117,14 @@ test("direct instantiation snapshots optional omission and preserves sparse temp
   }), 0);
   const progress = chainProgress(skippedUnbound.tasks.map((task) => ({
     id: task.id,
+    projectId: task.projectId,
+    chainId: task.chainId,
+    name: task.name,
     status: task.status,
+    archivedAt: task.archivedAt,
     chainIndex: task.chainIndex,
     chainLayer: task.chainLayer,
+    templateStep: null,
   })));
   assert.deepEqual(progress, { total: 6, done: 0, position: 1, currentLayer: 1, layerCount: 6 });
 

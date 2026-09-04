@@ -32,6 +32,7 @@ test("an empty report names every canonical step and role at zero", () => {
     adoptedStepBases: 0,
     adoptedPriorOutputDeclarations: 0,
     adoptedDependencyProvisioning: 0,
+    adoptedOptionalSteps: 0,
     renamedSteps: 0,
     migratedTasks: 0,
     adoptedAgentDefaults: 0,
