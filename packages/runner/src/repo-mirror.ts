@@ -3,9 +3,11 @@ import { realpathSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 
 import type { RunnerConfig } from "./config.js";
+import { CommandTimeoutError, isCommandTimeout } from "./exec.js";
 import type { CommandRunner } from "./exec.js";
 import {
-  CLONE_COMMAND_TIMEOUT_MS, CLONE_OPERATION_BUDGET_MS, runWithNetworkRetry, type RetryOptions,
+  CLONE_COMMAND_TIMEOUT_MS, CLONE_CREATION_TIMEOUT_MS, CLONE_OPERATION_BUDGET_MS, DeadlineExceededError,
+  runWithNetworkRetry, type RetryOptions,
 } from "./network-retry.js";
 
 /**
@@ -33,10 +35,10 @@ import {
  *   credentials, and nothing outside that 0700 home can read the mirror. That
  *   is also why the filesystem work is small shell scripts rather than node's
  *   fs: the daemon's uid cannot enter a launched account's home.
- * - The remote fetch keeps the clone retry profile from network-retry.ts. The
- *   first fetch into an empty mirror transfers exactly what a clone did, so it
- *   needs the same bound; later fetches are far smaller and finish well inside
- *   it.
+ * - Refreshes keep the clone retry profile from network-retry.ts. A first
+ *   creation transfers the whole repository under its dedicated long ceiling,
+ *   while later fetches are incremental and finish well inside the refresh
+ *   bound.
  * - A mirror that exists but cannot be verified is a hard failure
  *   (`RepoMirrorError`), never a quiet fall back to a full remote clone. The
  *   fallback is precisely the behaviour this module exists to eliminate, and a
@@ -49,7 +51,7 @@ import {
  */
 
 export type RepoMirrorProgress = {
-  event: "created" | "refreshed" | "object-top-up" | "lock-wait" | "lock-steal" | "staging-retained" | "elapsed";
+  event: "creating" | "created" | "refreshed" | "object-top-up" | "lock-wait" | "lock-steal" | "staging-retained" | "elapsed";
   mirror?: string;
   condition?: string;
   elapsedMs?: number;
@@ -74,9 +76,12 @@ export type RepoMirrorOptions = {
  * it, so a concurrent runner on the same machine cannot repack the object
  * database out from under a clone. Waiting is the correct behaviour rather than
  * a failure: the holder is bounded by the clone budget, and the wait replaces a
- * remote clone that cost longer than this on a bad day.
+ * remote clone that cost longer than this on a bad day. Cold creation uses the
+ * dedicated creation ceiling, and the default wait includes explicit slack
+ * for the setup, publish, and local read work around that fetch.
  */
-const MIRROR_LOCK_WAIT_MS = 600_000;
+const MIRROR_LOCK_CREATION_SLACK_MS = 5 * 60_000;
+const MIRROR_LOCK_WAIT_MS = CLONE_CREATION_TIMEOUT_MS + MIRROR_LOCK_CREATION_SLACK_MS;
 
 /**
  * A lock nobody has touched for this long belonged to a process that died
@@ -113,6 +118,18 @@ export class RepoMirrorError extends Error {
     this.name = "RepoMirrorError";
     this.mirrorPath = mirrorPath;
     this.condition = condition;
+  }
+}
+
+class FirstCloneTimeoutError extends CommandTimeoutError {
+  override readonly cause: unknown;
+
+  constructor(mirrorPath: string, cause: unknown) {
+    super("git", ["fetch"], CLONE_CREATION_TIMEOUT_MS);
+    this.name = "FirstCloneTimeoutError";
+    this.message = `Runner repository mirror ${mirrorPath} first clone timed out at its `
+      + `${CLONE_CREATION_TIMEOUT_MS}ms creation ceiling; this was a first clone, not a refresh.`;
+    this.cause = cause;
   }
 }
 
@@ -287,19 +304,33 @@ const acquireMirrorLock = async (
   }
 };
 
+const refreshFetchProfile = (retryOptions: RetryOptions): RetryOptions => ({
+  commandTimeoutMs: CLONE_COMMAND_TIMEOUT_MS,
+  budgetMs: CLONE_OPERATION_BUDGET_MS,
+  ...retryOptions,
+});
+
+const creationFetchProfile = (retryOptions: RetryOptions): RetryOptions => ({
+  // A creation has no usable destination to resume from: retrying this fetch
+  // would throw away the staged repository and transfer the full history again.
+  // Preserve only the injectable clock/wait hooks; the creation profile must
+  // not inherit refresh's retry count, timeout, budget, or enclosing deadline.
+  attempts: 1,
+  commandTimeoutMs: CLONE_CREATION_TIMEOUT_MS,
+  budgetMs: CLONE_CREATION_TIMEOUT_MS,
+  ...(retryOptions.now === undefined ? {} : { now: retryOptions.now }),
+  ...(retryOptions.wait === undefined ? {} : { wait: retryOptions.wait }),
+});
+
 const fetchFromRemote = async (
   run: CommandRunner,
   mirror: string,
   args: readonly string[],
-  retryOptions: RetryOptions,
+  profile: RetryOptions,
 ): Promise<void> => {
-  // The clone profile, not delivery's. The first fetch into an empty mirror
-  // moves the same bytes a clone did; every later one is incremental. Both run
-  // while the runner heartbeat holds the lease, so the bound only has to
-  // separate "hung" from "slow".
   await runWithNetworkRetry("git", args,
     ({ timeoutMs }) => run("git", args, { env: gitDirectory(mirror), timeoutMs }),
-    { commandTimeoutMs: CLONE_COMMAND_TIMEOUT_MS, budgetMs: CLONE_OPERATION_BUDGET_MS, ...retryOptions },
+    profile,
   );
 };
 
@@ -333,7 +364,7 @@ const createMirror = async (
     await run("git", ["init", "--bare", "--quiet", staging]);
     await run("git", ["remote", "add", "origin", remoteUrl], { env: gitDirectory(staging) });
     await configureMirror(run, staging);
-    await fetchFromRemote(run, staging, REFRESH_ARGS, retryOptions);
+    await fetchFromRemote(run, staging, REFRESH_ARGS, creationFetchProfile(retryOptions));
     await shell(run, 'mv "$1" "$2"', staging, mirror);
   } finally {
     // The sweep in ENSURE_ROOT is what covers a process that dies before this
@@ -403,7 +434,12 @@ export const ensureMirrorRevisions = async (
   const missing = revisions.filter((revision) => present.get(revision) !== true);
   if (missing.length === 0) return;
   report({ event: "object-top-up", mirror, condition: missing.join(",") });
-  await fetchFromRemote(run, mirror, ["fetch", "--no-tags", "--quiet", "origin", ...missing], retryOptions);
+  await fetchFromRemote(
+    run,
+    mirror,
+    ["fetch", "--no-tags", "--quiet", "origin", ...missing],
+    refreshFetchProfile(retryOptions),
+  );
   const settled = await mirrorRevisionsPresent(run, mirror, missing);
   const absent = missing.filter((revision) => settled.get(revision) !== true);
   // Not a RepoMirrorError: the mirror did what it was asked and the remote came
@@ -465,10 +501,18 @@ export const withRepoMirror = async <T>(
     if (state === "present") {
       await validateMirror(run, mirror, remoteUrl);
       await configureMirror(run, mirror);
-      await fetchFromRemote(run, mirror, REFRESH_ARGS, retryOptions);
+      await fetchFromRemote(run, mirror, REFRESH_ARGS, refreshFetchProfile(retryOptions));
       report({ event: "refreshed", mirror });
     } else {
-      await createMirror(run, root, mirror, remoteUrl, retryOptions, report);
+      report({ event: "creating", mirror });
+      try {
+        await createMirror(run, root, mirror, remoteUrl, retryOptions, report);
+      } catch (error: unknown) {
+        if (isCommandTimeout(error) || error instanceof DeadlineExceededError) {
+          throw new FirstCloneTimeoutError(mirror, error);
+        }
+        throw error;
+      }
       report({ event: "created", mirror });
     }
     return await use(mirror);
