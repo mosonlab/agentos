@@ -66,7 +66,10 @@ test("the additive migration defaults existing projects without changing chain a
     cpSync(join(dbDirectory, "prisma", "migrations", targetMigration), join(stagedMigrations, targetMigration), { recursive: true });
     deploy(url, join(stagedPrisma, "schema.prisma"));
 
-    const project = await db.project.findUniqueOrThrow({ where: { id: "project-upgrade-gates" } });
+    const project = await db.project.findUniqueOrThrow({
+      where: { id: "project-upgrade-gates" },
+      select: { specGateDefault: true, mergeGateDefault: true },
+    });
     assert.deepEqual(
       { specGateDefault: project.specGateDefault, mergeGateDefault: project.mergeGateDefault },
       { specGateDefault: false, mergeGateDefault: false },

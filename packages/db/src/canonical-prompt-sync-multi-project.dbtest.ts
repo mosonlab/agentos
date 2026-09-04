@@ -200,6 +200,7 @@ const copyTemplate = async (
         assigneeType: step.assigneeType,
         runner: step.runner,
         approvalGate: step.approvalGate,
+        optional: step.optional,
         outputKind: step.outputKind,
         prompt: step.prompt,
         opensPullRequest: step.opensPullRequest,
@@ -258,6 +259,7 @@ const downgradeDirectToHistoricalSevenStep = async (projectId: string): Promise<
         stepIndex: step.stepIndex - 1,
         layer: step.layer - 1,
         baseFromStepIndex: step.baseFromStepIndex === null ? null : step.baseFromStepIndex - 1,
+        optional: false,
       },
     });
   }

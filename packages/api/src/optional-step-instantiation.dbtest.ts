@@ -126,7 +126,14 @@ test("direct instantiation snapshots optional omission and preserves sparse temp
     chainLayer: task.chainLayer,
     templateStep: null,
   })));
-  assert.deepEqual(progress, { total: 6, done: 0, position: 1, currentLayer: 1, layerCount: 6 });
+  assert.deepEqual(progress, {
+    total: 6,
+    done: 0,
+    activeStepName: "Implementation",
+    activeStatus: "todo",
+    currentLayer: 1,
+    layerCount: 6,
+  });
 
   const skippedBound = await instantiateDirect(true, true);
   assert.equal(skippedBound.tasks.length, 7);
