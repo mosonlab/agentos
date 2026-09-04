@@ -18,10 +18,18 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 
-import { SERVICE_LABELS as DEPLOY_SERVICE_LABELS } from "./quiet-window-lib.mjs";
 import {
+  generateServiceInventory as generateDeployServiceInventory,
+  resolveRunnerCount as resolveDeployRunnerCount,
+  SERVICE_LABELS as DEPLOY_SERVICE_LABELS,
+} from "./quiet-window-lib.mjs";
+import { resolveServicePlatform } from "./service-platform.mjs";
+import {
+  generateServiceInventory,
   parseSharedEnvironment,
+  resolveRunnerCount,
   SERVICE_LABELS,
+  SERVICE_INVENTORY_ENTRIES,
   SERVICE_INVENTORY,
   resolveServiceInvocation,
   verifyServiceInventory,
@@ -138,7 +146,72 @@ const legacyServiceDefinitions = ({ fixture, home }) => {
 
 test("the wrapper inventory is exactly the loaded production service inventory", () => {
   assert.deepEqual(SERVICE_LABELS, DEPLOY_SERVICE_LABELS);
+  assert.deepEqual(generateServiceInventory(16), generateDeployServiceInventory(16));
   assert.deepEqual(Object.keys(SERVICE_INVENTORY), [...SERVICE_LABELS]);
+});
+
+test("service platform resolution accepts only darwin and linux", () => {
+  assert.equal(resolveServicePlatform({ platform: "darwin", environment: {} }), "darwin");
+  assert.equal(resolveServicePlatform({ platform: "darwin", environment: { AGENTOS_SERVICE_PLATFORM: "linux" } }), "linux");
+  assert.equal(resolveServicePlatform({ platform: "linux", environment: { AGENTOS_SERVICE_PLATFORM: "darwin" } }), "darwin");
+  for (const value of ["", "freebsd", "LINUX"]) {
+    assert.throws(
+      () => resolveServicePlatform({ platform: "darwin", environment: { AGENTOS_SERVICE_PLATFORM: value } }),
+      new RegExp(`service-platform-unsupported:${value}$`, "u"),
+    );
+  }
+  assert.throws(
+    () => resolveServicePlatform({ platform: "freebsd", environment: {} }),
+    /service-platform-unsupported:freebsd/u,
+  );
+});
+
+test("runner inventory is generated in order with ids and systemd names", () => {
+  const expectedLabels = [
+    "com.agentos.api",
+    "com.agentos.inbox",
+    "com.agentos.runner",
+    ...Array.from({ length: 15 }, (_unused, offset) => `com.agentos.runner-${offset + 2}`),
+    "com.agentos.web",
+  ];
+  const generated = generateServiceInventory(16);
+  assert.deepEqual(generated.map(({ label }) => label), expectedLabels);
+  assert.deepEqual(generated.filter(({ runnerId }) => runnerId).map(({ runnerId }) => runnerId), [
+    ...Array.from({ length: 16 }, (_unused, offset) => `runner-${offset + 1}`),
+  ]);
+  assert.deepEqual(generated.map(({ label, unitName }) => unitName), expectedLabels.map((label) => `${label}.service`));
+  assert.deepEqual(resolveRunnerCount({ AGENTOS_RUNNER_COUNT: "16" }), 16);
+  assert.deepEqual(resolveDeployRunnerCount({ AGENTOS_RUNNER_COUNT: "16" }), 16);
+  assert.deepEqual(generateServiceInventory(), SERVICE_INVENTORY_ENTRIES);
+});
+
+test("runner count keeps ten as the default and rejects invalid values", () => {
+  const defaultLabels = [
+    "com.agentos.api",
+    "com.agentos.inbox",
+    "com.agentos.runner",
+    "com.agentos.runner-2",
+    "com.agentos.runner-3",
+    "com.agentos.runner-4",
+    "com.agentos.runner-5",
+    "com.agentos.runner-6",
+    "com.agentos.runner-7",
+    "com.agentos.runner-8",
+    "com.agentos.runner-9",
+    "com.agentos.runner-10",
+    "com.agentos.web",
+  ];
+  assert.deepEqual(SERVICE_LABELS, defaultLabels);
+  for (const value of ["0", "65", "", "3.5", "abc"]) {
+    assert.throws(
+      () => resolveRunnerCount({ AGENTOS_RUNNER_COUNT: value }),
+      new RegExp(`runner-count-invalid:${value}$`, "u"),
+    );
+    assert.throws(
+      () => resolveDeployRunnerCount({ AGENTOS_RUNNER_COUNT: value }),
+      new RegExp(`runner-count-invalid:${value}$`, "u"),
+    );
+  }
 });
 
 test("every service starts from current and receives shared config and release identity", async () => {

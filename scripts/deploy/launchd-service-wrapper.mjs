@@ -13,25 +13,59 @@ import { fileURLToPath } from "node:url";
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const SOURCE_REPOSITORY_ROOT = resolve(SCRIPT_DIR, "../..");
 
+export const DEFAULT_RUNNER_COUNT = 10;
+export const MAX_RUNNER_COUNT = 64;
+
+const validatedRunnerCount = (value) => {
+  const count = typeof value === "number"
+    ? value
+    : typeof value === "string" && /^[0-9]+$/u.test(value)
+      ? Number(value)
+      : NaN;
+  if (!Number.isSafeInteger(count) || count < 1 || count > MAX_RUNNER_COUNT) {
+    throw new Error(`runner-count-invalid:${String(value)}`);
+  }
+  return count;
+};
+
+/** Resolve the configured number of service runners. An unset value retains
+ * the current ten-runner inventory; a configured value is intentionally
+ * strict so every service consumer observes the same inventory. */
+export const resolveRunnerCount = (environment = process.env) => {
+  const configured = environment?.AGENTOS_RUNNER_COUNT;
+  return validatedRunnerCount(configured === undefined ? DEFAULT_RUNNER_COUNT : configured);
+};
+
+const runnerLabelForIndex = (index) => index === 1
+  ? "com.agentos.runner"
+  : `com.agentos.runner-${index}`;
+
+/** Generate the ordered service inventory. This module is copied as a
+ * standalone wrapper artifact, so the equivalent generator is deliberately
+ * re-derived in quiet-window-lib.mjs rather than imported from this file. */
+export const generateServiceInventory = (runnerCount = resolveRunnerCount()) => {
+  const count = validatedRunnerCount(runnerCount);
+  const entries = [
+    { label: "com.agentos.api", runnerId: null },
+    { label: "com.agentos.inbox", runnerId: null },
+    ...Array.from({ length: count }, (_unused, offset) => {
+      const index = offset + 1;
+      return { label: runnerLabelForIndex(index), runnerId: `runner-${index}` };
+    }),
+    { label: "com.agentos.web", runnerId: null },
+  ];
+  return Object.freeze(entries.map((entry) => Object.freeze({
+    ...entry,
+    unitName: `${entry.label}.service`,
+  })));
+};
+
 /** The launchd labels are deliberately duplicated here so this file remains a
  * standalone artifact when it is copied outside the source checkout. Keep the
- * list in lockstep with quiet-window-lib.mjs; the wrapper fixture proves that
- * invariant. */
-export const SERVICE_LABELS = Object.freeze([
-  "com.agentos.api",
-  "com.agentos.inbox",
-  "com.agentos.runner",
-  "com.agentos.runner-2",
-  "com.agentos.runner-3",
-  "com.agentos.runner-4",
-  "com.agentos.runner-5",
-  "com.agentos.runner-6",
-  "com.agentos.runner-7",
-  "com.agentos.runner-8",
-  "com.agentos.runner-9",
-  "com.agentos.runner-10",
-  "com.agentos.web",
-]);
+ * generated inventory in lockstep with quiet-window-lib.mjs; the wrapper
+ * fixture proves that invariant. */
+export const SERVICE_INVENTORY_ENTRIES = generateServiceInventory();
+export const SERVICE_LABELS = Object.freeze(SERVICE_INVENTORY_ENTRIES.map(({ label }) => label));
 
 const runnerIdForLabel = (label) => label === "com.agentos.runner"
   ? "runner-1"
@@ -45,6 +79,7 @@ const definition = (label, entrypoint, workingDirectory = ".", args = []) => Obj
   workingDirectory,
   args: Object.freeze([...args]),
   runnerId: runnerIdForLabel(label),
+  unitName: `${label}.service`,
 });
 
 /** Paths are relative to the release selected by the current pointer. The
@@ -341,7 +376,7 @@ export const verifyServiceInventory = async ({
   start = async () => ({ ok: true }),
   readiness = async () => ({ ok: true }),
 } = {}) => {
-  if (!Array.isArray(labels) || labels.length !== SERVICE_LABELS.length || new Set(labels).size !== labels.length) {
+  if (!Array.isArray(labels) || labels.length !== SERVICE_INVENTORY_ENTRIES.length || new Set(labels).size !== labels.length) {
     throw new Error("service-inventory-invalid");
   }
   const verified = [];

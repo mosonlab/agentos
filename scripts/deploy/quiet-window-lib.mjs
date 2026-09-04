@@ -2,21 +2,53 @@ import { DEPLOY_PHASES, UPGRADE_DEPLOY_PHASES } from "./deploy-phases.mjs";
 
 export const BLOCKING_RUN_STATUSES = Object.freeze(["claimed", "provisioning", "running"]);
 
-export const SERVICE_LABELS = Object.freeze([
-  "com.agentos.api",
-  "com.agentos.inbox",
-  "com.agentos.runner",
-  "com.agentos.runner-2",
-  "com.agentos.runner-3",
-  "com.agentos.runner-4",
-  "com.agentos.runner-5",
-  "com.agentos.runner-6",
-  "com.agentos.runner-7",
-  "com.agentos.runner-8",
-  "com.agentos.runner-9",
-  "com.agentos.runner-10",
-  "com.agentos.web",
-]);
+export const DEFAULT_RUNNER_COUNT = 10;
+export const MAX_RUNNER_COUNT = 64;
+
+const validatedRunnerCount = (value) => {
+  const count = typeof value === "number"
+    ? value
+    : typeof value === "string" && /^[0-9]+$/u.test(value)
+      ? Number(value)
+      : NaN;
+  if (!Number.isSafeInteger(count) || count < 1 || count > MAX_RUNNER_COUNT) {
+    throw new Error(`runner-count-invalid:${String(value)}`);
+  }
+  return count;
+};
+
+/** Resolve the configured number of service runners. Keep this implementation
+ * in lockstep with launchd-service-wrapper.mjs, which is copied as a
+ * standalone artifact and therefore cannot import this module. */
+export const resolveRunnerCount = (environment = process.env) => {
+  const configured = environment?.AGENTOS_RUNNER_COUNT;
+  return validatedRunnerCount(configured === undefined ? DEFAULT_RUNNER_COUNT : configured);
+};
+
+const runnerLabelForIndex = (index) => index === 1
+  ? "com.agentos.runner"
+  : `com.agentos.runner-${index}`;
+
+/** Generate the ordered service inventory consumed by deploy control paths. */
+export const generateServiceInventory = (runnerCount = resolveRunnerCount()) => {
+  const count = validatedRunnerCount(runnerCount);
+  const entries = [
+    { label: "com.agentos.api", runnerId: null },
+    { label: "com.agentos.inbox", runnerId: null },
+    ...Array.from({ length: count }, (_unused, offset) => {
+      const index = offset + 1;
+      return { label: runnerLabelForIndex(index), runnerId: `runner-${index}` };
+    }),
+    { label: "com.agentos.web", runnerId: null },
+  ];
+  return Object.freeze(entries.map((entry) => Object.freeze({
+    ...entry,
+    unitName: `${entry.label}.service`,
+  })));
+};
+
+export const SERVICE_INVENTORY_ENTRIES = generateServiceInventory();
+export const SERVICE_LABELS = Object.freeze(SERVICE_INVENTORY_ENTRIES.map(({ label }) => label));
 
 export class DeployFailure extends Error {
   constructor(reason, detail = "") {
