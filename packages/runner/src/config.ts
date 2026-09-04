@@ -3,6 +3,8 @@ import { cpus, hostname, homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { type BuildInfo, readBuildInfo } from "@anneal/build-info";
+
 import { RUNNER_DEFINITIONS, RUNNER_KINDS } from "./adapters.js";
 import { MAX_HOST_PROOF_SLOTS } from "./host-proof-slots.js";
 import { runnerProxyEnvironment } from "./adapters/environment.js";
@@ -12,6 +14,12 @@ export { runnerProxyEnvironment } from "./adapters/environment.js";
 
 const require = createRequire(import.meta.url);
 const packageMetadata = require("../package.json") as { version: string };
+const buildInfo: BuildInfo = readBuildInfo(import.meta.url);
+
+/** A release runner identifies itself by the commit its dist was built from.
+ * Source and development runners have no stamp, so retain the package version
+ * used by the existing local/test process contract. */
+export const runnerDaemonVersion = (info: BuildInfo): string => info.commit ?? packageMetadata.version;
 
 /** The loopback literal, not `localhost`: the name resolves through DNS and a
  *  hosts file, and this process attaches the runner bearer token to every call
@@ -156,7 +164,7 @@ export const loadRunnerConfig = ({ cpuCount = cpus().length }: { cpuCount?: numb
     apiUrl,
     runnerToken: process.env.RUNNER_TOKEN ?? "",
     runnerId: process.env.RUNNER_ID ?? `${hostname()}-${process.pid}`,
-    daemonVersion: packageMetadata.version,
+    daemonVersion: runnerDaemonVersion(buildInfo),
     pollIntervalMs: Number.parseInt(process.env.RUNNER_POLL_INTERVAL_MS ?? "5000", 10),
     claimMaxLoadAverage,
     leaseSeconds,

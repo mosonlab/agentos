@@ -7,6 +7,8 @@ import { RunStatus, RunnerKind, type PrismaClient } from "@anneal/db";
 import { createApp } from "./test-app.js";
 import { createRunnerRegistry, RUNNER_FORGET_MS } from "./runners.js";
 
+const BUILD_COMMIT = "0123456789abcdef0123456789abcdef01234567";
+
 test("runner online windows use the 30s floor and three poll intervals", () => {
   const registry = createRunnerRegistry();
   const start = new Date("2026-08-17T00:00:00.000Z");
@@ -147,14 +149,15 @@ test("GET /runners is operator-only, includes all backends, and ages a 204 claim
     const app = createApp(makeDatabase());
     assert.equal((await app.request("/runners")).status, 401);
     assert.equal((await app.request("/runners", { headers: { Authorization: "Bearer runners-test-runner" } })).status, 403);
-    assert.equal((await runnerRequest(app, {})).status, 204);
+    assert.equal((await runnerRequest(app, { daemonVersion: BUILD_COMMIT })).status, 204);
     const response = await app.request("/runners", { headers: { Authorization: "Bearer runners-test-operator" } });
     assert.equal(response.status, 200);
-    const body = await response.json() as { checkedAt: string; online: number; total: number; daemons: Array<{ busy: boolean; activeRuns: number }>; backends: Array<{ runner: RunnerKind; cliVersion: string | null }> };
+    const body = await response.json() as { checkedAt: string; online: number; total: number; daemons: Array<{ busy: boolean; activeRuns: number; daemonVersion: string | null }>; backends: Array<{ runner: RunnerKind; cliVersion: string | null }> };
     assert.ok(Date.parse(body.checkedAt));
     assert.equal(body.online, 1);
     assert.equal(body.total, 1);
     assert.deepEqual(body.daemons.map(({ busy, activeRuns }) => ({ busy, activeRuns })), [{ busy: true, activeRuns: 1 }]);
+    assert.deepEqual(body.daemons.map(({ daemonVersion }) => daemonVersion), [BUILD_COMMIT]);
     assert.deepEqual(body.backends.map((backend) => backend.runner).sort(), Object.values(RunnerKind).sort());
     assert.equal(body.backends.find((backend) => backend.runner === RunnerKind.CLAUDE)?.cliVersion, "1.2.3");
     assert.equal(body.backends.find((backend) => backend.runner === RunnerKind.CODEX)?.cliVersion, null);
