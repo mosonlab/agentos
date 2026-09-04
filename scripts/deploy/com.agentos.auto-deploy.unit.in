@@ -1,0 +1,11 @@
+[Unit]
+Description=Anneal quiet-window auto-deploy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=__SERVICE_USER__
+WorkingDirectory=__REPOSITORY_ROOT__
+ExecStart=__NODE_BINARY__ __DEPLOY_SCRIPT__
+__ENVIRONMENT__

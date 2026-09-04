@@ -1,0 +1,19 @@
+[Unit]
+Description=Anneal service __LABEL__
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__SERVICE_USER__
+WorkingDirectory=__REPOSITORY_ROOT__
+ExecStart=__NODE_BINARY__ __WRAPPER_PATH__ __LABEL__
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=__LABEL__
+__ENVIRONMENT__
+
+[Install]
+WantedBy=multi-user.target
