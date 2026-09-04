@@ -86,7 +86,7 @@ balances itself and migrates the template once.
 | `mirror-push.sh` | the local machine | Pushes one exact candidate and one exact baseline into immutable `refs/gate/.../<oid>` cache refs, creating `~/gate/<repo>/mirror.git` on first push, and installs `run-gate.sh` beside it. |
 | `run-gate.sh` | the server | Holds one configured worker-wide execution slot, checks one oid out of its repository's mirror and runs `scripts/merge-gate.sh --expect-head <oid> --master <baseline-oid>` against it. |
 | `remote-gate.sh` | the local machine | One synchronous `ssh` call; returns a bounded per-failing-step worker-log excerpt on FAIL, followed by the verdict line, and the exit code. |
-| `gate-dispatch.sh` | the local machine | Freezes the candidate and integration baseline, then tries the primary worker and fallback worker. Local execution is explicit only. |
+| `gate-dispatch.sh` | the local machine | Freezes the candidate and integration baseline, then tries eligible local slots before the primary and fallback workers. Local execution is explicit only. |
 | `lib.sh` | both | Shared input validation and atomic pid-slot locking. |
 
 The worker hosts one directory per repository, keyed by the origin repository's
@@ -104,10 +104,13 @@ host capacity rather than trying to resize from live CPU or memory readings.
 An explicitly configured primary worker contributes two slots and an explicitly
 configured fallback contributes one. The explicit `--server` form contributes
 one dispatcher slot. The local machine contributes no automatic capacity; it
-adds one slot only for an invocation that passes `--allow-local` or sets
-`AGENTOS_GATE_ALLOW_LOCAL=1`. With no remote configured, that explicit opt-in
-selects a local-only dispatch; with neither remote capacity nor local opt-in the
-dispatcher returns `76` instead of guessing a host.
+adds `AGENTOS_GATE_LOCAL_SLOTS` slots only for an invocation that passes
+`--allow-local` or sets `AGENTOS_GATE_ALLOW_LOCAL=1`. The count defaults to one
+when `AGENTOS_GATE_LOCAL_SLOTS` is unset; configured slots are named
+`local-1` through `local-N` (there is no bare `local` slot). Each dispatch round
+tries eligible local slots before the remote workers. With no remote configured,
+that explicit opt-in selects a local-only dispatch; with neither remote capacity
+nor local opt-in the dispatcher returns `76` instead of guessing a host.
 
 `gate-dispatch.sh` is the way to run a gate when anything else might also be
 running one; set `AGENTOS_WORKSPACE_PATH` to the checkout explicitly:
@@ -120,18 +123,22 @@ AGENTOS_WORKSPACE_PATH="$(git rev-parse --show-toplevel)" AGENTOS_GATE_SERVER=pr
   supplied, the dispatcher fetches origin's current default branch without
   creating a local tracking ref, re-reads `origin HEAD`, and freezes that exact
   oid as the baseline before taking a slot.
-- The primary worker is preferred. It runs `mirror-push.sh` before
-  `remote-gate.sh`, pushing only the frozen candidate and baseline under
-  oid-named cache refs. The local checkout may be detached or single-branch;
-  its incomplete ref namespace is never mirrored and cannot delete worker refs.
+- When local dispatch is enabled, the dispatcher considers `local-1` through
+  `local-N` first. A local slot is eligible only when this worktree is clean at
+  `<oid>`; it runs `scripts/merge-gate.sh` directly in the workspace. A real
+  `PASS`, `FAIL`, or `NOT AUTHORITATIVE` result is final; only absence of a
+  verdict falls through to a remote worker.
+- If no eligible local slot produces a verdict, the primary worker is tried. It
+  runs `mirror-push.sh` before `remote-gate.sh`, pushing only the frozen candidate
+  and baseline under oid-named cache refs. The local checkout may be detached or
+  single-branch; its incomplete ref namespace is never mirrored and cannot
+  delete worker refs.
 - If the primary is offline, its mirror push fails, its SSH connection drops,
-  or both of its slots are busy, the fallback receives the same frozen candidate and
-  baseline. A real `PASS`, `FAIL`, or `NOT AUTHORITATIVE` result is final; only
-  absence of a verdict falls through to another machine. SSH connection setup
-  is bounded at 10 seconds, and a dead established connection is detected by
-  keepalives instead of waiting on the operating-system TCP timeout.
-- The local slot is considered only with explicit opt-in and only when this
-  worktree is clean at `<oid>`.
+  or both of its slots are busy, the fallback receives the same frozen candidate
+  and baseline. A real `PASS`, `FAIL`, or `NOT AUTHORITATIVE` result is final;
+  only absence of a verdict falls through to another machine. SSH connection
+  setup is bounded at 10 seconds, and a dead established connection is detected
+  by keepalives instead of waiting on the operating-system TCP timeout.
 - All usable slots busy: the dispatcher blocks and re-polls (default every 30s,
   for 60 minutes — `GATE_DISPATCH_POLL_SECONDS`,
   `GATE_DISPATCH_TIMEOUT_MINUTES`).
@@ -147,9 +154,10 @@ AGENTOS_WORKSPACE_PATH="$(git rev-parse --show-toplevel)" AGENTOS_GATE_SERVER=pr
   around it exits 76 rather than 75. Waiting for a lock nobody can take is
   waiting for nothing, and reporting it as a full queue hides what to fix.
 
-The dispatcher accounts for `remote-1`, `remote-1-2`, `remote-2`, and optional
-`local` under `~/.cache/gate-dispatch/`, outside any repository because the
-slots belong to the machines. A direct `merge-gate.sh` bypasses that accounting. A direct
+The dispatcher accounts for `remote-1`, `remote-1-2`, `remote-2`, and, when
+local dispatch is enabled, `local-1` through `local-N` under
+`~/.cache/gate-dispatch/`, outside any repository because the slots belong to
+the machines. A direct `merge-gate.sh` bypasses that accounting. A direct
 `remote-gate.sh` bypasses the local lock too, but it cannot exceed worker
 capacity: every installed `run-gate.sh` contends for the worker-wide
 `~/gate/.full-gate.lock` and, only on a capacity-two host,
@@ -301,13 +309,17 @@ default destination. Configure `AGENTOS_GATE_SERVER` for one worker, configure
 `AGENTOS_GATE_FALLBACK_SERVER` for a two-host topology, or pass
 `--server <alias>` for one invocation.
 
-Agent sessions receive a single operator-selected worker only when their runner
+Agent sessions receive a single operator-selected worker when their runner
 daemon is configured with `RUNNER_GATE_SERVER=<ssh-alias>`. The runner validates
 that destination and exposes it to the session as `AGENTOS_GATE_SERVER`, which
-puts `gate-dispatch.sh` into its existing single-server mode. Task secrets cannot
-override this runner-owned choice. An unset `RUNNER_GATE_SERVER` provides no
-remote capacity to a canonical regression step; the operator must configure a
-worker before using that path.
+puts `gate-dispatch.sh` into its existing single-server mode. To contribute local
+capacity, also set `RUNNER_GATE_LOCAL_SLOTS=<positive integer>` on the runner.
+The runner then enables local dispatch and passes the count as
+`AGENTOS_GATE_LOCAL_SLOTS`; local slots are tried before that remote worker. Task
+secrets cannot override either runner-owned choice. If `RUNNER_GATE_LOCAL_SLOTS`
+is unset, the session gets no local capacity. An unset `RUNNER_GATE_SERVER`
+provides no remote capacity to a canonical regression step, but a configured
+local count can still provide an explicit local-only path.
 
 ```
 Host primary-worker
@@ -432,16 +444,17 @@ at its default capacity of one.
 AGENTOS_WORKSPACE_PATH="$(git rev-parse --show-toplevel)" AGENTOS_GATE_SERVER=primary-worker packages/runner/runtime-tools/gate-worker/gate-dispatch.sh <oid>
 ```
 
-That is the whole routine: the dispatcher refreshes the baseline and pushes the
-two exact gate inputs before any remote run. The call is synchronous and holds
-the terminal for the whole gate.
+That is the whole routine: the dispatcher refreshes the baseline, tries an
+eligible local slot when local dispatch is enabled, and pushes the two exact
+gate inputs only before a remote run. The call is synchronous and holds the
+terminal for the whole gate.
 There is no queue file and no daemon by design: the state a queue would need is
 exactly the state that makes a worker something to operate rather than
 something to use, and the callers — agent sessions blocking on their own
-merges — are the backpressure. When all three automatic remote slots are
+merges — are the backpressure. When all usable local and remote slots are
 occupied, every later caller waits and re-polls; requests are not pinned to a
 machine and strict FIFO order is not promised. The first waiter to acquire
-whichever slot frees runs there.
+whichever usable local or remote slot frees runs there.
 
 The database step runs one file per lane, each with a database of its own and
 its own subdirectory of the roots the gate exports. The lane count is not read
