@@ -493,6 +493,16 @@ const installedTargetTrees = async (workspace: string, targets: string[]): Promi
   return manifest;
 };
 
+export const restoreCopyArguments = (
+  source: string,
+  destination: string,
+  operatingSystem: NodeJS.Platform = platform(),
+): string[] => {
+  if (operatingSystem === "darwin") return ["-c", "-R", source, destination];
+  if (operatingSystem === "linux") return ["-a", "--reflink=auto", source, destination];
+  throw new Error(`unsupported dependency-cache platform: ${operatingSystem}`);
+};
+
 const restoreEntry = async (
   run: CommandRunner,
   store: CacheEntryStore,
@@ -505,10 +515,7 @@ const restoreEntry = async (
       if (!target.present) continue;
       const source = store.targetSourcePath(document.key, target.path);
       const destination = assertCacheTargetPath(workspace, target.path);
-      const args = platform() === "darwin"
-        ? ["-c", "-R", source, destination]
-        : ["-a", "--reflink=always", source, destination];
-      await run("/bin/cp", args);
+      await run("/bin/cp", restoreCopyArguments(source, destination));
       await run("/bin/chmod", ["-R", "u+w", destination]);
     }
     const restored = await describeTargetTrees(workspace, document.targets.map(({ path }) => path));

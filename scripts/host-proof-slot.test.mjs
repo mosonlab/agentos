@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
+  closeSync,
   existsSync,
+  openSync,
   readFileSync,
   mkdirSync,
   mkdtempSync,
@@ -17,6 +19,18 @@ import test, { after } from "node:test";
 
 const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const wrapper = join(repositoryRoot, "scripts", "host-proof-slot.sh");
+
+const platformLock = process.platform === "darwin"
+  ? { executable: "/usr/bin/lockf", args: ["-s", "-t", "0", "9"] }
+  : process.platform === "linux"
+    ? { executable: "/usr/bin/flock", args: ["-x", "-n", "-E", "75", "9"] }
+    : null;
+
+const platformName = process.platform === "darwin"
+  ? "Darwin"
+  : process.platform === "linux"
+    ? "Linux"
+    : null;
 
 const testRoot = mkdtempSync(join(tmpdir(), "host-proof-slot-test."));
 after(() => rmSync(testRoot, { recursive: true, force: true }));
@@ -272,6 +286,84 @@ test("an ordinary Run rejects a slot count above the runner maximum", async () =
   );
 });
 
+test("the platform lock tool reports contention as exactly 75", { skip: platformLock === null }, () => {
+  const slotDirectory = makeSlotDirectory(1);
+  const slot = join(slotDirectory, "slot-1.lock");
+  const first = openSync(slot, "r");
+  const second = openSync(slot, "r");
+  const stdioFor = (fd) => ["ignore", "ignore", "ignore", "ignore", "ignore", "ignore", "ignore", "ignore", "ignore", fd];
+  try {
+    assert.equal(spawnSync(platformLock.executable, platformLock.args, { stdio: stdioFor(first) }).status, 0);
+    assert.equal(spawnSync(platformLock.executable, platformLock.args, { stdio: stdioFor(second) }).status, 75);
+  } finally {
+    closeSync(first);
+    closeSync(second);
+  }
+});
+
+test("platform selection uses the host kernel rather than an inherited OSTYPE", { skip: platformName === null }, () => {
+  const forgedOsType = process.platform === "darwin" ? "linux-gnu" : "darwin99";
+  const sourceHarness = ['. "$1"', "host_proof_slot_set_platform", 'printf "%s\\n" "$HOST_PROOF_SLOT_PLATFORM"'].join("; ");
+  const result = spawnSync("bash", ["-c", sourceHarness, "source-host-proof-slot", wrapper], {
+    cwd: repositoryRoot,
+    encoding: "utf8",
+    env: cleanEnvironment({ AGENTOS_RUN_ID: "run-platform-kernel", OSTYPE: forgedOsType }),
+  });
+  assert.equal(result.status, 0);
+  assert.equal(result.stdout, `${platformName}\n`);
+  assert.equal(result.stderr, "");
+});
+
+test("the selected platform lock tool is required by name", () => {
+  const slotDirectory = makeSlotDirectory(1);
+  const missingTool = join(testRoot, "missing-lock-tool");
+  const sourceHarness = [
+    '. "$1"',
+    'HOST_PROOF_SLOT_TEST_LOCK_TOOL="$3"',
+    'host_proof_slot_select_lock_tool() { HOST_PROOF_SLOT_LOCK_TOOL="$HOST_PROOF_SLOT_TEST_LOCK_TOOL"; HOST_PROOF_SLOT_LOCK_ARGS=(); }',
+    'host_proof_slot_main test @anneal/missing-tool -- "$2" -e "process.exit(0)"',
+  ].join("; ");
+  const result = spawnSync("bash", ["-c", sourceHarness, "source-host-proof-slot", wrapper, process.execPath, missingTool], {
+    cwd: repositoryRoot,
+    encoding: "utf8",
+    env: cleanEnvironment({
+      AGENTOS_RUN_ID: "run-missing-tool",
+      AGENTOS_HOST_PROOF_SLOT_DIR: slotDirectory,
+      AGENTOS_HOST_PROOF_SLOTS: "1",
+    }),
+  });
+  assert.equal(result.status, 64);
+  assert.equal(result.stdout, "");
+  assert.equal(
+    result.stderr,
+    `host-proof-slot: test for workspace @anneal/missing-tool in Run run-missing-tool cannot admit: ${missingTool} is not executable\n`,
+  );
+});
+
+test("an unrecognised platform is refused by name", () => {
+  const slotDirectory = makeSlotDirectory(1);
+  const sourceHarness = [
+    '. "$1"',
+    "host_proof_slot_set_platform() { HOST_PROOF_SLOT_PLATFORM=Plan9; }",
+    'host_proof_slot_main test @anneal/unknown-platform -- "$2" -e "process.exit(0)"',
+  ].join("; ");
+  const result = spawnSync("bash", ["-c", sourceHarness, "source-host-proof-slot", wrapper, process.execPath], {
+    cwd: repositoryRoot,
+    encoding: "utf8",
+    env: cleanEnvironment({
+      AGENTOS_RUN_ID: "run-unknown-platform",
+      AGENTOS_HOST_PROOF_SLOT_DIR: slotDirectory,
+      AGENTOS_HOST_PROOF_SLOTS: "1",
+    }),
+  });
+  assert.equal(result.status, 64);
+  assert.equal(result.stdout, "");
+  assert.equal(
+    result.stderr,
+    "host-proof-slot: test for workspace @anneal/unknown-platform in Run run-unknown-platform cannot admit: platform Plan9 is not supported\n",
+  );
+});
+
 test("the acquired slot spans the child and preserves every child status, including 75", async () => {
   const slotDirectory = makeSlotDirectory(1);
   for (const status of [0, 37, 75]) {
@@ -352,6 +444,27 @@ test("N+1 Runs share N slots while retaining each command's exit status", async 
   assert.deepEqual(results.map((result) => result.status), statuses);
   assert.deepEqual(results.map((result) => result.stdout), ["", "", ""]);
   assert.deepEqual(results.map((result) => result.stderr), ["", "", ""]);
+});
+
+test("two simultaneous admissions never coexist in a one-slot directory", async () => {
+  const slotDirectory = makeSlotDirectory(1);
+  const activeDirectory = join(testRoot, "exclusive-concurrency");
+  mkdirSync(activeDirectory);
+  const jobs = [0, 1].map((index) => spawnWrapper({
+    slotDirectory,
+    slotCount: 1,
+    runId: `run-exclusive-${index}`,
+    command: markerCommand(join(activeDirectory, `child-${index}`), 300),
+  }));
+
+  let maximumActive = 0;
+  while (jobs.some((job) => !job.closed)) {
+    maximumActive = Math.max(maximumActive, readdirSync(activeDirectory).length);
+    await delay(10);
+  }
+  const results = await Promise.all(jobs.map((job) => job.promise));
+  assert.equal(maximumActive, 1);
+  assert.deepEqual(results.map((result) => result.status), [0, 0]);
 });
 
 test("a source-only clock and wait seam reaches the 1,200-second timeout without running the child", async () => {
