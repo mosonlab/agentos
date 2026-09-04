@@ -76,8 +76,8 @@ different name.
 Direct and Full Assurance are self-hosted workflows, not facilities the
 Quickstart creates. Their operator supplies and configures every additional
 dependency: the Codex, Claude Code and Pi CLIs and model entitlement required by
-the selected roles; authenticated `gh` for GitHub pull-request creation;
-`GITHUB_READ_TOKEN` for merge-readiness evidence; an SSH-reachable gate worker
+the selected roles; authenticated `gh` for GitHub pull-request creation; the
+required API key `GITHUB_READ_TOKEN`; an SSH-reachable gate worker
 configured through `RUNNER_GATE_SERVER`; and a private GitHub App plus the
 isolated `@anneal/merge-executor` service for the mechanical merge. The public
 [`gate-worker`](runbooks/gate-worker.md) and
