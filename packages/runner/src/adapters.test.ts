@@ -1667,6 +1667,18 @@ test("Codex bare disconnect evidence remains resumable provider history", () => 
   assert.equal(isCodexInRunResumeCandidate(evidence, "thread-1"), true);
 });
 
+test("Codex does not let augmented disconnect wording hide a provider error", () => {
+  const state = parseCodexTranscript([{
+    type: "error",
+    message: "stream disconnected before completion: tls handshake eof\npolicy denied",
+  }]);
+  const evidence = evidenceFromState(state);
+
+  assert.equal(evidence.sawNonReconnectProviderError, true);
+  assert.equal(evidence.firstNonReconnectProviderError, evidence.providerError);
+  assert.equal(isCodexInRunResumeCandidate(evidence, "thread-1"), false);
+});
+
 test("only Codex declares the optional in-Run resume capability", () => {
   assert.equal(typeof adapters.CODEX.isInRunResumeCandidate, "function");
   assert.equal(adapters.CLAUDE.isInRunResumeCandidate, undefined);

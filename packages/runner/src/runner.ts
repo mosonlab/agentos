@@ -255,6 +255,12 @@ export const executeClaim = async (
     return worktreeContainmentViolations.length > 0 ? { worktreeContainmentViolations } : {};
   };
   const now = dependencies.providerResumeNow ?? dependencies.runLeaseClock?.now ?? Date.now;
+  const runLeaseClock = dependencies.runLeaseClock ?? (dependencies.providerResumeNow ? {
+    now,
+    setInterval: (callback: () => void | Promise<void>, intervalMs: number): unknown =>
+      setInterval(() => { void callback(); }, intervalMs),
+    clearInterval: (timer: unknown): void => clearInterval(timer as NodeJS.Timeout),
+  } satisfies RunLeaseClock : undefined);
   const claimStartedAt = new Date(now());
   const runLease = createRunLease<RuntimeHandle>({
     heartbeatIntervalMs: config.heartbeatIntervalMs,
@@ -271,7 +277,7 @@ export const executeClaim = async (
       console.error(`Unable to drain fenced Run ${claim.run.id}: ${errorMessage(error)}`);
     },
     onRenewalError: (error) => { console.error("Run Lease renewal failed", error); },
-    ...(dependencies.runLeaseClock ? { clock: dependencies.runLeaseClock } : {}),
+    ...(runLeaseClock ? { clock: runLeaseClock } : {}),
   });
   let seq = claim.nextEventSeq;
   let pendingEvents: SessionEventPayload[] = [];
@@ -330,7 +336,7 @@ export const executeClaim = async (
         await observeEventFlush(error);
       }
       if (pendingEvents.length === 0 || !openLease.held) break;
-      const remainingMs = openLease.deadline - Date.now();
+      const remainingMs = openLease.deadline - now();
       if (remainingMs <= 0) throw lastError ?? new Error("Event delivery lease expired with events still pending");
       // Reuse the lease's heartbeat cadence instead of introducing a separate
       // retry budget. Its renewal loop continues independently during the wait.
@@ -486,7 +492,7 @@ export const executeClaim = async (
     handle = launchedHandle;
     phase = "EXECUTE";
     const executionStartedAt = handle.startedAt;
-    let executionLastProgressEventAt = executionStartedAt;
+    let executionLastProgressEventAt = handle.lastProgressEventAt;
     await runLease.enterPhase({
       name: "execute",
       evidence: async () => {
@@ -557,6 +563,10 @@ export const executeClaim = async (
       const deadProviderConversationId = rememberProviderConversationId();
       if (!adapter.isInRunResumeCandidate?.(evidence, deadProviderConversationId)
         || deadProviderConversationId === null) break;
+      // A non-held authority here was already adopted from an acknowledged
+      // heartbeat. It cannot authorize a relaunch, so do not spend backoff
+      // time merely to ask the same stopped lease again.
+      if (!runLease.authority.held || budget.refusal !== null) break;
       if (await durableTerminalProductExists()) break;
       if (providerResumeAttempts >= PROVIDER_RESUME_MAX_ATTEMPTS) {
         sink({
@@ -607,11 +617,7 @@ export const executeClaim = async (
       // A fresh adapter state initializes progress to its spawn time. Seed it
       // with the carried Run-level value so merely spawning cannot forgive a
       // stall that began in the previous child.
-      if (resumedHandle.lastProgressEventAt.getTime() === resumedHandle.startedAt.getTime()) {
-        resumedHandle.lastProgressEventAt = executionLastProgressEventAt;
-      } else if (resumedHandle.lastProgressEventAt > executionLastProgressEventAt) {
-        executionLastProgressEventAt = resumedHandle.lastProgressEventAt;
-      }
+      resumedHandle.lastProgressEventAt = executionLastProgressEventAt;
       evidence = await resumedHandle.exit;
       producedOutput = outputTail(evidence);
     }

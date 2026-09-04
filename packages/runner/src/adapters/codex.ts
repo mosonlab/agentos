@@ -36,8 +36,8 @@ import { provisionIsolatedSessionConfig, type SessionConfigOptions } from "./ses
 
 export const CODEX_STARTER_MODEL = "gpt-5.6-sol:medium";
 
-const CODEX_BARE_DISCONNECT = /stream disconnected before completion:/iu;
-const isCodexBareDisconnect = (message: string | null): boolean => CODEX_BARE_DISCONNECT.test(message ?? "");
+const CODEX_BARE_DISCONNECT = /^stream disconnected before completion:[^\r\n]+$/iu;
+const isCodexBareDisconnect = (message: string | null): boolean => CODEX_BARE_DISCONNECT.test(message?.trim() ?? "");
 
 const NON_RESUMABLE_FAILURE_CLASSES = new Set([
   "BINARY_NOT_FOUND",

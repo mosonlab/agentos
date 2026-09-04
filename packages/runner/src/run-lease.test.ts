@@ -208,6 +208,34 @@ test("renewNow returns and adopts a refused authority", async () => {
   }
 });
 
+test("renewNow waits for an older interval round and then sends a fresh renewal", async () => {
+  const clock = new FakeClock();
+  let calls = 0;
+  let releaseFirst!: () => void;
+  const firstPending = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const lease = createLease(clock, async () => {
+    calls += 1;
+    if (calls === 1) await firstPending;
+    return { held: true };
+  });
+  lease.abandonProviderLaunch();
+
+  try {
+    const intervalRound = clock.advanceTo(10);
+    await Promise.resolve();
+    const explicitRound = lease.renewNow();
+    releaseFirst();
+    await intervalRound;
+    const renewal = await explicitRound;
+
+    assert.equal(calls, 2);
+    assert.equal(renewal.accepted, true);
+    assert.deepEqual(renewal.authority, { held: true });
+  } finally {
+    await lease.close();
+  }
+});
+
 test("renewNow marks a transport failure as unacknowledged", async () => {
   const clock = new FakeClock();
   const lease = createLease(clock, async () => { throw new Error("fetch failed"); });

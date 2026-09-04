@@ -218,9 +218,10 @@ export const createRunLease = <ProviderHandle extends object>(
   const remainingLeaseMs = (): number => leaseRenewedAt + options.leaseSeconds * 1_000 - clock.now();
 
   const renewNow = async (): Promise<RunLeaseRenewal> => {
-    // Reuse the same coalescing path as the interval renewal. If an interval
-    // round is already in flight, waiting for it avoids overlapping writes and
-    // still returns the authority that round adopted.
+    // An interval round that was already in flight may have captured evidence
+    // before the caller's relaunch gate. Let it settle, then start a distinct
+    // round so this result is fresh for the decision immediately ahead.
+    if (renewalTask) await renewalTask;
     const accepted = await renew();
     return { authority, remainingLeaseMs: remainingLeaseMs(), accepted };
   };
