@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { DeployFailure } from "./quiet-window-lib.mjs";
+import { DeployFailure, SERVICE_LABELS } from "./quiet-window-lib.mjs";
 import {
   createServiceControl,
   describesStableWrapper,
@@ -98,6 +98,63 @@ test("Darwin control preserves launchctl argv and GUI domain", async () => {
     ["/bin/launchctl", ["print", "gui/501/com.agentos.api"]],
     ["/bin/launchctl", ["print", "gui/501/com.agentos.api"]],
   ]);
+});
+
+test("every Linux inventory label uses the restart, liveness, and boundary argv", async () => {
+  const calls = [];
+  const run = async (program, args) => {
+    calls.push({ program, args });
+    const label = args.at(-1).replace(/\.service$/u, "");
+    if (args[0] === "is-active") return { code: 0, stdout: "active\n", stderr: "" };
+    if (args[0] === "show") return {
+      code: 0,
+      stdout: `/usr/bin/node /srv/shared/bin/agentos-service-wrapper.mjs ${label}\n`,
+      stderr: "",
+    };
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  const control = createServiceControl({ platform: "linux", euid: 0, run });
+
+  for (const label of SERVICE_LABELS) {
+    await control.restart(label);
+    assert.equal(await control.isRunning(label), true);
+    assert.match(await control.describe(label), new RegExp(`${label}$`, "mu"));
+  }
+
+  assert.deepEqual(calls.map(({ program, args }) => [program, args]), SERVICE_LABELS.flatMap((label) => [
+    ["systemctl", ["restart", `${label}.service`]],
+    ["systemctl", ["is-active", `${label}.service`]],
+    ["systemctl", ["show", "-p", "ExecStart", "--value", `${label}.service`]],
+  ]));
+});
+
+test("every Darwin inventory label keeps the launchctl command sequence", async () => {
+  const calls = [];
+  const run = async (program, args) => {
+    calls.push({ program, args });
+    if (args[0] === "print") {
+      const label = args[1].split("/").at(-1);
+      return {
+        code: 0,
+        stdout: `state = running\nprogram = /srv/shared/bin/agentos-service-wrapper.mjs ${label}\n`,
+        stderr: "",
+      };
+    }
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  const control = createServiceControl({ platform: "darwin", uid: 501, run });
+
+  for (const label of SERVICE_LABELS) {
+    await control.restart(label);
+    assert.equal(await control.isRunning(label), true);
+    assert.match(await control.describe(label), new RegExp(`${label}$`, "mu"));
+  }
+
+  assert.deepEqual(calls.map(({ program, args }) => [program, args]), SERVICE_LABELS.flatMap((label) => [
+    ["/bin/launchctl", ["kickstart", "-k", `gui/501/${label}`]],
+    ["/bin/launchctl", ["print", `gui/501/${label}`]],
+    ["/bin/launchctl", ["print", `gui/501/${label}`]],
+  ]));
 });
 
 test("wrapper-boundary proof requires both the stable wrapper and label", () => {

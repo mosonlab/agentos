@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -16,6 +16,7 @@ import {
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import {
@@ -41,6 +42,8 @@ import {
   serviceWrapperPath,
   verifyServicePlistDefinitions,
 } from "./install-launchd.mjs";
+
+const REPOSITORY_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 
 const makeWritable = (path) => {
   if (!existsSync(path)) return;
@@ -183,6 +186,39 @@ test("runner inventory is generated in order with ids and systemd names", () => 
   assert.deepEqual(resolveRunnerCount({ AGENTOS_RUNNER_COUNT: "16" }), 16);
   assert.deepEqual(resolveDeployRunnerCount({ AGENTOS_RUNNER_COUNT: "16" }), 16);
   assert.deepEqual(generateServiceInventory(), SERVICE_INVENTORY_ENTRIES);
+});
+
+test("a configured count drives both runtime inventory modules", () => {
+  const source = [
+    'import { SERVICE_INVENTORY, SERVICE_LABELS as wrapperLabels } from "./scripts/deploy/launchd-service-wrapper.mjs";',
+    'import { SERVICE_LABELS as deployLabels } from "./scripts/deploy/quiet-window-lib.mjs";',
+    "console.log(JSON.stringify({ wrapperLabels, deployLabels, services: Object.values(SERVICE_INVENTORY).map(({ label, runnerId, unitName }) => ({ label, runnerId, unitName })) }));",
+  ].join("\n");
+  const result = spawnSync(process.execPath, ["--input-type=module", "-e", source], {
+    cwd: REPOSITORY_ROOT,
+    env: { ...process.env, AGENTOS_RUNNER_COUNT: "16" },
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const observed = JSON.parse(result.stdout);
+  const expectedLabels = [
+    "com.agentos.api",
+    "com.agentos.inbox",
+    "com.agentos.runner",
+    ...Array.from({ length: 15 }, (_unused, offset) => `com.agentos.runner-${offset + 2}`),
+    "com.agentos.web",
+  ];
+  assert.deepEqual(observed.wrapperLabels, expectedLabels);
+  assert.deepEqual(observed.deployLabels, expectedLabels);
+  assert.equal(observed.services.length, 19);
+  assert.deepEqual(
+    observed.services.filter(({ runnerId }) => runnerId).map(({ runnerId }) => runnerId),
+    Array.from({ length: 16 }, (_unused, offset) => `runner-${offset + 1}`),
+  );
+  assert.deepEqual(
+    observed.services.map(({ label, unitName }) => unitName),
+    expectedLabels.map((label) => `${label}.service`),
+  );
 });
 
 test("runner count keeps ten as the default and rejects invalid values", () => {

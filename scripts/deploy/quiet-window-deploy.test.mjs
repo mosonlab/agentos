@@ -54,6 +54,7 @@ import {
   autoDeployNoticeBody,
   canonicalSyncNoticeRecord,
   canonicalSyncRefusedLines,
+  createDeployHost,
   deployRootFromEnvironment,
 } from "./quiet-window-deploy.mjs";
 
@@ -654,6 +655,48 @@ test("service inventory covers the thirteen production labels", () => {
   assert.equal(SERVICE_LABELS.length, 13);
   assert.equal(SERVICE_LABELS[0], "com.agentos.api");
   assert.equal(SERVICE_LABELS.at(-1), "com.agentos.web");
+});
+
+test("the deploy host restarts and restores every Linux unit in inventory order", async () => {
+  const calls = [];
+  const serviceControl = {
+    platform: "linux",
+    restart: async (label, options) => { calls.push({ label, options }); },
+    isRunning: async () => true,
+    describe: async () => "",
+  };
+  const host = createDeployHost({ serviceControl });
+
+  await host.restartServices();
+  assert.deepEqual(calls.map(({ label }) => label), SERVICE_LABELS);
+  assert.deepEqual(calls.map(({ options }) => options.reason), SERVICE_LABELS.map(() => "service-restart-failed"));
+
+  calls.length = 0;
+  await host.restorePreviousServices();
+  assert.deepEqual(calls.map(({ label }) => label), SERVICE_LABELS);
+  assert.deepEqual(calls.map(({ options }) => options.reason), SERVICE_LABELS.map(() => "previous-service-restore-failed"));
+});
+
+test("a Linux service-control denial aborts restart traversal", async () => {
+  const calls = [];
+  const serviceControl = {
+    platform: "linux",
+    restart: async (label) => {
+      calls.push(label);
+      throw new DeployFailure("service-control-denied", `${label}.service`);
+    },
+    isRunning: async () => true,
+    describe: async () => "",
+  };
+  const host = createDeployHost({ serviceControl });
+
+  await assert.rejects(
+    host.restartServices(),
+    (error) => error instanceof DeployFailure
+      && error.reason === "service-control-denied"
+      && error.detail === "com.agentos.api.service",
+  );
+  assert.deepEqual(calls, ["com.agentos.api"]);
 });
 
 test("quiet-window predicate blocks only active run states", () => {
