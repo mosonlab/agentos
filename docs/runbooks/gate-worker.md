@@ -106,11 +106,12 @@ configured fallback contributes one. The explicit `--server` form contributes
 one dispatcher slot. The local machine contributes no automatic capacity; it
 adds `AGENTOS_GATE_LOCAL_SLOTS` slots only for an invocation that passes
 `--allow-local` or sets `AGENTOS_GATE_ALLOW_LOCAL=1`. The count defaults to one
-when `AGENTOS_GATE_LOCAL_SLOTS` is unset; configured slots are named
-`local-1` through `local-N` (there is no bare `local` slot). Each dispatch round
-tries eligible local slots before the remote workers. With no remote configured,
-that explicit opt-in selects a local-only dispatch; with neither remote capacity
-nor local opt-in the dispatcher returns `76` instead of guessing a host.
+when `AGENTOS_GATE_LOCAL_SLOTS` is unset and is capped at 1024; configured slots
+are named `local-1` through `local-N` (there is no bare `local` slot). Each
+dispatch round tries eligible local slots before the remote workers. With no
+remote configured, that explicit opt-in selects a local-only dispatch; with
+neither remote capacity nor local opt-in the dispatcher returns `76` instead of
+guessing a host.
 
 `gate-dispatch.sh` is the way to run a gate when anything else might also be
 running one; set `AGENTOS_WORKSPACE_PATH` to the checkout explicitly:
@@ -125,9 +126,10 @@ AGENTOS_WORKSPACE_PATH="$(git rev-parse --show-toplevel)" AGENTOS_GATE_SERVER=pr
   oid as the baseline before taking a slot.
 - When local dispatch is enabled, the dispatcher considers `local-1` through
   `local-N` first. A local slot is eligible only when this worktree is clean at
-  `<oid>`; it runs `scripts/merge-gate.sh` directly in the workspace. Once a
-  local slot is acquired, that gate's status is returned directly and no remote
-  worker is tried afterward.
+  `<oid>`; it runs `scripts/merge-gate.sh` directly in the workspace. A local
+  `PASS`, `FAIL`, or `NOT AUTHORITATIVE` result is final. If the local gate
+  produces no verdict, its capacity is retired for the invocation and the
+  dispatcher continues to the configured remote workers.
 - If local execution is ineligible or every local slot is busy or broken, the
   primary worker is tried. It runs `mirror-push.sh` before `remote-gate.sh`,
   pushing only the frozen candidate and baseline under oid-named cache refs. The
@@ -313,11 +315,13 @@ Agent sessions receive a single operator-selected worker when their runner
 daemon is configured with `RUNNER_GATE_SERVER=<ssh-alias>`. The runner validates
 that destination and exposes it to the session as `AGENTOS_GATE_SERVER`, which
 puts `gate-dispatch.sh` into its existing single-server mode. To contribute local
-capacity, also set `RUNNER_GATE_LOCAL_SLOTS=<positive integer>` on the runner.
-The runner then enables local dispatch and passes the count as
-`AGENTOS_GATE_LOCAL_SLOTS`; local slots are tried before that remote worker. Task
-secrets cannot override either runner-owned choice. If `RUNNER_GATE_LOCAL_SLOTS`
-is unset, the session gets no local capacity. An unset `RUNNER_GATE_SERVER`
+capacity, also set
+`RUNNER_GATE_LOCAL_SLOTS=<positive integer, at most 1024>` on the runner. The
+runner then enables local dispatch and passes the count as
+`AGENTOS_GATE_LOCAL_SLOTS`; local slots are tried before that remote worker.
+Task secrets cannot override either runner-owned choice. If
+`RUNNER_GATE_LOCAL_SLOTS` is unset, the session gets no local capacity. An unset
+`RUNNER_GATE_SERVER`
 provides no remote capacity to a canonical regression step, but a configured
 local count can still provide an explicit local-only path.
 

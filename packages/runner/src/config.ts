@@ -17,6 +17,7 @@ const packageMetadata = require("../package.json") as { version: string };
  *  hosts file, and this process attaches the runner bearer token to every call
  *  it makes to that address. */
 export const DEFAULT_API_URL = "http://127.0.0.1:3000";
+export const MAX_GATE_LOCAL_SLOTS = 1024;
 
 export type RunnerKind = "CLAUDE" | "CODEX" | "PI";
 
@@ -112,7 +113,7 @@ export const loadRunnerConfig = ({ cpuCount = cpus().length }: { cpuCount?: numb
   const gateServer = optionalSshDestination("RUNNER_GATE_SERVER", process.env.RUNNER_GATE_SERVER);
   const gateLocalSlots = process.env.RUNNER_GATE_LOCAL_SLOTS === undefined
     ? undefined
-    : positiveInteger("RUNNER_GATE_LOCAL_SLOTS", process.env.RUNNER_GATE_LOCAL_SLOTS);
+    : positiveIntegerAtMost("RUNNER_GATE_LOCAL_SLOTS", process.env.RUNNER_GATE_LOCAL_SLOTS, MAX_GATE_LOCAL_SLOTS);
   const claimMaxLoadAverage = positiveFiniteNumber(
     "RUNNER_CLAIM_MAX_LOAD_AVERAGE",
     process.env.RUNNER_CLAIM_MAX_LOAD_AVERAGE ?? String(cpuCount * 1.5),

@@ -38,11 +38,10 @@
 #
 # A PASS, FAIL or NOT AUTHORITATIVE result stops dispatch. A remote FAIL includes
 # run-gate.sh's bounded per-failing-step worker-log excerpt, which is transported
-# verbatim with the proof line. A remote attempt that
-# produces no verdict (including an ssh drop) is retired for this invocation and
-# the same candidate and baseline are tried on the next worker. No intermediate
-# GATE NOT RUN line is printed on stdout, so a successful fallback still has one
-# unambiguous verdict line.
+# verbatim with the proof line. A local or remote attempt that produces no
+# verdict is retired for this invocation and the same candidate and baseline are
+# tried on the next machine. No intermediate GATE NOT RUN line is printed on
+# stdout, so a successful fallback still has one unambiguous verdict line.
 #
 # When every usable slot is taken, this blocks and re-polls — the caller wanted a
 # verdict, not an errand. It gives up after --timeout-minutes, because a wait
@@ -73,6 +72,7 @@ set -uo pipefail
 # so the only 1 a caller can ever see from it is one the gate itself produced.
 EXIT_USAGE=2
 EXIT_NO_SLOT=75
+MAX_LOCAL_SLOT_COUNT=1024
 
 PRIMARY_SERVER="${AGENTOS_GATE_PRIMARY_SERVER:-}"
 FALLBACK_SERVER="${AGENTOS_GATE_FALLBACK_SERVER:-}"
@@ -179,11 +179,15 @@ case "$LOCAL_SLOT_COUNT" in
   *[1-9]*) ;;
   *) die "AGENTOS_GATE_LOCAL_SLOTS needs a positive number, got: $LOCAL_SLOT_COUNT" ;;
 esac
+LOCAL_SLOT_COUNT_NUM="$(printf '%s\n' "$LOCAL_SLOT_COUNT" | sed 's/^0*//')"
+if [ "${#LOCAL_SLOT_COUNT_NUM}" -gt 4 ] \
+  || { [ "${#LOCAL_SLOT_COUNT_NUM}" -eq 4 ] && [ "$LOCAL_SLOT_COUNT_NUM" -gt "$MAX_LOCAL_SLOT_COUNT" ]; }; then
+  die "AGENTOS_GATE_LOCAL_SLOTS needs a positive number no greater than ${MAX_LOCAL_SLOT_COUNT}, got: $LOCAL_SLOT_COUNT"
+fi
 case "$ALLOW_LOCAL" in 0|1) ;; *) die "AGENTOS_GATE_ALLOW_LOCAL must be 0 or 1, got: $ALLOW_LOCAL" ;; esac
 
 LOCAL_SLOTS=()
 if [ "$ALLOW_LOCAL" -eq 1 ]; then
-  LOCAL_SLOT_COUNT_NUM=$((10#$LOCAL_SLOT_COUNT))
   for ((local_slot_index = 1; local_slot_index <= LOCAL_SLOT_COUNT_NUM; local_slot_index++)); do
     LOCAL_SLOTS+=("local-${local_slot_index}")
   done
@@ -321,15 +325,18 @@ else
   printf ', no remote worker' >&2
 fi
 [ -n "$FALLBACK_SERVER" ] && printf ', fallback %s(1)' "$FALLBACK_SERVER" >&2
-[ "$ALLOW_LOCAL" -eq 1 ] && printf ', local(%s, explicit)' "$LOCAL_SLOT_COUNT" >&2
+[ "$ALLOW_LOCAL" -eq 1 ] && printf ', local(%s, explicit)' "$LOCAL_SLOT_COUNT_NUM" >&2
 printf ', poll %ss, timeout %smin\n' "$POLL_SECONDS" "$TIMEOUT_MINUTES" >&2
 printf 'gate-dispatch: baseline %s%s\n' "$MASTER_OID" "${DEFAULT_REF:+ (${DEFAULT_REF})}" >&2
 
 # --- dispatch ----------------------------------------------------------------
 
+LOCAL_OUTPUT=""
+LOCAL_STATUS="$GATE_EXIT_NO_VERDICT"
 run_local() {
   printf 'gate-dispatch: running in the local slot\n' >&2
-  ( cd "$REPO_ROOT" && bash scripts/merge-gate.sh --expect-head "$OID" --master "$MASTER_OID" )
+  LOCAL_OUTPUT="$(cd "$REPO_ROOT" && bash scripts/merge-gate.sh --expect-head "$OID" --master "$MASTER_OID")"
+  LOCAL_STATUS=$?
 }
 
 REMOTE_OUTPUT=""
@@ -369,6 +376,7 @@ FIRST=1
 # be a lie even if that round happened to find only busy slots.
 BROKEN_EVER=""
 UNAVAILABLE_EVER=""
+LOCAL_DISABLED=0
 PRIMARY_DISABLED=0
 FALLBACK_DISABLED=0
 if [ -z "$PRIMARY_SERVER" ] && ! local_eligible; then
@@ -386,12 +394,24 @@ while :; do
 
   # The local machine is never used automatically. Opting in makes its slots
   # the first capacity tried for this invocation only.
-  if [ "$ALLOW_LOCAL" -eq 1 ] && local_eligible; then
+  if [ "$ALLOW_LOCAL" -eq 1 ] && [ "$LOCAL_DISABLED" -eq 0 ] && local_eligible; then
     for local_slot in "${LOCAL_SLOTS[@]}"; do
       outcome=0
       try_slot "$local_slot" || outcome=$?
       case "$outcome" in
-        0) run_local; exit $? ;;
+        0)
+          run_local
+          if gate_verdict_is_judgement "$LOCAL_STATUS"; then
+            [ -n "$LOCAL_OUTPUT" ] && printf '%s\n' "$LOCAL_OUTPUT"
+            exit "$LOCAL_STATUS"
+          fi
+          printf 'gate-dispatch: local produced no verdict (exit %s); retiring local capacity and trying remaining capacity\n' "$LOCAL_STATUS" >&2
+          [ -n "$LOCAL_OUTPUT" ] && printf 'gate-dispatch: local said: %s\n' "$LOCAL_OUTPUT" >&2
+          release_slot
+          LOCAL_DISABLED=1
+          UNAVAILABLE_EVER="${UNAVAILABLE_EVER} local"
+          break
+          ;;
         1) round_busy=$(( round_busy + 1 )) ;;
         *) round_broken="${round_broken} ${local_slot}" ;;
       esac

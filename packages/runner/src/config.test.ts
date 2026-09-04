@@ -220,7 +220,7 @@ test("the runner accepts only a safe operator-selected gate destination", () => 
   }
 });
 
-test("the runner accepts only a positive local gate slot count", () => {
+test("the runner accepts only a bounded positive local gate slot count", () => {
   const previous = process.env.RUNNER_GATE_LOCAL_SLOTS;
   try {
     delete process.env.RUNNER_GATE_LOCAL_SLOTS;
@@ -231,9 +231,9 @@ test("the runner accepts only a positive local gate slot count", () => {
       assert.equal(loadRunnerConfig().gateLocalSlots, expected);
     }
 
-    for (const raw of ["", "0", "-1", "1.5", "2slots", " 2", "2 ", "9007199254740992"]) {
+    for (const raw of ["", "0", "-1", "1.5", "2slots", " 2", "2 ", "1025", "9007199254740992"]) {
       process.env.RUNNER_GATE_LOCAL_SLOTS = raw;
-      assert.throws(loadRunnerConfig, /RUNNER_GATE_LOCAL_SLOTS must be a positive integer/u);
+      assert.throws(loadRunnerConfig, /RUNNER_GATE_LOCAL_SLOTS must be a positive integer no greater than 1024/u);
     }
   } finally {
     if (previous === undefined) delete process.env.RUNNER_GATE_LOCAL_SLOTS;
