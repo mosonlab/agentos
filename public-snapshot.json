@@ -125,6 +125,7 @@
     { "glob": "scripts/deploy/*.unit.in", "purpose": "quiet-window systemd service definition templates" },
     { "glob": "scripts/deploy/*.timer.in", "purpose": "quiet-window systemd timer definition template" },
     { "glob": "scripts/deploy/service-platform.sh", "purpose": "shared service-platform resolver for shell deployment tools" },
+    { "glob": "scripts/deploy/fixtures/darwin-9a52c6ad-baseline.json", "purpose": "frozen Darwin launchd compatibility baseline for cross-platform deployment regressions" },
     { "glob": "scripts/fixtures/local-api-origin-cases.json", "purpose": "shared local API destination policy table" },
     { "glob": "scripts/fixtures/onboarding-remote-cases.json", "purpose": "shared repository remote policy table" },
     { "glob": "scripts/gate-worker/bench-dbtest-concurrency.sh", "purpose": "gate worker: dbtest concurrency benchmark over one fixed commit" },
