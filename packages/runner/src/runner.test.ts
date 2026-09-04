@@ -9,19 +9,24 @@ import { test } from "node:test";
 
 import type { RunOutcome, RunOutputEvidence } from "@anneal/db";
 
-import { adapters, buildPrompt, type CliAdapter } from "./adapters.js";
+import { adapters, buildPrompt, type AdapterEvent, type CliAdapter, type ExitEvidence, type RuntimeHandle } from "./adapters.js";
 import type { ClaimedTask, ControlPlane } from "./api.js";
 import type { RunnerConfig } from "./config.js";
 import {
   cliAvailabilityHeartbeatSchedule,
   executeClaim as executeClaimProduction,
+  PROVIDER_RESUME_BACKOFF_CEILING_MS,
+  PROVIDER_RESUME_MAX_ATTEMPTS,
+  PROVIDER_RESUME_MIN_LEASE_TTL_MS,
+  providerDisconnectResumeInput,
   reportCliAvailabilityHeartbeat as reportCliAvailabilityHeartbeatProduction,
   runStartupPreflight as runStartupPreflightProduction,
 } from "./runner.js";
 import {
   createControlPlaneDouble, createRoutedControlPlaneDouble, envelopeOf, failureReasonOf,
-  type ControlPlaneFetchHandler,
+  type ControlPlaneFetchHandler, type ControlPlaneOverrides,
 } from "./test-control-plane.js";
+import type { RunLeaseClock } from "./run-lease.js";
 import {
   cleanupAgentScratch, materializeRuntimeTools, provisionSessionConfig, type AgentScratch,
 } from "./workspace.js";
@@ -1269,6 +1274,652 @@ const codexOnly = (workspaceRoot: string, root: string, codexBinary: string): Ru
   home: root,
   path: process.env.PATH ?? "/usr/bin:/bin",
   binaries: { CLAUDE: join(root, "no-claude-here"), CODEX: codexBinary, PI: join(root, "no-pi-here") },
+});
+
+const codexResumeClaim = (remoteUrl: string, root: string): ClaimedTask => ({
+  ...agentClaim,
+  runner: "CODEX",
+  repo: { ...mechanicalClaim.repo, remoteUrl, defaultBranch: "master" },
+  agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+  run: {
+    ...agentClaim.run,
+    model: "gpt-5.6-sol",
+    requiresCommit: false,
+    opensPullRequest: false,
+    maxRunsPerTask: 3,
+  },
+  session: testSession(root),
+});
+
+const reconnectEvidence = (overrides: Partial<ExitEvidence> = {}): ExitEvidence => ({
+  exitCode: 0,
+  signal: null,
+  terminalEventSeen: false,
+  terminalSuccess: false,
+  terminationReason: null,
+  finalOutput: null,
+  providerError: "Reconnecting... 3/5 (stream disconnected before completion: tls handshake eof)",
+  sawNonReconnectProviderError: false,
+  firstNonReconnectProviderError: null,
+  stdout: "",
+  stderr: "",
+  ...overrides,
+});
+
+const successfulResumeEvidence = (overrides: Partial<ExitEvidence> = {}): ExitEvidence => ({
+  exitCode: 0,
+  signal: null,
+  terminalEventSeen: true,
+  terminalSuccess: true,
+  terminationReason: null,
+  finalOutput: "resumed output",
+  providerError: null,
+  sawNonReconnectProviderError: false,
+  firstNonReconnectProviderError: null,
+  stdout: "",
+  stderr: "",
+  ...overrides,
+});
+
+type PlannedResumeChild = {
+  evidence: ExitEvidence;
+  providerConversationId: string | null;
+  startedAt?: Date;
+  event?: AdapterEvent;
+  exit?: Promise<ExitEvidence>;
+};
+
+type ResumeCall = {
+  providerConversationId: string;
+  input: string;
+};
+
+const fakeRuntimeHandle = (
+  claim: ClaimedTask,
+  child: PlannedResumeChild,
+): RuntimeHandle => {
+  const startedAt = child.startedAt ?? new Date();
+  return {
+    runId: claim.run.id,
+    runner: claim.runner,
+    child: null as never,
+    pid: null,
+    startedAt,
+    lastProcessAliveAt: startedAt,
+    lastProgressEventAt: startedAt,
+    inFlightTool: null,
+    providerConversationId: child.providerConversationId,
+    terminalEventSeen: child.evidence.terminalEventSeen,
+    terminalSuccess: child.evidence.terminalSuccess,
+    terminationReason: child.evidence.terminationReason,
+    sawError: child.evidence.providerError !== null,
+    providerError: child.evidence.providerError,
+    sawNonReconnectProviderError: child.evidence.sawNonReconnectProviderError ?? false,
+    firstNonReconnectProviderError: child.evidence.firstNonReconnectProviderError ?? null,
+    providerState: null,
+    finalOutput: child.evidence.finalOutput,
+    stdout: child.evidence.stdout,
+    stderr: child.evidence.stderr,
+    exit: child.exit ?? Promise.resolve(child.evidence),
+  };
+};
+
+const fakeCodexAdapter = (
+  claim: ClaimedTask,
+  planned: readonly PlannedResumeChild[],
+  resumeCalls: ResumeCall[],
+  options: {
+    onLaunch?: (handle: RuntimeHandle, resumed: boolean) => void;
+    heartbeat?: (handle: RuntimeHandle) => Promise<{
+      processAlive: boolean;
+      lastProcessAliveAt: Date;
+      lastProgressEventAt: Date;
+      inFlightTool: null;
+    }>;
+  } = {},
+): CliAdapter => {
+  let index = 0;
+  const launch = async (
+    sink: (event: AdapterEvent) => void,
+    resumed: boolean,
+  ): Promise<RuntimeHandle> => {
+    const child = planned[index++];
+    if (!child) throw new Error(`fake Codex launch ${index} was not planned`);
+    const handle = fakeRuntimeHandle(claim, child);
+    if (child.event) sink(child.event);
+    options.onLaunch?.(handle, resumed);
+    return handle;
+  };
+  return {
+    ...adapters.CODEX,
+    preflight: async () => ({ ok: true, cliVersion: "test", authMode: "test", capabilities: {} }),
+    start: async (_spec, sink) => launch(sink, false),
+    resume: async (spec, sink) => {
+      resumeCalls.push({ providerConversationId: spec.providerConversationId, input: spec.input });
+      return launch(sink, true);
+    },
+    heartbeat: options.heartbeat ?? (async (handle) => ({
+      processAlive: false,
+      lastProcessAliveAt: handle.lastProcessAliveAt,
+      lastProgressEventAt: handle.lastProgressEventAt,
+      inFlightTool: null,
+    })),
+    kill: async (handle, reason) => {
+      handle.terminationReason = reason;
+      return { signal: "SIGTERM", processAlive: false };
+    },
+  };
+};
+
+const executeCodexResumeScenario = async (
+  root: string,
+  remote: string,
+  planned: readonly PlannedResumeChild[],
+  options: {
+    claim?: ClaimedTask;
+    controlPlaneOverrides?: ControlPlaneOverrides;
+    providerResumeBackoff?: (attempt: number) => Promise<void>;
+    providerResumeNow?: () => number;
+    runLeaseClock?: RunLeaseClock;
+    adapter?: (claim: ClaimedTask, resumeCalls: ResumeCall[]) => CliAdapter;
+  } = {},
+): Promise<{ claim: ClaimedTask; controlPlane: ReturnType<typeof createControlPlaneDouble>; resumeCalls: ResumeCall[] }> => {
+  const claim = options.claim ?? codexResumeClaim(remote, root);
+  const controlPlane = createControlPlaneDouble(options.controlPlaneOverrides);
+  const resumeCalls: ResumeCall[] = [];
+  const adapter = options.adapter?.(claim, resumeCalls) ?? fakeCodexAdapter(claim, planned, resumeCalls);
+  await executeClaimProduction({
+    ...codexOnly(join(root, "workspaces"), root, join(root, "codex-must-not-start")),
+    failedWorkspaceRetention: 0,
+  }, claim, {
+    adapter,
+    controlPlane: controlPlane.controlPlane,
+    materializeRuntimeTools: async () => undefined,
+    provisionSessionConfig: async () => undefined,
+    ...(options.providerResumeBackoff ? { providerResumeBackoff: options.providerResumeBackoff } : {}),
+    ...(options.providerResumeNow ? { providerResumeNow: options.providerResumeNow } : {}),
+    ...(options.runLeaseClock ? { runLeaseClock: options.runLeaseClock } : {}),
+  });
+  return { claim, controlPlane, resumeCalls };
+};
+
+class ResumeFakeClock implements RunLeaseClock {
+  time = Date.now();
+  readonly intervals = new Set<{ callback: () => void | Promise<void>; intervalMs: number; nextAt: number }>();
+
+  now = (): number => this.time;
+
+  setInterval = (callback: () => void | Promise<void>, intervalMs: number): unknown => {
+    const timer = { callback, intervalMs, nextAt: this.time + intervalMs };
+    this.intervals.add(timer);
+    return timer;
+  };
+
+  clearInterval = (timer: unknown): void => {
+    this.intervals.delete(timer as { callback: () => void | Promise<void>; intervalMs: number; nextAt: number });
+  };
+
+  async advanceBy(deltaMs: number): Promise<void> {
+    const target = this.time + deltaMs;
+    while (true) {
+      const nextAt = this.intervals.size === 0
+        ? Number.POSITIVE_INFINITY
+        : Math.min(...[...this.intervals].map((timer) => timer.nextAt));
+      if (nextAt > target) break;
+      this.time = nextAt;
+      const due = [...this.intervals].filter((timer) => timer.nextAt === nextAt);
+      for (const timer of due) {
+        timer.nextAt += timer.intervalMs;
+        await timer.callback();
+      }
+    }
+    this.time = target;
+  }
+}
+
+test("a qualifying Codex disconnect resumes once with the continuation input", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-codex-in-run-resume-success-"));
+  try {
+    const remote = await seedRemote(root);
+    const continuation = providerDisconnectResumeInput();
+    const firstEvidence = reconnectEvidence();
+    const { controlPlane, resumeCalls } = await executeCodexResumeScenario(root, remote, [
+      { evidence: firstEvidence, providerConversationId: "thread-resume" },
+      { evidence: successfulResumeEvidence(), providerConversationId: null },
+    ], { providerResumeBackoff: async () => undefined });
+
+    assert.equal(resumeCalls.length, 1);
+    assert.deepEqual(resumeCalls[0], {
+      providerConversationId: "thread-resume",
+      input: continuation,
+    });
+    assert.equal(controlPlane.starts.length, 1, "resuming a child must not start a second session");
+    assert.equal(controlPlane.completions.at(-1)?.outcome.case, "succeeded");
+    assert.equal(
+      controlPlane.eventBatches.flat().filter(({ type }) => type === "PROVIDER_RESUME_EXHAUSTED").length,
+      0,
+    );
+    const started = controlPlane.eventBatches.flat().find(({ type }) => type === "PROVIDER_RESUME_STARTED");
+    assert.deepEqual(started?.payload, {
+      attempt: 1,
+      cap: PROVIDER_RESUME_MAX_ATTEMPTS,
+      providerConversationId: "thread-resume",
+      backoffMs: 0,
+      evidence: {
+        exitCode: firstEvidence.exitCode,
+        signal: firstEvidence.signal,
+        terminalEventSeen: firstEvidence.terminalEventSeen,
+        terminalSuccess: firstEvidence.terminalSuccess,
+        terminationReason: firstEvidence.terminationReason,
+        finalOutputTail: null,
+        providerErrorTail: firstEvidence.providerError,
+        stdoutTail: null,
+        stderrTail: null,
+      },
+    });
+  } finally {
+    await cleanupTestSession(root);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("three Codex resume attempts exhaust on the fourth disconnect and preserve its failure class", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-codex-in-run-resume-exhausted-"));
+  try {
+    const remote = await seedRemote(root);
+    const fourthEvidence = reconnectEvidence({
+      providerError: "Reconnecting... 5/5 (stream disconnected before completion: tls handshake eof)",
+    });
+    const { controlPlane, resumeCalls } = await executeCodexResumeScenario(root, remote, [
+      { evidence: reconnectEvidence(), providerConversationId: "thread-resume" },
+      { evidence: reconnectEvidence(), providerConversationId: null },
+      { evidence: reconnectEvidence(), providerConversationId: null },
+      { evidence: fourthEvidence, providerConversationId: null },
+    ], { providerResumeBackoff: async () => undefined });
+
+    assert.equal(resumeCalls.length, PROVIDER_RESUME_MAX_ATTEMPTS);
+    const exhausted = controlPlane.eventBatches.flat().filter(({ type }) => type === "PROVIDER_RESUME_EXHAUSTED");
+    assert.equal(exhausted.length, 1);
+    assert.equal(exhausted[0]?.payload.attempt, PROVIDER_RESUME_MAX_ATTEMPTS + 1);
+    assert.equal(exhausted[0]?.payload.cap, PROVIDER_RESUME_MAX_ATTEMPTS);
+    const completion = controlPlane.completions.at(-1);
+    assert.equal(completion?.outcome.case, "provider-failure", JSON.stringify(completion));
+    const expectedClass = adapters.CODEX.classifyError(fourthEvidence).failureClass;
+    assert.equal(envelopeOf(completion?.outcome).runnerClass, expectedClass);
+
+    // The fourth evidence is classified independently of whether the optional
+    // Codex capability is exposed; the resume loop must not alter the verdict.
+    const { isInRunResumeCandidate: _capability, ...withoutCapability } = adapters.CODEX;
+    assert.equal(withoutCapability.classifyError(fourthEvidence).failureClass, expectedClass);
+  } finally {
+    await cleanupTestSession(root);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+type NoResumeCase = {
+  name: string;
+  evidence: ExitEvidence;
+  providerConversationId?: string | null;
+  withoutCapability?: boolean;
+};
+
+const noResumeCases: NoResumeCase[] = [
+  {
+    name: "an authentication failure",
+    evidence: reconnectEvidence({ exitCode: 1, providerError: "not logged in" }),
+  },
+  {
+    name: "a missing binary exit",
+    evidence: reconnectEvidence({ exitCode: 127, stderr: "codex: command not found" }),
+  },
+  {
+    name: "a terminal event",
+    evidence: reconnectEvidence({ terminalEventSeen: true, terminalSuccess: false }),
+  },
+  {
+    name: "a runner termination reason",
+    evidence: reconnectEvidence({ terminationReason: "walltime budget exceeded" }),
+  },
+  {
+    name: "a missing provider conversation id",
+    evidence: reconnectEvidence(),
+    providerConversationId: null,
+  },
+  {
+    name: "an adapter without the optional capability",
+    evidence: reconnectEvidence(),
+    withoutCapability: true,
+  },
+];
+
+for (const noResumeCase of noResumeCases) {
+  test(`a Codex resume is not attempted for ${noResumeCase.name}`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "runner-codex-in-run-resume-refused-"));
+    try {
+      const remote = await seedRemote(root);
+      const { controlPlane, resumeCalls } = await executeCodexResumeScenario(root, remote, [{
+        evidence: noResumeCase.evidence,
+        providerConversationId: noResumeCase.providerConversationId === undefined
+          ? "thread-resume"
+          : noResumeCase.providerConversationId,
+      }], {
+        providerResumeBackoff: async () => assert.fail("a disqualified exit must not wait before resuming"),
+        ...(noResumeCase.withoutCapability ? {
+          adapter: (claim, calls) => {
+            const { isInRunResumeCandidate: _capability, ...adapter } = fakeCodexAdapter(claim, [{
+              evidence: noResumeCase.evidence,
+              providerConversationId: noResumeCase.providerConversationId === undefined
+                ? "thread-resume"
+                : noResumeCase.providerConversationId,
+            }], calls);
+            return adapter;
+          },
+        } : {}),
+      });
+
+      assert.equal(resumeCalls.length, 0);
+      assert.equal(
+        controlPlane.eventBatches.flat().some(({ type }) => type === "PROVIDER_RESUME_STARTED"),
+        false,
+      );
+      assert.equal(controlPlane.completions.at(-1)?.outcome.case, "provider-failure");
+    } finally {
+      await cleanupTestSession(root);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
+
+test("Codex resume backoff uses attempts one, two, and three within the seven-second ceiling", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-codex-in-run-resume-backoff-"));
+  const clock = new ResumeFakeClock();
+  try {
+    const remote = await seedRemote(root);
+    const waits: number[] = [];
+    const relaunchTimes: number[] = [];
+    const planned = [
+      { evidence: reconnectEvidence(), providerConversationId: "thread-resume" },
+      { evidence: reconnectEvidence(), providerConversationId: null },
+      { evidence: reconnectEvidence(), providerConversationId: null },
+      { evidence: reconnectEvidence(), providerConversationId: null },
+    ] as const;
+    const { controlPlane, resumeCalls } = await executeCodexResumeScenario(root, remote, planned, {
+      providerResumeNow: clock.now,
+      runLeaseClock: clock,
+      providerResumeBackoff: async (attempt) => {
+        waits.push(attempt);
+        await clock.advanceBy([1_000, 2_000, 4_000][attempt - 1]!);
+      },
+      adapter: (claim, calls) => fakeCodexAdapter(claim, planned, calls, {
+        onLaunch: (_handle, resumed) => { if (resumed) relaunchTimes.push(clock.now()); },
+      }),
+    });
+
+    assert.deepEqual(waits, [1, 2, 3]);
+    assert.equal(resumeCalls.length, PROVIDER_RESUME_MAX_ATTEMPTS);
+    assert.deepEqual(relaunchTimes.map((time) => time - (relaunchTimes[0]! - 1_000)), [1_000, 3_000, 7_000]);
+    assert.ok(
+      relaunchTimes.at(-1)! - (relaunchTimes[0]! - 1_000) <= PROVIDER_RESUME_BACKOFF_CEILING_MS,
+      "resume backoff exceeded the declared ceiling",
+    );
+    const started = controlPlane.eventBatches.flat().filter(({ type }) => type === "PROVIDER_RESUME_STARTED");
+    assert.deepEqual(started.map((event) => event.payload.backoffMs), [1_000, 2_000, 4_000]);
+  } finally {
+    await cleanupTestSession(root);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a lease with fifteen seconds remaining does not relaunch a disconnected provider", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-codex-in-run-resume-ttl-floor-"));
+  const clock = new ResumeFakeClock();
+  try {
+    const remote = await seedRemote(root);
+    const { controlPlane, resumeCalls } = await executeCodexResumeScenario(root, remote, [{
+      evidence: reconnectEvidence(),
+      providerConversationId: "thread-resume",
+    }], {
+      providerResumeNow: clock.now,
+      runLeaseClock: clock,
+      providerResumeBackoff: async () => { await clock.advanceBy(45_000); },
+    });
+
+    assert.equal(resumeCalls.length, 0);
+    assert.equal(
+      controlPlane.eventBatches.flat().some(({ type }) => type === "PROVIDER_RESUME_STARTED"),
+      false,
+    );
+    assert.equal(controlPlane.completions.at(-1)?.outcome.case, "provider-failure");
+    assert.ok(PROVIDER_RESUME_MIN_LEASE_TTL_MS > 0);
+  } finally {
+    await cleanupTestSession(root);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a refused or unacknowledged renewal never relaunches a disconnected provider", async () => {
+  for (const mode of ["refused", "unacknowledged"] as const) {
+    const root = await mkdtemp(join(tmpdir(), `runner-codex-in-run-resume-${mode}-`));
+    try {
+      const remote = await seedRemote(root);
+      let heartbeatCalls = 0;
+      const result = await executeCodexResumeScenario(root, remote, [{
+        evidence: reconnectEvidence(),
+        providerConversationId: "thread-resume",
+      }], {
+        providerResumeBackoff: async () => undefined,
+        controlPlaneOverrides: {
+          heartbeat: async () => {
+            heartbeatCalls += 1;
+            if (mode === "unacknowledged") throw new Error("renewal unavailable");
+            return { held: false, reason: "revoked" };
+          },
+        },
+      });
+
+      assert.equal(result.resumeCalls.length, 0, `${mode} renewal must block relaunch`);
+      // A refused renewal ends the lease immediately. A transport error leaves
+      // the cached authority held, so the unchanged deliver-phase checkpoint
+      // performs its usual second attempt while settling the failure.
+      assert.equal(heartbeatCalls, mode === "refused" ? 1 : 2, `${mode} gate should perform an explicit renewal before stopping`);
+      assert.equal(result.controlPlane.eventBatches.flat().some(({ type }) => type === "PROVIDER_RESUME_STARTED"), false);
+      if (mode === "unacknowledged") {
+        assert.equal(result.controlPlane.completions.at(-1)?.outcome.case, "provider-failure");
+      } else {
+        assert.equal(result.controlPlane.completions.length, 0, "revoked authority follows the existing lease-loss path");
+      }
+    } finally {
+      await cleanupTestSession(root);
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("cancellation observed during resume backoff ends the Run without another child", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-codex-in-run-resume-cancel-"));
+  const clock = new ResumeFakeClock();
+  try {
+    const remote = await seedRemote(root);
+    let cancellationReady = false;
+    const acknowledgements: string[] = [];
+    const result = await executeCodexResumeScenario(root, remote, [{
+      evidence: reconnectEvidence(),
+      providerConversationId: "thread-resume",
+    }], {
+      providerResumeNow: clock.now,
+      runLeaseClock: clock,
+      providerResumeBackoff: async () => {
+        cancellationReady = true;
+        await clock.advanceBy(1_000);
+      },
+      controlPlaneOverrides: {
+        heartbeat: async () => cancellationReady
+          ? {
+            held: false,
+            reason: "cancelled",
+            request: { requestId: "resume-cancel", reason: "operator stop", requestedAt: new Date(0).toISOString() },
+          }
+          : { held: true },
+        acknowledgeCancellation: async (request) => { acknowledgements.push(request.requestId); },
+      },
+    });
+
+    assert.equal(result.resumeCalls.length, 0);
+    assert.deepEqual(acknowledgements, ["resume-cancel"]);
+    assert.equal(result.controlPlane.completions.length, 0, "cancellation follows the existing cancellation path");
+  } finally {
+    await cleanupTestSession(root);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a resumed Codex child carries one session id through queued events and remediation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-codex-in-run-resume-session-id-"));
+  try {
+    const remote = await seedRemote(root);
+    const claim = {
+      ...codexResumeClaim(remote, root),
+      task: {
+        ...codexResumeClaim(remote, root).task,
+        templateStep: {
+          name: "Implementation",
+          outputKind: "implementation",
+          provisionDependencies: true,
+          taskTemplate: { name: "implementation-workflow" },
+        },
+      },
+    };
+    const absent: RunOutputEvidence = {
+      satisfaction: { case: "absent", outputKind: "implementation", remediable: true },
+      prHandoff: { case: "not-a-pr-delivery" },
+    };
+    const delivered: RunOutputEvidence = {
+      satisfaction: { case: "delivered", output: { kind: "implementation", commitSha: null } },
+      prHandoff: { case: "not-a-pr-delivery" },
+    };
+    let outputStatusReads = 0;
+    const emittedIds: Array<string | null | undefined> = [];
+    let releaseFirstEmit!: () => void;
+    const firstEmitBlocked = new Promise<void>((resolve) => { releaseFirstEmit = resolve; });
+    const planned = [
+      {
+        evidence: reconnectEvidence(),
+        providerConversationId: "thread-session-id",
+        event: { source: "CODEX", type: "MODEL_TEXT", payload: { text: "queued before relaunch" } },
+      },
+      { evidence: successfulResumeEvidence(), providerConversationId: null },
+      { evidence: successfulResumeEvidence({ finalOutput: "remediation complete" }), providerConversationId: null },
+    ] as const;
+    const { controlPlane, resumeCalls } = await executeCodexResumeScenario(root, remote, planned, {
+      claim,
+      providerResumeBackoff: async () => undefined,
+      controlPlaneOverrides: {
+        emit: async (_events, providerConversationId) => {
+          emittedIds.push(providerConversationId);
+          if (emittedIds.length === 1) await firstEmitBlocked;
+        },
+        outputStatus: async () => {
+          outputStatusReads += 1;
+          return outputStatusReads >= 3 ? delivered : absent;
+        },
+      },
+      adapter: (adapterClaim, calls) => fakeCodexAdapter(adapterClaim, planned, calls, {
+        onLaunch: (_handle, resumed) => { if (resumed) releaseFirstEmit(); },
+      }),
+    });
+
+    assert.equal(controlPlane.starts.length, 1, "a resume and remediation share one session.start");
+    assert.equal(resumeCalls.length, 2, "the second resume is output remediation");
+    assert.deepEqual(resumeCalls.map(({ providerConversationId }) => providerConversationId), [
+      "thread-session-id",
+      "thread-session-id",
+    ]);
+    assert.match(resumeCalls[1]?.input ?? "", /task_output/u);
+    assert.ok(emittedIds.length > 0, "the queued and resume events must be emitted");
+    assert.deepEqual(emittedIds, emittedIds.map(() => "thread-session-id"));
+    assert.equal(emittedIds.includes(null), false, "a later child must not publish null over the session id");
+    assert.equal(controlPlane.completions.at(-1)?.outcome.case, "succeeded");
+  } finally {
+    await cleanupTestSession(root);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a resumed child inherits an execute-phase stall deadline from its predecessor", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-codex-in-run-resume-stall-"));
+  const clock = new ResumeFakeClock();
+  try {
+    const remote = await seedRemote(root);
+    const claim = codexResumeClaim(remote, root);
+    const firstStartedAt = new Date(clock.now() - 20 * 60_000);
+    let resumedHandle: RuntimeHandle | null = null;
+    let resolveResumedExit!: (evidence: ExitEvidence) => void;
+    const resumedExit = new Promise<ExitEvidence>((resolve) => { resolveResumedExit = resolve; });
+    const planned = [
+      {
+        evidence: reconnectEvidence(),
+        providerConversationId: "thread-stall",
+        startedAt: firstStartedAt,
+      },
+      {
+        evidence: reconnectEvidence(),
+        providerConversationId: null,
+        startedAt: new Date(clock.now()),
+        exit: resumedExit,
+      },
+    ] as const;
+    const resumeCalls: ResumeCall[] = [];
+    const controlPlane = createControlPlaneDouble();
+    const adapter = fakeCodexAdapter(claim, planned, resumeCalls, {
+      onLaunch: (handle, resumed) => { if (resumed) resumedHandle = handle; },
+      heartbeat: async (handle) => ({
+        // The relaunch is alive, which makes the stale carried timestamp the
+        // decisive budget fact rather than the generic dead-process gate.
+        processAlive: handle === resumedHandle,
+        lastProcessAliveAt: new Date(clock.now()),
+        lastProgressEventAt: handle.lastProgressEventAt,
+        inFlightTool: null,
+      }),
+    });
+    const execution = executeClaimProduction({
+      ...codexOnly(join(root, "workspaces"), root, join(root, "codex-must-not-start")),
+      failedWorkspaceRetention: 0,
+    }, claim, {
+      adapter,
+      controlPlane: controlPlane.controlPlane,
+      materializeRuntimeTools: async () => undefined,
+      provisionSessionConfig: async () => undefined,
+      providerResumeBackoff: async () => undefined,
+      providerResumeNow: clock.now,
+      runLeaseClock: clock,
+    });
+
+    const launchDeadline = Date.now() + 15_000;
+    while (resumedHandle === null && Date.now() < launchDeadline) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    }
+    assert.ok(resumedHandle, "the resume child must launch before the heartbeat check");
+    await clock.advanceBy(5_000);
+    resolveResumedExit(reconnectEvidence({
+      signal: "SIGTERM",
+      terminationReason: "structured progress deadline exceeded",
+    }));
+    await execution;
+
+    assert.equal(resumeCalls.length, 1);
+    const completion = controlPlane.completions.at(-1);
+    assert.equal(completion?.outcome.case, "budget-exhausted", JSON.stringify(completion));
+    assert.equal(
+      completion?.outcome.case === "budget-exhausted" ? completion.outcome.gate : null,
+      "stall",
+      "the carried execute-phase stall, not a fresh child window, must stop the Run",
+    );
+    assert.match(failureReasonOf(completion?.outcome), /structured progress deadline exceeded/u);
+  } finally {
+    await cleanupTestSession(root);
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("event delivery failures do not starve heartbeats and recover in seq order", async () => {
