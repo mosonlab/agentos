@@ -79,7 +79,7 @@ URL and mirror root, then run `git clone --mirror` directly into the computed
 directory:
 
 ```sh
-runner_home='/home/agentrunner' # Replace with the runner account's actual home.
+runner_home='/path/to/runner/home' # Replace with the runner account's actual home.
 mirror_root="${RUNNER_REPO_MIRROR_ROOT:-$runner_home/.agentos/repo-mirrors}"
 remote_url='https://github.com/example/project.git'
 if command -v shasum >/dev/null 2>&1; then
