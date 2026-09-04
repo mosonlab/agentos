@@ -28,6 +28,7 @@ const projectPatch = z.object({
   ...projectFields,
   specGateDefault: z.boolean(),
   mergeGateDefault: z.boolean(),
+  skipOptionalSteps: z.boolean(),
 }).partial().refine((value) => Object.keys(value).length > 0);
 
 const environmentFields = {
