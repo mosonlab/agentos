@@ -432,7 +432,7 @@ test("sync rolls the deployed pre-optional-review prompt generation once", async
   for (const template of templates) {
     await prisma.taskTemplateStep.updateMany({
       where: { taskTemplateId: template.id },
-      data: { provisionDependencies: true, optional: false },
+      data: { optional: false },
     });
     const fix = template.steps.find(({ outputKind }) => outputKind === "fixed-implementation");
     const regression = template.steps.find(({ outputKind }) => outputKind === "regression-verification-v2");
