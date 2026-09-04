@@ -1655,6 +1655,18 @@ test("Codex preserves disqualifying provider-error history after reconnect statu
   assert.equal(isCodexInRunResumeCandidate(evidence, "thread-1"), false);
 });
 
+test("Codex bare disconnect evidence remains resumable provider history", () => {
+  const state = parseCodexTranscript([{
+    type: "error",
+    message: "stream disconnected before completion: tls handshake eof",
+  }]);
+  const evidence = evidenceFromState(state);
+
+  assert.equal(evidence.sawNonReconnectProviderError, false);
+  assert.equal(evidence.firstNonReconnectProviderError, null);
+  assert.equal(isCodexInRunResumeCandidate(evidence, "thread-1"), true);
+});
+
 test("only Codex declares the optional in-Run resume capability", () => {
   assert.equal(typeof adapters.CODEX.isInRunResumeCandidate, "function");
   assert.equal(adapters.CLAUDE.isInRunResumeCandidate, undefined);

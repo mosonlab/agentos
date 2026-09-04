@@ -37,6 +37,7 @@ import { provisionIsolatedSessionConfig, type SessionConfigOptions } from "./ses
 export const CODEX_STARTER_MODEL = "gpt-5.6-sol:medium";
 
 const CODEX_BARE_DISCONNECT = /stream disconnected before completion:/iu;
+const isCodexBareDisconnect = (message: string | null): boolean => CODEX_BARE_DISCONNECT.test(message ?? "");
 
 const NON_RESUMABLE_FAILURE_CLASSES = new Set([
   "BINARY_NOT_FOUND",
@@ -68,7 +69,7 @@ export const isCodexInRunResumeCandidate = (
   if (NON_RESUMABLE_FAILURE_CLASSES.has(classifyRuntimeError(evidence).failureClass)) return false;
 
   const reconnectStatus = isCodexReconnectStatus(evidence.providerError);
-  const bareDisconnect = CODEX_BARE_DISCONNECT.test(evidence.providerError ?? "");
+  const bareDisconnect = isCodexBareDisconnect(evidence.providerError);
   const transientNetwork = isTransientNetworkError(`${evidence.providerError ?? ""}\n${evidence.stderr}`);
   return reconnectStatus || bareDisconnect || transientNetwork;
 };
@@ -214,8 +215,12 @@ export const parseCodexEvent = (
     // remains latched, including an unrecognised error with no message.
     if (!isCodexReconnectStatus(message)) {
       state.sawError = true;
-      state.sawNonReconnectProviderError = true;
-      state.firstNonReconnectProviderError ??= message;
+      // The final bare disconnect is the resumable terminal form of the
+      // reconnect status, not a separate provider rejection.
+      if (!isCodexBareDisconnect(message)) {
+        state.sawNonReconnectProviderError = true;
+        state.firstNonReconnectProviderError ??= message;
+      }
     }
     state.providerError = message ?? state.providerError;
     emitAdapterEvent(state, sink, "ADAPTER_ERROR", event);
