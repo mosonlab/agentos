@@ -1481,12 +1481,17 @@ test("a qualifying Codex disconnect resumes once with the continuation input", a
   const root = await mkdtemp(join(tmpdir(), "runner-codex-in-run-resume-success-"));
   try {
     const remote = await seedRemote(root);
+    const clock = new ResumeFakeClock();
     const continuation = providerDisconnectResumeInput();
     const firstEvidence = reconnectEvidence();
     const { controlPlane, resumeCalls } = await executeCodexResumeScenario(root, remote, [
       { evidence: firstEvidence, providerConversationId: "thread-resume" },
       { evidence: successfulResumeEvidence(), providerConversationId: null },
-    ], { providerResumeBackoff: async () => undefined });
+    ], {
+      providerResumeBackoff: async () => undefined,
+      providerResumeNow: clock.now,
+      runLeaseClock: clock,
+    });
 
     assert.equal(resumeCalls.length, 1);
     assert.deepEqual(resumeCalls[0], {
