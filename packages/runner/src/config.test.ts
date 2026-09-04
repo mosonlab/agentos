@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { DEFAULT_API_URL, loadRunnerConfig, runnerProxyEnvironment } from "./config.js";
+import { DEFAULT_API_URL, defaultRunnerPath, loadRunnerConfig, runnerProxyEnvironment } from "./config.js";
 import { LocalApiDestinationError } from "./local-origin.js";
 
 const require = createRequire(import.meta.url);
@@ -32,6 +32,22 @@ test("the default workspace root matches the API's definition of it", () => {
     apiSource("workspace-root.ts"),
     /export const defaultWorkspaceRoot = \(\): string => join\(homedir\(\), "\.agentos", "runs"\);/u,
   );
+});
+
+test("the default child PATH is platform-specific and RUNNER_PATH overrides it", () => {
+  assert.equal(defaultRunnerPath("darwin"), "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin");
+  assert.equal(defaultRunnerPath("linux"), "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+  assert.equal(defaultRunnerPath("linux").includes("/opt/homebrew"), false);
+  assert.throws(() => defaultRunnerPath("aix"), /unsupported runner platform: aix/u);
+
+  const previous = process.env.RUNNER_PATH;
+  process.env.RUNNER_PATH = "/operator/bin";
+  try {
+    assert.equal(loadRunnerConfig().path, "/operator/bin");
+  } finally {
+    if (previous === undefined) delete process.env.RUNNER_PATH;
+    else process.env.RUNNER_PATH = previous;
+  }
 });
 
 test("host proof slots default to three and accept strict positive integer overrides", () => {

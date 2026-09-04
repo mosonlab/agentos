@@ -54,16 +54,16 @@ test("host proof slot startup preparation is concurrent and idempotent", async (
   }
 });
 
-// /usr/bin/lockf is the tool the wrapper itself requires, and it ships with
-// macOS rather than with Linux. The merge gate runs on a Linux worker, where
-// spawnSync reports a null status because the binary does not exist. The
-// coordination proof therefore stands on its own and names the host it needs,
-// instead of being restated against a different tool whose contention exit
-// status is not the 75 the wrapper reads.
-const LOCKF = "/usr/bin/lockf";
-const lockfSkip = existsSync(LOCKF) ? false : `${LOCKF} is absent on this host`;
+const platformLock = process.platform === "darwin"
+  ? { executable: "/usr/bin/lockf", args: ["-s", "-t", "0", "9"] }
+  : process.platform === "linux"
+    ? { executable: "/usr/bin/flock", args: ["-x", "-n", "-E", "75", "9"] }
+    : null;
+const platformLockSkip = platformLock === null
+  ? `host proof slots do not support ${process.platform}`
+  : existsSync(platformLock.executable) ? false : `${platformLock.executable} is absent on this host`;
 
-test("two unrelated principals coordinate through one persistent slot inode", { skip: lockfSkip }, async () => {
+test("two unrelated principals coordinate through one persistent slot inode", { skip: platformLockSkip }, async () => {
   const workspaceRoot = await mkdtemp(join(tmpdir(), "host-proof-slots-lock-"));
   try {
     const config = { workspaceRoot, hostProofSlots: 1 };
@@ -83,10 +83,10 @@ test("two unrelated principals coordinate through one persistent slot inode", { 
     try {
       const stdioFor = (fd: number): Array<"ignore" | number> =>
         ["ignore", "ignore", "ignore", "ignore", "ignore", "ignore", "ignore", "ignore", "ignore", fd];
-      assert.equal(spawnSync(LOCKF, ["-s", "-t", "0", "9"], { stdio: stdioFor(clients[0]!.fd) }).status, 0);
-      assert.equal(spawnSync(LOCKF, ["-s", "-t", "0", "9"], { stdio: stdioFor(clients[1]!.fd) }).status, 75);
+      assert.equal(spawnSync(platformLock!.executable, platformLock!.args, { stdio: stdioFor(clients[0]!.fd) }).status, 0);
+      assert.equal(spawnSync(platformLock!.executable, platformLock!.args, { stdio: stdioFor(clients[1]!.fd) }).status, 75);
       await clients[0]!.close();
-      assert.equal(spawnSync(LOCKF, ["-s", "-t", "0", "9"], { stdio: stdioFor(clients[1]!.fd) }).status, 0);
+      assert.equal(spawnSync(platformLock!.executable, platformLock!.args, { stdio: stdioFor(clients[1]!.fd) }).status, 0);
     } finally {
       await Promise.all(clients.map(async (client) => client.close().catch(() => undefined)));
     }
