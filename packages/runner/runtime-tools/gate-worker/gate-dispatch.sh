@@ -86,7 +86,16 @@ ALLOW_LOCAL="${AGENTOS_GATE_ALLOW_LOCAL:-0}"
 LOCAL_SLOT_COUNT="${AGENTOS_GATE_LOCAL_SLOTS-1}"
 POLL_SECONDS="${GATE_DISPATCH_POLL_SECONDS:-30}"
 TIMEOUT_MINUTES="${GATE_DISPATCH_TIMEOUT_MINUTES:-60}"
-SLOT_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/gate-dispatch"
+if [ -n "${AGENTOS_RUNNER_HOME:-}" ]; then
+  SLOT_ROOT="${AGENTOS_RUNNER_HOME}/.cache/gate-dispatch"
+  SLOT_ROOT_SOURCE="AGENTOS_RUNNER_HOME"
+elif [ -n "${XDG_CACHE_HOME:-}" ]; then
+  SLOT_ROOT="${XDG_CACHE_HOME}/gate-dispatch"
+  SLOT_ROOT_SOURCE="XDG_CACHE_HOME"
+else
+  SLOT_ROOT="$HOME/.cache/gate-dispatch"
+  SLOT_ROOT_SOURCE="HOME"
+fi
 
 OID=""
 MASTER_OID=""
@@ -326,7 +335,8 @@ else
 fi
 [ -n "$FALLBACK_SERVER" ] && printf ', fallback %s(1)' "$FALLBACK_SERVER" >&2
 [ "$ALLOW_LOCAL" -eq 1 ] && printf ', local(%s, explicit)' "$LOCAL_SLOT_COUNT_NUM" >&2
-printf ', poll %ss, timeout %smin\n' "$POLL_SECONDS" "$TIMEOUT_MINUTES" >&2
+printf ', poll %ss, timeout %smin, slot root %s (from %s)\n' \
+  "$POLL_SECONDS" "$TIMEOUT_MINUTES" "$SLOT_ROOT" "$SLOT_ROOT_SOURCE" >&2
 printf 'gate-dispatch: baseline %s%s\n' "$MASTER_OID" "${DEFAULT_REF:+ (${DEFAULT_REF})}" >&2
 
 # --- dispatch ----------------------------------------------------------------
