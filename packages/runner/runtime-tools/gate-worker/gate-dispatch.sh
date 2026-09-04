@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# Run one merge gate in the first usable slot: the primary worker, then the
-# fallback worker. The local machine is used only with explicit opt-in. Runs ON
-# THE LOCAL MACHINE:
+# Run one merge gate in the first usable slot: explicitly enabled local slots,
+# then the primary worker, then the fallback worker. The local machine is used
+# only with explicit opt-in. Runs ON THE LOCAL MACHINE:
 #
 #   @SCRIPT_DIR@/gate-dispatch.sh <oid>
 #   @SCRIPT_DIR@/gate-dispatch.sh <oid> --master <oid>
@@ -13,9 +13,9 @@
 # explicitly configured primary worker contributes two fixed slots and an
 # explicitly configured fallback worker contributes one. The explicit --server
 # form remains one slot. With no remote configured, --allow-local selects a
-# local-only dispatch. The local machine otherwise contributes one last-resort
-# slot only when --allow-local (or AGENTOS_GATE_ALLOW_LOCAL=1) says this
-# invocation may spend its resources.
+# local-only dispatch. The local machine contributes the configured number of
+# slots only when --allow-local (or AGENTOS_GATE_ALLOW_LOCAL=1) says this
+# invocation may spend its resources, and those slots are tried before remotes.
 #
 # The accounting is one lock file per configured slot under
 # ${XDG_CACHE_HOME:-~/.cache}/gate-dispatch/, outside any repository because the
@@ -27,7 +27,7 @@
 # worker's configured capacity with worker-wide execution locks held for the
 # real process lifetime.
 #
-# The optional local slot is only eligible when this worktree is already the
+# The optional local slots are only eligible when this worktree is already the
 # thing a local gate would test: HEAD at the requested commit and the tree clean.
 # Otherwise merge-gate.sh would refuse anyway, so the dispatch goes straight to
 # the worker, which can gate any pushed oid without a local checkout.
@@ -38,11 +38,10 @@
 #
 # A PASS, FAIL or NOT AUTHORITATIVE result stops dispatch. A remote FAIL includes
 # run-gate.sh's bounded per-failing-step worker-log excerpt, which is transported
-# verbatim with the proof line. A remote attempt that
-# produces no verdict (including an ssh drop) is retired for this invocation and
-# the same candidate and baseline are tried on the next worker. No intermediate
-# GATE NOT RUN line is printed on stdout, so a successful fallback still has one
-# unambiguous verdict line.
+# verbatim with the proof line. A local or remote attempt that produces no
+# verdict is retired for this invocation and the same candidate and baseline are
+# tried on the next machine. No intermediate GATE NOT RUN line is printed on
+# stdout, so a successful fallback still has one unambiguous verdict line.
 #
 # When every usable slot is taken, this blocks and re-polls — the caller wanted a
 # verdict, not an errand. It gives up after --timeout-minutes, because a wait
@@ -73,6 +72,7 @@ set -uo pipefail
 # so the only 1 a caller can ever see from it is one the gate itself produced.
 EXIT_USAGE=2
 EXIT_NO_SLOT=75
+MAX_LOCAL_SLOT_COUNT=1024
 
 PRIMARY_SERVER="${AGENTOS_GATE_PRIMARY_SERVER:-}"
 FALLBACK_SERVER="${AGENTOS_GATE_FALLBACK_SERVER:-}"
@@ -83,6 +83,7 @@ if [ -n "${AGENTOS_GATE_SERVER:-}" ]; then
   SINGLE_SERVER=1
 fi
 ALLOW_LOCAL="${AGENTOS_GATE_ALLOW_LOCAL:-0}"
+LOCAL_SLOT_COUNT="${AGENTOS_GATE_LOCAL_SLOTS-1}"
 POLL_SECONDS="${GATE_DISPATCH_POLL_SECONDS:-30}"
 TIMEOUT_MINUTES="${GATE_DISPATCH_TIMEOUT_MINUTES:-60}"
 SLOT_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/gate-dispatch"
@@ -171,7 +172,26 @@ fi
 
 case "$TIMEOUT_MINUTES" in ''|*[!0-9]*) die "--timeout-minutes needs a number, got: $TIMEOUT_MINUTES" ;; esac
 case "$POLL_SECONDS" in ''|*[!0-9]*|0) die "GATE_DISPATCH_POLL_SECONDS needs a positive number, got: $POLL_SECONDS" ;; esac
+case "$LOCAL_SLOT_COUNT" in
+  ''|*[!0-9]*) die "AGENTOS_GATE_LOCAL_SLOTS needs a positive number, got: $LOCAL_SLOT_COUNT" ;;
+esac
+case "$LOCAL_SLOT_COUNT" in
+  *[1-9]*) ;;
+  *) die "AGENTOS_GATE_LOCAL_SLOTS needs a positive number, got: $LOCAL_SLOT_COUNT" ;;
+esac
+LOCAL_SLOT_COUNT_NUM="$(printf '%s\n' "$LOCAL_SLOT_COUNT" | sed 's/^0*//')"
+if [ "${#LOCAL_SLOT_COUNT_NUM}" -gt 4 ] \
+  || { [ "${#LOCAL_SLOT_COUNT_NUM}" -eq 4 ] && [ "$LOCAL_SLOT_COUNT_NUM" -gt "$MAX_LOCAL_SLOT_COUNT" ]; }; then
+  die "AGENTOS_GATE_LOCAL_SLOTS needs a positive number no greater than ${MAX_LOCAL_SLOT_COUNT}, got: $LOCAL_SLOT_COUNT"
+fi
 case "$ALLOW_LOCAL" in 0|1) ;; *) die "AGENTOS_GATE_ALLOW_LOCAL must be 0 or 1, got: $ALLOW_LOCAL" ;; esac
+
+LOCAL_SLOTS=()
+if [ "$ALLOW_LOCAL" -eq 1 ]; then
+  for ((local_slot_index = 1; local_slot_index <= LOCAL_SLOT_COUNT_NUM; local_slot_index++)); do
+    LOCAL_SLOTS+=("local-${local_slot_index}")
+  done
+fi
 
 # Sourced before the first check that reports a code: the slot locks, the values
 # that reach a remote shell and the verdict's codes all live here, and this
@@ -305,15 +325,18 @@ else
   printf ', no remote worker' >&2
 fi
 [ -n "$FALLBACK_SERVER" ] && printf ', fallback %s(1)' "$FALLBACK_SERVER" >&2
-[ "$ALLOW_LOCAL" -eq 1 ] && printf ', local(1, explicit)' >&2
+[ "$ALLOW_LOCAL" -eq 1 ] && printf ', local(%s, explicit)' "$LOCAL_SLOT_COUNT_NUM" >&2
 printf ', poll %ss, timeout %smin\n' "$POLL_SECONDS" "$TIMEOUT_MINUTES" >&2
 printf 'gate-dispatch: baseline %s%s\n' "$MASTER_OID" "${DEFAULT_REF:+ (${DEFAULT_REF})}" >&2
 
 # --- dispatch ----------------------------------------------------------------
 
+LOCAL_OUTPUT=""
+LOCAL_STATUS="$GATE_EXIT_NO_VERDICT"
 run_local() {
   printf 'gate-dispatch: running in the local slot\n' >&2
-  ( cd "$REPO_ROOT" && bash scripts/merge-gate.sh --expect-head "$OID" --master "$MASTER_OID" )
+  LOCAL_OUTPUT="$(cd "$REPO_ROOT" && bash scripts/merge-gate.sh --expect-head "$OID" --master "$MASTER_OID")"
+  LOCAL_STATUS=$?
 }
 
 REMOTE_OUTPUT=""
@@ -353,6 +376,7 @@ FIRST=1
 # be a lie even if that round happened to find only busy slots.
 BROKEN_EVER=""
 UNAVAILABLE_EVER=""
+LOCAL_DISABLED=0
 PRIMARY_DISABLED=0
 FALLBACK_DISABLED=0
 if [ -z "$PRIMARY_SERVER" ] && ! local_eligible; then
@@ -367,6 +391,33 @@ while :; do
   # a busy slot frees when its gate ends, a broken one does not free at all.
   round_busy=0
   round_broken=""
+
+  # The local machine is never used automatically. Opting in makes its slots
+  # the first capacity tried for this invocation only.
+  if [ "$ALLOW_LOCAL" -eq 1 ] && [ "$LOCAL_DISABLED" -eq 0 ] && local_eligible; then
+    for local_slot in "${LOCAL_SLOTS[@]}"; do
+      outcome=0
+      try_slot "$local_slot" || outcome=$?
+      case "$outcome" in
+        0)
+          run_local
+          if gate_verdict_is_judgement "$LOCAL_STATUS"; then
+            [ -n "$LOCAL_OUTPUT" ] && printf '%s\n' "$LOCAL_OUTPUT"
+            exit "$LOCAL_STATUS"
+          fi
+          printf 'gate-dispatch: local produced no verdict (exit %s); retiring local capacity and trying remaining capacity\n' "$LOCAL_STATUS" >&2
+          [ -n "$LOCAL_OUTPUT" ] && printf 'gate-dispatch: local said: %s\n' "$LOCAL_OUTPUT" >&2
+          release_slot
+          LOCAL_DISABLED=1
+          UNAVAILABLE_EVER="${UNAVAILABLE_EVER} local"
+          break
+          ;;
+        1) round_busy=$(( round_busy + 1 )) ;;
+        *) round_broken="${round_broken} ${local_slot}" ;;
+      esac
+    done
+  fi
+
   if [ -n "$PRIMARY_SERVER" ] && [ "$PRIMARY_DISABLED" -eq 0 ]; then
     for primary_slot in "${PRIMARY_SLOTS[@]}"; do
       outcome=0
@@ -412,17 +463,6 @@ while :; do
     esac
   fi
 
-  # The local machine is never an automatic fallback. Opting in makes it the
-  # last slot after both remote workers for this invocation only.
-  if [ "$ALLOW_LOCAL" -eq 1 ] && local_eligible; then
-    outcome=0
-    try_slot local || outcome=$?
-    case "$outcome" in
-      0) run_local; exit $? ;;
-      1) round_busy=$(( round_busy + 1 )) ;;
-      *) round_broken="${round_broken} local" ;;
-    esac
-  fi
   # Union, not concatenation: a slot that is broken stays broken every round, and
   # an hour of polling would otherwise build a message naming it 120 times.
   for slot in $round_broken; do

@@ -38,7 +38,7 @@ export const RUNNER_DEFINITIONS: Readonly<Record<RunnerKind, AdapterDeclaration>
 });
 
 const COMMON_PROTECTED_SECRET_ENVIRONMENT = [
-  "GIT_CONFIG_GLOBAL", "AGENTOS_GATE_SERVER",
+  "GIT_CONFIG_GLOBAL", "AGENTOS_GATE_SERVER", "AGENTOS_GATE_ALLOW_LOCAL", "AGENTOS_GATE_LOCAL_SLOTS",
   "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
 ] as const;
 
@@ -152,7 +152,7 @@ const gitConfigOverrides = (entries: readonly (readonly [string, string])[]): No
 
 export const buildChildEnvironment = (
   config: Pick<RunnerConfig, "path" | "home" | "apiUrl" | "runAsPrefix" | "workspaceRoot" | "hostProofSlots">
-    & Partial<Pick<RunnerConfig, "proxyEnvironment" | "gateServer">>,
+    & Partial<Pick<RunnerConfig, "proxyEnvironment" | "gateServer" | "gateLocalSlots">>,
   claim: Pick<ClaimedTask, "secrets" | "sessionToken" | "fencingToken" | "run" | "runner" | "agent" | "task">,
   scratch: AgentScratch,
   workspacePath: string,
