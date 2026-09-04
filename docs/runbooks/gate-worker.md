@@ -148,7 +148,7 @@ AGENTOS_WORKSPACE_PATH="$(git rev-parse --show-toplevel)" AGENTOS_GATE_SERVER=pr
   verdict exists, and re-dispatching is the recovery. A timeout that recurs
   means the queue is systemically full, which is a capacity question, not a
   code question.
-- A slot whose lock cannot be *operated* — a read-only `~/.cache`, a lock left
+- A slot whose lock cannot be *operated* — a read-only runner-account cache, a lock left
   by the pre-#132 dispatcher, a lock naming no pid — is not busy and is never
   waited on. The dispatcher keeps using whatever slots still work; if none do it
   exits **76** immediately with `GATE NOT RUN:` naming the slots to clear, and
@@ -523,7 +523,9 @@ changing host capacity.
 
 **`GATE NOT RUN: the slot locks are unusable (...)`** — the named slots have a
 lock this dispatcher cannot operate, so nothing was gated and nothing will be
-until they are cleared. Look at `~/.cache/gate-dispatch/`: a `<slot>.lock`
+until they are cleared. Look at the runner account's cache
+(`$AGENTOS_RUNNER_HOME/.cache/gate-dispatch/` in a Run, otherwise
+`${XDG_CACHE_HOME:-$HOME/.cache}/gate-dispatch/`): a `<slot>.lock`
 *directory* is a leftover from the pre-#132 dispatcher and can go once no old
 `gate-dispatch.sh` is running; a `<slot>.slot` file that does not contain a pid
 was not written by this script and is cleared by hand, again only once no gate
@@ -600,7 +602,9 @@ must be reported with its verdict.
 ## Undoing it
 
 The local machine carries only the slot lock files under
-`~/.cache/gate-dispatch/`, which are inert when nothing runs. To return a
+the runner account's cache (`$AGENTOS_RUNNER_HOME/.cache/gate-dispatch/` in a
+Run, otherwise `${XDG_CACHE_HOME:-$HOME/.cache}/gate-dispatch/`), which are inert
+when nothing runs. To return a
 capacity-two worker to one slot, remove `~/gate/worker-capacity` after its gates
 finish. To retire one repository from the worker, delete `~/gate/<repo>` on it;
 to decommission the worker, delete `~/gate`.

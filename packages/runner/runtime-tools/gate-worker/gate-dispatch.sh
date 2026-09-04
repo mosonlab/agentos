@@ -17,12 +17,13 @@
 # slots only when --allow-local (or AGENTOS_GATE_ALLOW_LOCAL=1) says this
 # invocation may spend its resources, and those slots are tried before remotes.
 #
-# The accounting is one lock file per configured slot under
-# ${XDG_CACHE_HOME:-~/.cache}/gate-dispatch/, outside any repository because the
-# slots belong to the machines, not to a checkout. lib.sh holds the locking
-# itself and says why it is shaped the way it is. Every dispatch on this machine
-# contends for the same slots. A direct merge-gate.sh is invisible to this
-# accounting. A direct
+# The accounting is one lock file per configured slot under the runner account's
+# cache: AGENTOS_RUNNER_HOME/.cache/gate-dispatch/ in a Run, otherwise
+# ${XDG_CACHE_HOME:-~/.cache}/gate-dispatch/. It is outside any repository because
+# the slots belong to the account, not to a checkout. lib.sh holds the locking
+# itself and says why it is shaped the way it is. Sessions of one account contend
+# for the same slots. A direct merge-gate.sh is invisible to this accounting. A
+# direct
 # remote-gate.sh bypasses the local accounting too, but run-gate.sh enforces the
 # worker's configured capacity with worker-wide execution locks held for the
 # real process lifetime.
