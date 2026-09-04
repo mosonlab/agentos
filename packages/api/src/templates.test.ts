@@ -865,23 +865,29 @@ test("instantiation resolves only the two gate slots from overrides then project
       id: "step-spec", stepIndex: 1, name: "Specification", prompt: "spec", outputKind: "spec",
       attachmentsFromPrevious: false, priorOutputKinds: [], assigneeType: AssigneeType.AGENT,
       assigneeAgentId: "agent-spec", assigneeAgent: agents[0], approvalGate: false,
-      opensPullRequest: false, layer: 1, baseFromStepIndex: null, runner: null,
+      opensPullRequest: false, layer: 1, baseFromStepIndex: null, runner: null, optional: false,
     },
     {
       id: "step-work", stepIndex: 2, name: "Work", prompt: "work", outputKind: "review",
       attachmentsFromPrevious: true, priorOutputKinds: ["spec"], assigneeType: AssigneeType.AGENT,
       assigneeAgentId: "agent-work", assigneeAgent: agents[1], approvalGate: true,
-      opensPullRequest: false, layer: 2, baseFromStepIndex: null, runner: null,
+      opensPullRequest: false, layer: 2, baseFromStepIndex: null, runner: null, optional: true,
     },
     {
-      id: "step-merge", stepIndex: 3, name: "Readiness", prompt: "merge", outputKind: "merge-authorization",
-      attachmentsFromPrevious: true, priorOutputKinds: ["review"], assigneeType: AssigneeType.AGENT,
+      id: "step-retained", stepIndex: 3, name: "Retained work", prompt: "retained", outputKind: "revised-plan",
+      attachmentsFromPrevious: true, priorOutputKinds: ["spec"], assigneeType: AssigneeType.AGENT,
+      assigneeAgentId: "agent-work", assigneeAgent: agents[1], approvalGate: true,
+      opensPullRequest: false, layer: 3, baseFromStepIndex: null, runner: null, optional: false,
+    },
+    {
+      id: "step-merge", stepIndex: 4, name: "Readiness", prompt: "merge", outputKind: "merge-authorization",
+      attachmentsFromPrevious: true, priorOutputKinds: ["revised-plan"], assigneeType: AssigneeType.AGENT,
       assigneeAgentId: "agent-merge", assigneeAgent: agents[2], approvalGate: false,
-      opensPullRequest: false, layer: 3, baseFromStepIndex: null, runner: null,
+      opensPullRequest: false, layer: 4, baseFromStepIndex: null, runner: null, optional: false,
     },
   ];
   const template = { id: "template-gates", name: "compound-fixture", variables: [], steps };
-  const projectDefaults = { specGateDefault: false, mergeGateDefault: false };
+  const projectDefaults = { specGateDefault: false, mergeGateDefault: false, skipOptionalSteps: false };
   const created: Array<Record<string, unknown>> = [];
   const tx = {
     $queryRaw: async (query: TemplateStringsArray | Prisma.Sql) => {
@@ -910,11 +916,12 @@ test("instantiation resolves only the two gate slots from overrides then project
   } as unknown as PrismaClient;
 
   const instantiate = async (
-    defaults: { specGateDefault: boolean; mergeGateDefault: boolean },
+    defaults: { specGateDefault: boolean; mergeGateDefault: boolean; skipOptionalSteps?: boolean },
     gates?: { spec?: boolean; merge?: boolean },
   ) => {
     projectDefaults.specGateDefault = defaults.specGateDefault;
     projectDefaults.mergeGateDefault = defaults.mergeGateDefault;
+    projectDefaults.skipOptionalSteps = defaults.skipOptionalSteps ?? false;
     created.length = 0;
     return instantiateTemplate(db, "project-1", template.id, {
       repoId: "repo-1", variables: {}, autoStart: false, name: "gate matrix", gates,
@@ -940,8 +947,21 @@ test("instantiation resolves only the two gate slots from overrides then project
   ];
   for (const [defaults, gates, specGate, mergeGate] of matrix) {
     const result = await instantiate(defaults, gates);
-    assert.deepEqual(result.tasks.map((task) => task.approvalGate), [specGate, true, mergeGate]);
+    assert.deepEqual(result.tasks.map((task) => task.approvalGate), [specGate, true, true, mergeGate]);
   }
+
+  const sparse = await instantiate({
+    specGateDefault: false,
+    mergeGateDefault: false,
+    skipOptionalSteps: true,
+  });
+  assert.deepEqual(sparse.tasks.map((task) => task.chainIndex), [1, 3, 4]);
+  assert.deepEqual(sparse.tasks.map((task) => task.chainLayer), [1, 3, 4]);
+  assert.deepEqual(sparse.tasks.map((task) => task.name), [
+    "gate matrix: Specification",
+    "gate matrix: Retained work",
+    "gate matrix: Readiness",
+  ]);
 });
 
 test("instantiate refuses absent gate slots before creating any task and checks spec first", async () => {

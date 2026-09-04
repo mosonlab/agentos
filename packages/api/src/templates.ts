@@ -44,9 +44,17 @@ export type InstantiateTemplateInput = {
   gates?: { spec?: boolean | undefined; merge?: boolean | undefined } | undefined;
 };
 
-type GateDefaults = { specGateDefault: boolean; mergeGateDefault: boolean };
+type GateDefaults = {
+  specGateDefault: boolean;
+  mergeGateDefault: boolean;
+  skipOptionalSteps: boolean;
+};
 
-const DEFAULT_GATE_DEFAULTS: GateDefaults = { specGateDefault: false, mergeGateDefault: false };
+const DEFAULT_GATE_DEFAULTS: GateDefaults = {
+  specGateDefault: false,
+  mergeGateDefault: false,
+  skipOptionalSteps: false,
+};
 
 const resolvedApprovalGate = (
   step: { outputKind: string; approvalGate: boolean },
@@ -367,8 +375,11 @@ export const instantiateTemplate = async (
         ? template.steps.find((step) => step.outputKind === "revalidation") ?? null
         : null;
       const omitRevalidation = conditionalRevalidation !== null && !input.afterTaskId;
-      const instantiatedTemplateSteps = omitRevalidation
-        ? template.steps.filter((step) => step.id !== conditionalRevalidation.id)
+      const instantiatedTemplateSteps = omitRevalidation || projectGateDefaults.skipOptionalSteps
+        ? template.steps.filter((step) => (
+          (!omitRevalidation || step.id !== conditionalRevalidation?.id)
+          && (!projectGateDefaults.skipOptionalSteps || !step.optional)
+        ))
         : template.steps;
       if (instantiatedTemplateSteps.length === 0) {
         throw templateRefusal("template_has_no_instantiable_steps", "Template has no instantiable steps");
