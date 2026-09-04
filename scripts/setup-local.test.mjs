@@ -58,7 +58,7 @@ import {
   validateEnvContent,
 } from "./setup-local.mjs";
 
-const TEST_GITHUB_READ_TOKEN = "github_pat_setup_fixture_000000000000";
+const TEST_GITHUB_READ_TOKEN = "setup-local-test-token";
 const generateConfiguration = (randomBytes) =>
   generateConfigurationWithoutGitHubToken(randomBytes, TEST_GITHUB_READ_TOKEN);
 const runSetup = (options = {}) => runSetupWithoutGitHubToken({
