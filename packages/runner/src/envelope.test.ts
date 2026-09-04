@@ -13,6 +13,8 @@ const evidence = (overrides: Partial<ExitEvidence> = {}): ExitEvidence => ({
   terminationReason: null,
   finalOutput: null,
   providerError: null,
+  sawNonReconnectProviderError: false,
+  firstNonReconnectProviderError: null,
   stdout: "",
   stderr: "",
   ...overrides,

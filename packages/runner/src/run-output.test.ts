@@ -12,7 +12,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { PR_TEMPLATE_NAME, type RunOutputEvidence, type RunOutputSatisfaction } from "@anneal/db";
 
 import { ControlPlaneError, type ClaimedTask } from "./api.js";
-import { adapters, type ExitEvidence, type RuntimeHandle } from "./adapters.js";
+import { adapters, type CliAdapter, type ExitEvidence, type RuntimeHandle } from "./adapters.js";
 import { parseClaudeTranscript } from "./adapters/claude.js";
 import { parseCodexTranscript } from "./adapters/codex.js";
 import { parsePiTranscript } from "./adapters/pi.js";
@@ -385,6 +385,50 @@ const adapterWithTerminalFailure = (state: {
   },
 });
 
+const resumeQualifiedExit: ExitEvidence = {
+  exitCode: 0,
+  signal: null,
+  terminalEventSeen: false,
+  terminalSuccess: false,
+  terminationReason: null,
+  finalOutput: null,
+  providerError: "Reconnecting... 3/5 (stream disconnected before completion: tls handshake eof)",
+  sawNonReconnectProviderError: false,
+  firstNonReconnectProviderError: null,
+  stdout: "",
+  stderr: "",
+};
+
+const syntheticRuntimeHandle = (
+  evidence: ExitEvidence,
+  providerConversationId = "conversation-114",
+): RuntimeHandle => {
+  const startedAt = new Date();
+  return {
+    runId: "run-114",
+    runner: "CODEX",
+    child: null as never,
+    pid: null,
+    startedAt,
+    lastProcessAliveAt: startedAt,
+    lastProgressEventAt: startedAt,
+    inFlightTool: null,
+    providerConversationId,
+    terminalEventSeen: evidence.terminalEventSeen,
+    terminalSuccess: evidence.terminalSuccess,
+    terminationReason: evidence.terminationReason,
+    sawError: false,
+    providerError: evidence.providerError,
+    sawNonReconnectProviderError: evidence.sawNonReconnectProviderError,
+    firstNonReconnectProviderError: evidence.firstNonReconnectProviderError,
+    providerState: null,
+    finalOutput: evidence.finalOutput,
+    stdout: evidence.stdout,
+    stderr: evidence.stderr,
+    exit: Promise.resolve(evidence),
+  };
+};
+
 const explicitTerminalFailureFixtures = [
   {
     adapter: "Claude",
@@ -621,6 +665,71 @@ test("a Regression mechanical output handoff retries a transient control-plane f
     assert.equal(retrying?.payload.attempt, 1);
     assert.equal(retrying?.payload.attempts, 3);
     assert.ok(controlPlane.eventBatches.flat().some(({ type }) => type === "REGRESSION_OUTPUT_HANDOFF_PERSISTED"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a qualifying Codex disconnect with a regression handoff does not resume", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-resume-regression-product-"));
+  try {
+    const remote = await seedRemote(root);
+    const claimed = regressionOutputClaim(remote);
+    claimed.runner = "CODEX";
+    claimed.agent = { ...claimed.agent, model: "gpt-5.6-sol" };
+    claimed.run = { ...claimed.run, model: "gpt-5.6-sol" };
+    let resumeCalls = 0;
+    const adapter: CliAdapter = {
+      ...adapters.CODEX,
+      preflight: async () => ({ ok: true, cliVersion: "test", authMode: "test", capabilities: {} }),
+      start: async ({ workingDirectory }) => {
+        const headSha = git(workingDirectory, "rev-parse", "HEAD");
+        const body = JSON.stringify({
+          schemaVersion: 2,
+          outcome: "review-fail",
+          headSha,
+          baseHeadSha: "b".repeat(40),
+          summary: "RF-2 remains open",
+        });
+        await mkdir(join(workingDirectory, ".agentos"), { recursive: true });
+        await writeFile(join(workingDirectory, ".agentos", "regression-output.json"), JSON.stringify({
+          schemaVersion: 1,
+          runId: claimed.run.id,
+          kind: REGRESSION_OUTPUT_KIND,
+          body,
+          commitSha: headSha,
+        }), { mode: 0o600 });
+        return syntheticRuntimeHandle(resumeQualifiedExit);
+      },
+      resume: async () => {
+        resumeCalls += 1;
+        throw new Error("resume must not be called when a regression handoff exists");
+      },
+      heartbeat: async (handle) => ({
+        processAlive: false,
+        lastProcessAliveAt: handle.lastProcessAliveAt,
+        lastProgressEventAt: handle.lastProgressEventAt,
+        inFlightTool: null,
+      }),
+      kill: async () => ({ signal: null, processAlive: false }),
+    };
+    const controlPlane = createControlPlaneDouble();
+
+    await executeClaim(
+      config(join(root, "workspaces"), join(root, "unused-codex")),
+      claimed,
+      {
+        adapter,
+        controlPlane: controlPlane.controlPlane,
+        provisionSessionConfig: async () => undefined,
+      },
+    );
+
+    assert.equal(resumeCalls, 0);
+    assert.equal(controlPlane.completions.at(-1)?.outcome.case, "regression-mechanically-settled");
+    const events = controlPlane.eventBatches.flat();
+    assert.equal(events.filter(({ type }) => type === "REGRESSION_OUTPUT_HANDOFF_PERSISTED").length, 1);
+    assert.equal(events.some(({ type }) => type === "PROVIDER_RESUME_STARTED"), false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -1069,6 +1178,8 @@ test("the original Run budget continues through remediation", async () => {
               terminationReason: null,
               finalOutput: null,
               providerError: remediationSetupState,
+              sawNonReconnectProviderError: false,
+              firstNonReconnectProviderError: null,
               stdout: "",
               stderr: remediationSetupState,
             });
@@ -1097,6 +1208,8 @@ test("the original Run budget continues through remediation", async () => {
           terminationReason: reason,
           finalOutput: null,
           providerError: null,
+          sawNonReconnectProviderError: false,
+          firstNonReconnectProviderError: null,
           stdout: "",
           stderr: "",
         });
@@ -1207,6 +1320,117 @@ test("a missing terminal event with matching server output succeeds without a lo
       metadata.stream === "runner" && body.includes("provider disconnect after delivery was tolerated"));
     assert.ok(tolerated);
     assert.match(tolerated.body, /no providerError reported/u);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a qualifying Codex disconnect with delivered result does not resume", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-resume-delivered-product-"));
+  try {
+    const remote = await seedRemote(root);
+    const claimed = resultOutputClaim(remote);
+    claimed.runner = "CODEX";
+    claimed.agent = { ...claimed.agent, model: "gpt-5.6-sol" };
+    claimed.run = { ...claimed.run, model: "gpt-5.6-sol" };
+    let resumeCalls = 0;
+    const adapter: CliAdapter = {
+      ...adapters.CODEX,
+      preflight: async () => ({ ok: true, cliVersion: "test", authMode: "test", capabilities: {} }),
+      start: async ({ workingDirectory }) => {
+        await writeFile(join(workingDirectory, "runner-fixture.txt"), "delivered fixture change\n");
+        git(workingDirectory, "add", "runner-fixture.txt");
+        git(workingDirectory, "commit", "-m", "test: create delivered change");
+        return syntheticRuntimeHandle(resumeQualifiedExit);
+      },
+      resume: async () => {
+        resumeCalls += 1;
+        throw new Error("resume must not be called when delivered result exists");
+      },
+      heartbeat: async (handle) => ({
+        processAlive: false,
+        lastProcessAliveAt: handle.lastProcessAliveAt,
+        lastProgressEventAt: handle.lastProgressEventAt,
+        inFlightTool: null,
+      }),
+      kill: async () => ({ signal: null, processAlive: false }),
+    };
+    const controlPlane = createControlPlaneDouble({
+      outputStatus: async () => deliveredResult(root),
+    });
+
+    await executeClaim(
+      config(join(root, "workspaces"), join(root, "unused-codex")),
+      claimed,
+      {
+        adapter,
+        controlPlane: controlPlane.controlPlane,
+        provisionSessionConfig: async () => undefined,
+      },
+    );
+
+    assert.equal(resumeCalls, 0);
+    assert.equal(controlPlane.completions.at(-1)?.outcome.case, "delivered-then-disconnected", JSON.stringify({
+      completion: controlPlane.completions.at(-1),
+      events: controlPlane.eventBatches.flat(),
+    }));
+    const events = controlPlane.eventBatches.flat();
+    assert.equal(events.filter(({ type }) => type === "POST_DELIVERY_DISCONNECT_ACCEPTED").length, 1);
+    assert.equal(events.some(({ type }) => type === "PROVIDER_RESUME_STARTED"), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an inconclusive delivered-output probe fails closed and does not resume", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-resume-delivered-probe-error-"));
+  try {
+    const remote = await seedRemote(root);
+    const claimed = resultOutputClaim(remote);
+    claimed.runner = "CODEX";
+    claimed.agent = { ...claimed.agent, model: "gpt-5.6-sol" };
+    claimed.run = { ...claimed.run, model: "gpt-5.6-sol" };
+    let resumeCalls = 0;
+    const adapter: CliAdapter = {
+      ...adapters.CODEX,
+      preflight: async () => ({ ok: true, cliVersion: "test", authMode: "test", capabilities: {} }),
+      start: async ({ workingDirectory }) => {
+        await writeFile(join(workingDirectory, "runner-fixture.txt"), "delivered fixture change\n");
+        git(workingDirectory, "add", "runner-fixture.txt");
+        git(workingDirectory, "commit", "-m", "test: create delivered change");
+        return syntheticRuntimeHandle(resumeQualifiedExit);
+      },
+      resume: async () => {
+        resumeCalls += 1;
+        throw new Error("an inconclusive product probe must not resume");
+      },
+      heartbeat: async (handle) => ({
+        processAlive: false,
+        lastProcessAliveAt: handle.lastProcessAliveAt,
+        lastProgressEventAt: handle.lastProgressEventAt,
+        inFlightTool: null,
+      }),
+      kill: async () => ({ signal: null, processAlive: false }),
+    };
+    let outputStatusReads = 0;
+    const controlPlane = createControlPlaneDouble({
+      outputStatus: async () => {
+        outputStatusReads += 1;
+        if (outputStatusReads === 1) throw new ControlPlaneError(503, "status temporarily unavailable");
+        return deliveredResult(root);
+      },
+    });
+
+    await executeClaim(
+      config(join(root, "workspaces"), join(root, "unused-codex")),
+      claimed,
+      { adapter, controlPlane: controlPlane.controlPlane, provisionSessionConfig: async () => undefined },
+    );
+
+    assert.equal(resumeCalls, 0);
+    assert.equal(outputStatusReads, 2, "the established settling path retries the status read after the probe fails closed");
+    assert.equal(controlPlane.completions.at(-1)?.outcome.case, "delivered-then-disconnected");
+    assert.ok(controlPlane.eventBatches.flat().some(({ type }) => type === "POST_DELIVERY_DISCONNECT_ACCEPTED"));
   } finally {
     await rm(root, { recursive: true, force: true });
   }

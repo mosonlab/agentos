@@ -66,6 +66,14 @@ export type RunnerConfig = {
 export const defaultSessionConfigBaselineRoot = (): string =>
   fileURLToPath(new URL("../assets/session-config-baseline", import.meta.url));
 
+// This stays local because @anneal/api's dependency on @anneal/runner is a
+// devDependency used only to pin the two copies against each other in tests.
+export const defaultRunnerPath = (platform: NodeJS.Platform = process.platform): string => {
+  if (platform === "darwin") return "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+  if (platform === "linux") return "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+  throw new Error(`unsupported runner platform: ${platform}`);
+};
+
 const splitPrefix = (value: string): string[] => value.trim() ? value.trim().split(/\s+/u) : [];
 
 const positiveInteger = (name: string, value: string): number => {
@@ -137,7 +145,7 @@ export const loadRunnerConfig = ({ cpuCount = cpus().length }: { cpuCount?: numb
     claimMaxLoadAverage,
     leaseSeconds,
     heartbeatIntervalMs: Number.parseInt(process.env.RUNNER_HEARTBEAT_INTERVAL_MS ?? String(Math.max(5_000, leaseSeconds * 500)), 10),
-    path: process.env.RUNNER_PATH ?? "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+    path: process.env.RUNNER_PATH ?? defaultRunnerPath(),
     home,
     gitIdentity: gitName === undefined ? null : { name: gitName, email: gitEmail! },
     ...(gateServer ? { gateServer } : {}),

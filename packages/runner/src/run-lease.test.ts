@@ -149,6 +149,108 @@ test("a rejected renewal reaches the authority verdict without caller-side adopt
   }
 });
 
+test("renewNow sends one renewal and keeps dead-window TTL anchored to a live renewal", async () => {
+  const clock = new FakeClock();
+  clock.time = 100;
+  let processAlive = true;
+  const observations: RunLeaseEvidence[] = [];
+  const lease = createLease(clock, async (evidence) => {
+    observations.push(evidence);
+    return { held: true };
+  });
+  lease.abandonProviderLaunch();
+  await lease.enterPhase({
+    name: "execute",
+    evidence: async () => ({
+      processAlive,
+      lastProgressEventAt: new Date(clock.now()),
+      inFlightTool: null,
+    }),
+  });
+
+  try {
+    clock.time = 1_000;
+    const live = await lease.renewNow();
+    assert.deepEqual(live.authority, { held: true });
+    assert.equal(live.remainingLeaseMs, 60_000);
+    assert.equal(live.accepted, true);
+    assert.equal(observations.length, 1);
+    assert.equal(observations[0]?.processAlive, true);
+
+    // A held response while the provider is dead proves authority and
+    // cancellation, but heartbeatRun deliberately does not extend the lease
+    // in that window. The TTL must therefore age from the live renewal above.
+    processAlive = false;
+    clock.time = 10_000;
+    const deadWindow = await lease.renewNow();
+    assert.deepEqual(deadWindow.authority, { held: true });
+    assert.equal(deadWindow.remainingLeaseMs, 51_000);
+    assert.equal(deadWindow.accepted, true);
+    assert.equal(observations.length, 2);
+    assert.equal(observations[1]?.processAlive, false);
+  } finally {
+    await lease.close();
+  }
+});
+
+test("renewNow returns and adopts a refused authority", async () => {
+  const clock = new FakeClock();
+  const lease = createLease(clock, async () => ({ held: false, reason: "revoked" }));
+  lease.abandonProviderLaunch();
+  try {
+    const renewal = await lease.renewNow();
+    assert.deepEqual(renewal.authority, { held: false, reason: "revoked" });
+    assert.equal(renewal.accepted, true);
+    assert.deepEqual(lease.authority, { held: false, reason: "revoked" });
+    assert.equal(lease.held, false);
+  } finally {
+    await lease.close();
+  }
+});
+
+test("renewNow waits for an older interval round and then sends a fresh renewal", async () => {
+  const clock = new FakeClock();
+  let calls = 0;
+  let releaseFirst!: () => void;
+  const firstPending = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const lease = createLease(clock, async () => {
+    calls += 1;
+    if (calls === 1) await firstPending;
+    return { held: true };
+  });
+  lease.abandonProviderLaunch();
+
+  try {
+    const intervalRound = clock.advanceTo(10);
+    await Promise.resolve();
+    const explicitRound = lease.renewNow();
+    releaseFirst();
+    await intervalRound;
+    const renewal = await explicitRound;
+
+    assert.equal(calls, 2);
+    assert.equal(renewal.accepted, true);
+    assert.deepEqual(renewal.authority, { held: true });
+  } finally {
+    await lease.close();
+  }
+});
+
+test("renewNow marks a transport failure as unacknowledged", async () => {
+  const clock = new FakeClock();
+  const lease = createLease(clock, async () => { throw new Error("fetch failed"); });
+  lease.abandonProviderLaunch();
+  clock.time = 10_000;
+  try {
+    const renewal = await lease.renewNow();
+    assert.deepEqual(renewal.authority, { held: true });
+    assert.equal(renewal.accepted, false);
+    assert.equal(renewal.remainingLeaseMs, 50_000);
+  } finally {
+    await lease.close();
+  }
+});
+
 test("revocation during an awaited launch drains the provider before launch returns", async () => {
   const clock = new FakeClock();
   let finishLaunch!: (provider: Provider) => void;
