@@ -163,6 +163,7 @@
     { "glob": "scripts/merge-integrator-real-checks.mjs", "purpose": "redacted real-infrastructure merge-integrator checks" },
     { "glob": "scripts/merge-integrator-system-test.mjs", "purpose": "redacted end-to-end merge-integrator system harness" },
     { "glob": "scripts/os-isolation/patch-runner-plists.sh", "purpose": "OS isolation: launchd RUNNER_RUN_AS_PREFIX wiring" },
+    { "glob": "scripts/os-isolation/os-isolation.test.mjs", "purpose": "OS isolation: portable launchd and systemd regression fixtures" },
     { "glob": "scripts/os-isolation/provision.sh", "purpose": "OS isolation: runner accounts, workspace root, sudoers grant" },
     { "glob": "scripts/os-isolation/reclaim-orphan-workspaces.sh", "purpose": "OS isolation: fail-closed operator reclamation of orphaned run workspaces" },
     { "glob": "scripts/os-isolation/rollback.sh", "purpose": "OS isolation: account and sudoers rollback" },
