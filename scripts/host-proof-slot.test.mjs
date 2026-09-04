@@ -26,6 +26,12 @@ const platformLock = process.platform === "darwin"
     ? { executable: "/usr/bin/flock", args: ["-x", "-n", "-E", "75", "9"] }
     : null;
 
+const platformName = process.platform === "darwin"
+  ? "Darwin"
+  : process.platform === "linux"
+    ? "Linux"
+    : null;
+
 const testRoot = mkdtempSync(join(tmpdir(), "host-proof-slot-test."));
 after(() => rmSync(testRoot, { recursive: true, force: true }));
 
@@ -295,14 +301,29 @@ test("the platform lock tool reports contention as exactly 75", { skip: platform
   }
 });
 
-test("the selected platform lock tool is required by name", { skip: platformLock === null }, () => {
+test("platform selection uses the host kernel rather than an inherited OSTYPE", { skip: platformName === null }, () => {
+  const forgedOsType = process.platform === "darwin" ? "linux-gnu" : "darwin99";
+  const sourceHarness = ['. "$1"', "host_proof_slot_set_platform", 'printf "%s\\n" "$HOST_PROOF_SLOT_PLATFORM"'].join("; ");
+  const result = spawnSync("bash", ["-c", sourceHarness, "source-host-proof-slot", wrapper], {
+    cwd: repositoryRoot,
+    encoding: "utf8",
+    env: cleanEnvironment({ AGENTOS_RUN_ID: "run-platform-kernel", OSTYPE: forgedOsType }),
+  });
+  assert.equal(result.status, 0);
+  assert.equal(result.stdout, `${platformName}\n`);
+  assert.equal(result.stderr, "");
+});
+
+test("the selected platform lock tool is required by name", () => {
   const slotDirectory = makeSlotDirectory(1);
+  const missingTool = join(testRoot, "missing-lock-tool");
   const sourceHarness = [
     '. "$1"',
-    "host_proof_slot_lock_tool_is_executable() { return 1; }",
+    'HOST_PROOF_SLOT_TEST_LOCK_TOOL="$3"',
+    'host_proof_slot_select_lock_tool() { HOST_PROOF_SLOT_LOCK_TOOL="$HOST_PROOF_SLOT_TEST_LOCK_TOOL"; HOST_PROOF_SLOT_LOCK_ARGS=(); }',
     'host_proof_slot_main test @anneal/missing-tool -- "$2" -e "process.exit(0)"',
   ].join("; ");
-  const result = spawnSync("bash", ["-c", sourceHarness, "source-host-proof-slot", wrapper, process.execPath], {
+  const result = spawnSync("bash", ["-c", sourceHarness, "source-host-proof-slot", wrapper, process.execPath, missingTool], {
     cwd: repositoryRoot,
     encoding: "utf8",
     env: cleanEnvironment({
@@ -315,7 +336,7 @@ test("the selected platform lock tool is required by name", { skip: platformLock
   assert.equal(result.stdout, "");
   assert.equal(
     result.stderr,
-    `host-proof-slot: test for workspace @anneal/missing-tool in Run run-missing-tool cannot admit: ${platformLock.executable} is not executable\n`,
+    `host-proof-slot: test for workspace @anneal/missing-tool in Run run-missing-tool cannot admit: ${missingTool} is not executable\n`,
   );
 });
 

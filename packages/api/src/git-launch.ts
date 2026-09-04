@@ -1,3 +1,5 @@
+// This stays local because @anneal/api's dependency on @anneal/runner is a
+// devDependency used only to pin the two copies against each other in tests.
 export const defaultRunnerPath = (platform: NodeJS.Platform = process.platform): string => {
   if (platform === "darwin") return "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
   if (platform === "linux") return "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";

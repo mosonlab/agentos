@@ -47,17 +47,24 @@ host_proof_slot_invalid() {
 }
 
 host_proof_slot_set_platform() {
-  HOST_PROOF_SLOT_PLATFORM="${OSTYPE:-unknown}"
+  if [[ ! -x /usr/bin/uname ]]; then
+    host_proof_slot_invalid "/usr/bin/uname is not executable"
+    return $?
+  fi
+  HOST_PROOF_SLOT_PLATFORM="$(/usr/bin/uname -s)" || {
+    host_proof_slot_invalid "/usr/bin/uname could not identify the platform"
+    return $?
+  }
 }
 
 host_proof_slot_select_lock_tool() {
   host_proof_slot_set_platform || return $?
   case "$HOST_PROOF_SLOT_PLATFORM" in
-    darwin*)
+    Darwin)
       HOST_PROOF_SLOT_LOCK_TOOL=/usr/bin/lockf
       HOST_PROOF_SLOT_LOCK_ARGS=(-s -t 0 9)
       ;;
-    linux*)
+    Linux)
       HOST_PROOF_SLOT_LOCK_TOOL=/usr/bin/flock
       HOST_PROOF_SLOT_LOCK_ARGS=(-x -n -E 75 9)
       ;;
