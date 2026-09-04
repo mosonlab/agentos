@@ -114,7 +114,10 @@ test("reads exact bytes from a real bare mirror at the pinned commit", async () 
     await execFileAsync("git", ["clone", "--mirror", seed, mirror]);
     await execFileAsync("git", ["--git-dir", mirror, "config", "remote.origin.url", remoteUrl]);
 
-    const reader = createMirrorBackedSpecificationReader(null, { mirrorRoot, runAsPrefix: [] });
+    const reader = createMirrorBackedSpecificationReader(
+      { readFileAtCommit: async () => bytes },
+      { mirrorRoot, runAsPrefix: [] },
+    );
     const actual = await reader.readFileAtCommit(
       repository,
       path,

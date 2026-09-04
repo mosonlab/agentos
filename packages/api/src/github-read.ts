@@ -89,6 +89,14 @@ export class GitHubReadError extends Error {
   }
 }
 
+/** Configuration failure raised before a GitHub reader can be constructed. */
+export class GitHubReadConfigurationError extends Error {
+  constructor() {
+    super("GITHUB_READ_TOKEN is required");
+    this.name = "GitHubReadConfigurationError";
+  }
+}
+
 export type GitHubReader = {
   readPullRequest: (
     repository: string,
@@ -264,11 +272,11 @@ export const checkConclusionFor = (snapshot: PullRequestSnapshot, name: string):
 };
 
 export const createGitHubReader = (
-  token: string | undefined = process.env.GITHUB_READ_TOKEN,
+  token: string,
   fetchImpl: typeof fetch = fetch,
   retryOptions: GitHubReadRetryOptions = {},
-): GitHubReader | null => {
-  if (!token) return null;
+): GitHubReader => {
+  if (typeof token !== "string" || token.trim() === "") throw new GitHubReadConfigurationError();
   const wait = retryOptions.wait ?? abortableDelay;
   const waitBeforeRetry = async (delayMs: number, signal?: AbortSignal | null): Promise<void> => {
     try {

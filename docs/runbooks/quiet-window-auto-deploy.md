@@ -90,8 +90,8 @@ root. Require:
 - `current` and `previous` to be relative symlinks to direct children of
   `releases/`;
 - `shared/.env` to be mode 0600 and contain `DATABASE_URL`,
-  `FEISHU_DEFAULT_CHAT_ID`, and the five absolute persistent paths beneath
-  `shared/`;
+  `FEISHU_DEFAULT_CHAT_ID`, `GITHUB_READ_TOKEN`, and the five absolute
+  persistent paths beneath `shared/`;
 - all configured service labels to use `shared/bin/agentos-service-wrapper.mjs`;
 - the configured PostgreSQL container and its `pg_dump` binary to be running;
 - the source remote, Node, npm CLI, Git, and Docker paths recorded in the

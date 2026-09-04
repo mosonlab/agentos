@@ -119,7 +119,6 @@ export type RecoveryPullRequestFacts = {
 };
 
 export type FreshRecoveryFacts =
-  | { kind: "reader-unavailable" }
   | { kind: "reader-failure"; reason: string }
   | {
       kind: "snapshot";
@@ -272,13 +271,10 @@ const candidatesMatch = (left: RecoveryCandidate, right: RecoveryCandidate): boo
  * and remote facts, then applies these stage-specific results without widening
  * their decision unions; this module performs no I/O.
  */
-export function classifyFresh(facts: Extract<FreshRecoveryFacts, { kind: "reader-unavailable" }>): Retry;
 export function classifyFresh(facts: Extract<FreshRecoveryFacts, { kind: "reader-failure" }>): Retry;
 export function classifyFresh(facts: Extract<FreshRecoveryFacts, { kind: "snapshot" }>): FreshDecision;
 export function classifyFresh(facts: FreshRecoveryFacts): FreshDecision {
   switch (facts.kind) {
-    case "reader-unavailable":
-      return { kind: "retry", reason: "server-side GitHub reader is unavailable" };
     case "reader-failure":
       return { kind: "retry", reason: facts.reason };
     case "snapshot":

@@ -33,7 +33,9 @@ test("the base-drift recovery worker never overlaps ticks in one process", async
       },
     },
   } as unknown as PrismaClient;
-  const timer = startBaseDriftRecoveryWorker(db, null);
+  const timer = startBaseDriftRecoveryWorker(db, {
+    readPullRequest: async () => { throw new Error("unexpected GitHub read"); },
+  });
   try {
     await waitUntil(() => calls >= 2);
   } finally {

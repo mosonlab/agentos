@@ -200,7 +200,7 @@ const main = async (): Promise<void> => {
   console.log(`Startup reconciliation: ${reconciliation.runs} database runs reconciled, ${count(reconciliation.openReclaimIntents)} workspace reclaim intents awaiting their runner, ${count(reconciliation.archivedNotices)} archived-run notices`);
   await ensureStartupActive();
 
-  const githubReader = createGitHubReader();
+  const githubReader = createGitHubReader(startup.githubReadToken);
   const specificationReader = createMirrorBackedSpecificationReader(githubReader);
   const app = createApp(prisma, { ownership, specificationReader });
   const { host: hostname, port } = startup;
@@ -226,9 +226,9 @@ const main = async (): Promise<void> => {
   // §D-P3 Phase B. Attaches to the process that already owns the single-instance
   // control plane and already holds the read credential, rather than inventing
   // a fourth service.
-  evidenceTimer = startEvidenceWorker(prisma);
-  readinessTimer = startReadinessWorker(prisma);
-  baseDriftRecoveryTimer = startBaseDriftRecoveryWorker(prisma);
+  evidenceTimer = startEvidenceWorker(prisma, githubReader);
+  readinessTimer = startReadinessWorker(prisma, githubReader);
+  baseDriftRecoveryTimer = startBaseDriftRecoveryWorker(prisma, githubReader);
   startupBusy = false;
 };
 

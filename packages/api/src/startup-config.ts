@@ -36,7 +36,6 @@ const HIGHEST_PORT = 65_535;
  *  by reading that file, so a sentinel added there cannot be accepted here. */
 const SENTINEL_VALUES = new Set(["", "CHANGE_ME", "CHANGEME", "TODO", "PLACEHOLDER", "REPLACE_ME", "changeme"]);
 const WEAK_SECRET_VALUES = new Set([...SENTINEL_VALUES, "secret", "password", "postgres", "agentos"]);
-
 /** Same floor as the generator, which mints 32 random bytes as base64url. */
 const SHORTEST_ACCEPTABLE_SECRET = 24;
 
@@ -71,6 +70,8 @@ export type StartupConfig = {
   mode: typeof DEVELOPER_PREVIEW;
   host: string;
   port: number;
+  /** The already-validated read-only GitHub credential for API workers. */
+  githubReadToken: string;
 };
 
 export type StartupConfigVerdict =
@@ -126,6 +127,24 @@ const checkTokens = (reasons: string[], env: NodeJS.ProcessEnv): void => {
   // Optional in this repository, but a placeholder is never acceptable.
   const cookie = env["SESSION_COOKIE_SECRET"];
   if (cookie !== undefined) checkSecret(reasons, "SESSION_COOKIE_SECRET", cookie);
+};
+
+/**
+ * GitHub reads are required by the API, but their token format is owned by
+ * GitHub and may change. Check only the presence/sentinel contract here; the
+ * API must not guess at authorization or impose a token-length policy.
+ */
+const checkGitHubReadToken = (reasons: string[], env: NodeJS.ProcessEnv): void => {
+  const variable = "GITHUB_READ_TOKEN";
+  const value = env[variable];
+  if (value === undefined) {
+    reasons.push(`missing:${variable}`);
+    return;
+  }
+  const normalized = value.trim();
+  if (isPlaceholder(variable, normalized)) {
+    reasons.push(`placeholder-value:${variable}`);
+  }
 };
 
 const checkEncryptionKey = (reasons: string[], env: NodeJS.ProcessEnv): void => {
@@ -284,13 +303,25 @@ export const evaluateStartupConfig = (env: NodeJS.ProcessEnv): StartupConfigVerd
   if (mode !== undefined && mode !== DEVELOPER_PREVIEW) reasons.push("mode-unsupported:AGENTOS_MODE");
 
   checkTokens(reasons, env);
+  checkGitHubReadToken(reasons, env);
   checkEncryptionKey(reasons, env);
   const listener = checkListener(reasons, env);
   checkDatabase(reasons, env);
   checkBrowserExposure(reasons, env);
 
   if (reasons.length > 0) return { ok: false, reasons };
-  return { ok: true, config: { mode: DEVELOPER_PREVIEW, host: listener.host, port: listener.port } };
+  return {
+    ok: true,
+    config: {
+      mode: DEVELOPER_PREVIEW,
+      host: listener.host,
+      port: listener.port,
+      // `checkGitHubReadToken` above guarantees this is a non-empty string on
+      // the success path. Keep the token on the validated config so callers do
+      // not re-read an ambient environment after startup has been judged.
+      githubReadToken: env["GITHUB_READ_TOKEN"]!.trim(),
+    },
+  };
 };
 
 /** The startup call. Throws `StartupConfigError`, whose message carries reasons

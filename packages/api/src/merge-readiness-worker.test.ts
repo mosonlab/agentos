@@ -44,7 +44,9 @@ test("the readiness worker never overlaps ticks in one process", async () => {
       },
     },
   } as unknown as PrismaClient;
-  const timer = startReadinessWorker(db, null);
+  const timer = startReadinessWorker(db, {
+    readPullRequest: async () => { throw new Error("unexpected GitHub read"); },
+  });
   try {
     await waitUntil(() => calls >= 2);
   } finally {

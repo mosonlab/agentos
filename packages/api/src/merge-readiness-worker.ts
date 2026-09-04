@@ -34,7 +34,7 @@ import {
   RECOVERY_HEAD_ADOPTION_CONFLICT_MESSAGE,
   reopenAfterHeadAdoption,
 } from "./merge-tail-state.js";
-import { createGitHubReader, type PullRequestReader } from "./github-read.js";
+import type { PullRequestReader } from "./github-read.js";
 import {
   evaluateReadiness,
   READINESS_READ_BUDGET_MS,
@@ -717,7 +717,7 @@ const runReadinessDecision = async (
   result: ReadinessTickResult,
   releaseChainLease: ReleaseMergeLease,
   runWithMergeLease: WithMergeLease,
-  reader: PullRequestReader | null,
+  reader: PullRequestReader,
 ): Promise<void> => {
   const { readiness, regression, claim } = read;
   const preAcquireRunner = createReadinessSettlementRunner(db, {
@@ -787,7 +787,7 @@ const runReadinessDecision = async (
 
 export const readinessTick = async (
   db: PrismaClient,
-  reader: PullRequestReader | null,
+  reader: PullRequestReader,
   now: Date,
   limit: number,
   releaseChainLease: ReleaseMergeLease,
@@ -847,7 +847,7 @@ export const readinessTick = async (
 
 export const startReadinessWorker = (
   db: PrismaClient,
-  reader: PullRequestReader | null = createGitHubReader(),
+  reader: PullRequestReader,
 ): ReturnType<typeof setInterval> => {
   let inFlight = false;
   const timer = setInterval(() => {

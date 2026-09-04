@@ -327,6 +327,7 @@ const loadEnvironment = async () => {
   const loaded = config({ path: envPath, override: false, quiet: true });
   if (loaded.error || !process.env.DATABASE_URL) fail("environment-unreadable", "DATABASE_URL-missing");
   if (!process.env.FEISHU_DEFAULT_CHAT_ID) fail("environment-unreadable", "FEISHU_DEFAULT_CHAT_ID-missing");
+  if (!loaded.parsed?.GITHUB_READ_TOKEN?.trim()) fail("environment-unreadable", "GITHUB_READ_TOKEN-missing");
 };
 
 const resolveExecutable = (variable, fallback) => {

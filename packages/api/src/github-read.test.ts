@@ -1,7 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createGitHubReader, GitHubReadError } from "./github-read.js";
+import { createGitHubReader, GitHubReadConfigurationError, GitHubReadError } from "./github-read.js";
+
+test("an empty GitHub read token is a named configuration refusal", () => {
+  for (const token of ["", "   "]) {
+    assert.throws(
+      () => createGitHubReader(token),
+      (error: unknown) => error instanceof GitHubReadConfigurationError
+        && error.name === "GitHubReadConfigurationError"
+        && error.message === "GITHUB_READ_TOKEN is required",
+    );
+  }
+});
 
 test("compare preserves ancestry, rename identity, and fails completeness closed at GitHub's file ceiling", async () => {
   const files = Array.from({ length: 300 }, (_, index) => ({
