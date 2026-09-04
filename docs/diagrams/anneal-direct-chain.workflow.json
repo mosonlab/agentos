@@ -1,0 +1,294 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Anneal Direct Chain",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "chain-shape",
+        "label": "Eight steps, seven layers",
+        "focus": [
+          "revalidate",
+          "implementation",
+          "review_sol",
+          "apply_fixes",
+          "regression"
+        ],
+        "note": "One implementation window, then review and self-adjudicated repair."
+      },
+      {
+        "id": "parallel-review",
+        "label": "Two reviews, one adjudicator",
+        "focus": [
+          "implementation",
+          "review_sol",
+          "review_blind",
+          "apply_fixes"
+        ],
+        "note": "Layer 3 runs both reviews; no adjudication step stands between them and the fix."
+      },
+      {
+        "id": "merge-tail",
+        "label": "Server-owned merge tail",
+        "focus": [
+          "regression",
+          "readiness",
+          "execution",
+          "rejected"
+        ],
+        "note": "Steps 7 and 8 run without a model and re-verify the exact head."
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "steps",
+      "label": "Chain steps (agent)"
+    },
+    {
+      "id": "blind",
+      "label": "Isolated second review"
+    },
+    {
+      "id": "tail",
+      "label": "Merge tail (server-owned)"
+    },
+    {
+      "id": "stop",
+      "label": "Stop conditions",
+      "variant": "exception"
+    }
+  ],
+  "phases": [
+    {
+      "id": "build",
+      "label": "Brief to code",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "assure",
+      "label": "Review and repair",
+      "fromCol": 2,
+      "toCol": 3,
+      "variant": "emphasis"
+    },
+    {
+      "id": "land",
+      "label": "Verify and merge",
+      "fromCol": 4,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "revalidate",
+    "implementation",
+    "review_sol",
+    "apply_fixes",
+    "regression",
+    "readiness",
+    "execution"
+  ],
+  "nodes": [
+    {
+      "id": "revalidate",
+      "lane": "steps",
+      "col": 0,
+      "type": "backend",
+      "label": "Revalidate",
+      "sublabel": "step 1 · layer 1",
+      "width": 140,
+      "height": 58
+    },
+    {
+      "id": "implementation",
+      "lane": "steps",
+      "col": 1,
+      "type": "backend",
+      "label": "Implementation",
+      "sublabel": "step 2 · layer 2",
+      "tag": "brief is the spec of record",
+      "width": 140,
+      "height": 58
+    },
+    {
+      "id": "review_sol",
+      "lane": "steps",
+      "col": 2,
+      "type": "backend",
+      "label": "Code review",
+      "sublabel": "step 3 · sol-findings",
+      "width": 140,
+      "height": 58
+    },
+    {
+      "id": "apply_fixes",
+      "lane": "steps",
+      "col": 3,
+      "type": "backend",
+      "label": "Apply review fixes",
+      "sublabel": "step 5 · self-adjudicating",
+      "width": 140,
+      "height": 58
+    },
+    {
+      "id": "regression",
+      "lane": "steps",
+      "col": 4,
+      "type": "backend",
+      "label": "Regression",
+      "sublabel": "step 6 · merge gate",
+      "width": 140,
+      "tag": "runs on the gate worker",
+      "height": 58
+    },
+    {
+      "id": "review_blind",
+      "lane": "blind",
+      "col": 2,
+      "type": "messagebus",
+      "label": "Blind code review",
+      "sublabel": "step 4 · blind-findings",
+      "tag": "layer 3, no priors",
+      "width": 140,
+      "height": 58
+    },
+    {
+      "id": "readiness",
+      "lane": "tail",
+      "col": 4,
+      "type": "security",
+      "label": "Merge readiness",
+      "sublabel": "step 7 · exact-head re-verify",
+      "tag": "only configurable gate slot",
+      "width": 140,
+      "height": 58
+    },
+    {
+      "id": "execution",
+      "lane": "tail",
+      "col": 5,
+      "type": "backend",
+      "label": "Merge execution",
+      "sublabel": "step 8 · mechanical run",
+      "width": 140,
+      "height": 58
+    },
+    {
+      "id": "rejected",
+      "lane": "stop",
+      "col": 5,
+      "type": "security",
+      "label": "Chain ends unmerged",
+      "sublabel": "pull request stays open",
+      "width": 140,
+      "height": 58
+    }
+  ],
+  "edges": [
+    {
+      "id": "to-implementation",
+      "from": "revalidate",
+      "to": "implementation",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "to-review-sol",
+      "from": "implementation",
+      "to": "review_sol",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "to-review-blind",
+      "from": "implementation",
+      "to": "review_blind",
+      "label": "same head, isolated",
+      "role": "branch"
+    },
+    {
+      "id": "sol-to-fixes",
+      "from": "review_sol",
+      "to": "apply_fixes",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "blind-to-fixes",
+      "from": "review_blind",
+      "to": "apply_fixes",
+      "label": "second report",
+      "role": "branch"
+    },
+    {
+      "id": "fixes-to-regression",
+      "from": "apply_fixes",
+      "to": "regression",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "regression-to-readiness",
+      "from": "regression",
+      "to": "readiness",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "authorize-merge",
+      "from": "readiness",
+      "to": "execution",
+      "label": "exact-head authorization",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "gate-rejected",
+      "from": "readiness",
+      "to": "rejected",
+      "label": "rejected",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "id": "head-drift",
+      "from": "readiness",
+      "to": "regression",
+      "label": "head or base drift · reopen",
+      "variant": "dashed",
+      "role": "return"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Chain shape",
+      "items": [
+        "Eight steps across seven layers",
+        "Steps 3 and 4 share layer 3 and review the same head",
+        "No adjudication step: step 5 decides every finding itself"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Gates",
+      "items": [
+        "Both configurable gates default to off",
+        "Direct's only gate slot is the merge readiness step",
+        "A rejected merge gate ends the chain terminal"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Mechanical tail",
+      "items": [
+        "Steps 7 and 8 run without a model",
+        "Readiness re-verifies head, base, ancestry, defense list, and merge lease",
+        "Drift after approval stops the tail"
+      ]
+    }
+  ]
+}

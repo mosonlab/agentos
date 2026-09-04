@@ -1,0 +1,303 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Anneal Runtime Architecture",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1360,
+      700
+    ],
+    "views": [
+      {
+        "id": "run-path",
+        "label": "Primary run path",
+        "focus": [
+          "web",
+          "api",
+          "runner",
+          "provider"
+        ],
+        "note": "An operator queues work; a runner claims it and drives one agent CLI."
+      },
+      {
+        "id": "session-scope",
+        "label": "Session tools and fencing",
+        "focus": [
+          "provider",
+          "sessiontools",
+          "api",
+          "inbox"
+        ],
+        "note": "Agent tool calls re-enter the control plane under a fenced session token."
+      },
+      {
+        "id": "delivery",
+        "label": "Delivery and merge",
+        "focus": [
+          "workspace",
+          "github",
+          "mergeexec",
+          "api"
+        ],
+        "note": "The runner pushes; a separate mechanical executor merges."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "db",
+      "type": "database",
+      "label": "PostgreSQL",
+      "sublabel": "@anneal/db · Prisma",
+      "pos": [
+        40,
+        60
+      ],
+      "size": [
+        170,
+        64
+      ],
+      "tag": "tasks · runs · leases · events"
+    },
+    {
+      "id": "sessiontools",
+      "type": "security",
+      "label": "Session tools",
+      "sublabel": "stdio MCP / Pi extension",
+      "pos": [
+        1150,
+        60
+      ],
+      "size": [
+        170,
+        64
+      ]
+    },
+    {
+      "id": "web",
+      "type": "frontend",
+      "label": "Web console",
+      "sublabel": "@anneal/web · React + Vite",
+      "pos": [
+        40,
+        240
+      ],
+      "size": [
+        170,
+        64
+      ]
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "Control-plane API",
+      "sublabel": "@anneal/api · Hono",
+      "pos": [
+        410,
+        240
+      ],
+      "size": [
+        170,
+        64
+      ],
+      "tag": "owns workspace root"
+    },
+    {
+      "id": "runner",
+      "type": "backend",
+      "label": "Runner daemon",
+      "sublabel": "@anneal/runner",
+      "pos": [
+        780,
+        240
+      ],
+      "size": [
+        170,
+        64
+      ]
+    },
+    {
+      "id": "provider",
+      "type": "external",
+      "label": "Agent CLI",
+      "sublabel": "Codex · Claude Code · Pi",
+      "pos": [
+        1150,
+        240
+      ],
+      "size": [
+        170,
+        64
+      ]
+    },
+    {
+      "id": "github",
+      "type": "external",
+      "label": "GitHub",
+      "sublabel": "branches · pull requests",
+      "pos": [
+        1150,
+        420
+      ],
+      "size": [
+        170,
+        64
+      ],
+      "brand": "github"
+    },
+    {
+      "id": "inbox",
+      "type": "messagebus",
+      "label": "Inbox",
+      "sublabel": "@anneal/inbox",
+      "pos": [
+        40,
+        420
+      ],
+      "size": [
+        170,
+        64
+      ]
+    },
+    {
+      "id": "workspace",
+      "type": "cloud",
+      "label": "Ephemeral workspace",
+      "sublabel": "per-run git clone",
+      "pos": [
+        780,
+        420
+      ],
+      "size": [
+        170,
+        64
+      ]
+    },
+    {
+      "id": "mergeexec",
+      "type": "backend",
+      "label": "Merge executor",
+      "sublabel": "@anneal/merge-executor",
+      "pos": [
+        1150,
+        600
+      ],
+      "size": [
+        170,
+        64
+      ],
+      "tag": "mechanical run"
+    }
+  ],
+  "connections": [
+    {
+      "id": "operator-http",
+      "from": "web",
+      "to": "api",
+      "label": "HTTPS · operator session",
+      "variant": "emphasis",
+      "labelDy": 14
+    },
+    {
+      "id": "persist-state",
+      "from": "api",
+      "to": "db",
+      "label": "Prisma · SQL"
+    },
+    {
+      "id": "claim-agent-run",
+      "from": "runner",
+      "to": "api",
+      "label": "claim · fenced lease"
+    },
+    {
+      "id": "claim-mechanical-run",
+      "from": "mergeexec",
+      "to": "api",
+      "label": "claims mechanical Run",
+      "fromSide": "left",
+      "toSide": "bottom",
+      "via": [
+        [
+          495,
+          632
+        ]
+      ]
+    },
+    {
+      "id": "spawn-provider",
+      "from": "runner",
+      "to": "provider",
+      "label": "spawn · explicit env",
+      "variant": "emphasis"
+    },
+    {
+      "id": "provision-clone",
+      "from": "runner",
+      "to": "workspace",
+      "label": "clone · run branch",
+      "labelDy": 30
+    },
+    {
+      "id": "agent-tool-calls",
+      "from": "provider",
+      "to": "sessiontools",
+      "label": "tool calls"
+    },
+    {
+      "id": "session-writes",
+      "from": "sessiontools",
+      "to": "api",
+      "label": "session token · fencing checked",
+      "variant": "security"
+    },
+    {
+      "id": "blocking-question",
+      "from": "api",
+      "to": "inbox",
+      "label": "blocking question"
+    },
+    {
+      "id": "push-branch",
+      "from": "workspace",
+      "to": "github",
+      "label": "push run branch · open PR"
+    },
+    {
+      "id": "merge-pr",
+      "from": "mergeexec",
+      "to": "github",
+      "label": "merge PR · GitHub App"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Control plane",
+      "items": [
+        "Hono API over Prisma/PostgreSQL",
+        "Exactly one API owns the canonical workspace root",
+        "Task state is stored apart from durable Run and SessionEvent records"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Run execution",
+      "items": [
+        "Runners claim work with a fenced lease and poll one API",
+        "Each Run gets a throwaway clone on its own run branch",
+        "Provider processes receive an explicit environment, not the host's"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Trust boundaries",
+      "items": [
+        "Operator, runner, and per-run session principals are separate",
+        "Stale fencing generations are rejected and the process group terminated",
+        "Grants are an authorization and audit boundary, not an OS sandbox"
+      ]
+    }
+  ]
+}

@@ -18,6 +18,12 @@ Local runner -----> ephemeral git workspace
                          +----> Anneal session tools (MCP or Pi extension)
 ```
 
+A typed source for the same runtime shape — including the Inbox, the ephemeral
+workspace and the server-owned merge tail — is checked in at
+[`diagrams/anneal-runtime.architecture.json`](diagrams/anneal-runtime.architecture.json).
+See [`diagrams/README.md`](diagrams/README.md) for what those sources are and how
+they relate to this document.
+
 - The React/Vite web console and Hono API expose projects, agents, capabilities,
   tasks, chains, approvals, runs, sessions, and the Inbox workflow.
 - PostgreSQL, accessed through Prisma, stores task state separately from durable
