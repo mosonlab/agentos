@@ -148,35 +148,33 @@ AGENTOS_WORKSPACE_PATH="$(git rev-parse --show-toplevel)" AGENTOS_GATE_SERVER=pr
   verdict exists, and re-dispatching is the recovery. A timeout that recurs
   means the queue is systemically full, which is a capacity question, not a
   code question.
-- A slot whose lock cannot be *operated* — a read-only runner-account cache, a lock left
-  by the pre-#132 dispatcher, a lock naming no pid — is not busy and is never
-  waited on. The dispatcher keeps using whatever slots still work; if none do it
-  exits **76** immediately with `GATE NOT RUN:` naming the slots to clear, and
-  if it waited on a busy slot and the wait ran out with a broken lock still
-  around it exits 76 rather than 75. Waiting for a lock nobody can take is
-  waiting for nothing, and reporting it as a full queue hides what to fix.
+- A slot whose lock cannot be *operated* — a read-only slot root, a lock left by
+  the pre-#132 dispatcher, a lock naming no pid — is not busy and is never waited
+  on. The dispatcher keeps using whatever slots still work; if none do it exits
+  **76** immediately with `GATE NOT RUN:` naming the slots to clear, and if it
+  waited on a busy slot and the wait ran out with a broken lock still around it
+  exits 76 rather than 75. Waiting for a lock nobody can take is waiting for
+  nothing, and reporting it as a full queue hides what to fix.
 
 The dispatcher accounts for `remote-1`, `remote-1-2`, `remote-2`, and, when
-local dispatch is enabled, `local-1` through `local-N` under
-`$AGENTOS_RUNNER_HOME/.cache/gate-dispatch/` when
-`AGENTOS_RUNNER_HOME` is set, or `${XDG_CACHE_HOME:-$HOME/.cache}/gate-dispatch/`
-otherwise, outside any repository because the slots belong to the runner
-account. A direct `merge-gate.sh` bypasses that accounting. A direct
-`remote-gate.sh` bypasses the local lock too, but it cannot exceed worker
-capacity: every installed `run-gate.sh` contends for the worker-wide
-`~/gate/.full-gate.lock` and, only on a capacity-two host,
+local dispatch is enabled, `local-1` through `local-N` in the slot directory
+described below, outside any repository. A direct `merge-gate.sh` bypasses that
+accounting. A direct `remote-gate.sh` bypasses the local lock too, but it cannot
+exceed worker capacity: every installed `run-gate.sh` contends for the
+worker-wide `~/gate/.full-gate.lock` and, only on a capacity-two host,
 `~/gate/.full-gate-2.lock`. Each is held with `flock` for the real process
 lifetime. If an SSH connection drops while its remote process survives, that
 process keeps its worker slot and a later invocation waits instead of exceeding
 the configured capacity.
 
 Local slots are accounted per runner account: the account that owns
-`AGENTOS_RUNNER_HOME` owns the shared slot directory. On a host with one
-account and many runners, `RUNNER_GATE_LOCAL_SLOTS` is the host ceiling. On a
-host with one account per runner, it is a per-runner ceiling and the host
-ceiling is the sum of those per-runner counts. Outside a runner,
-`AGENTOS_RUNNER_HOME` is unset and the slot directory continues to resolve
-from `XDG_CACHE_HOME` or `HOME` as before.
+`AGENTOS_RUNNER_HOME` owns the shared slot directory at
+`$AGENTOS_RUNNER_HOME/.cache/gate-dispatch/`. On a host with one account and
+many runners, `RUNNER_GATE_LOCAL_SLOTS` is the host ceiling. On a host with one
+account per runner, it is a per-runner ceiling and the host ceiling is the sum
+of those per-runner counts. Outside a runner, `AGENTOS_RUNNER_HOME` is unset and
+the slot directory continues to resolve to
+`${XDG_CACHE_HOME:-$HOME/.cache}/gate-dispatch/` as before.
 
 A lock is a file created with `ln`, holding the pid of the dispatcher that owns
 it. That shape is deliberate and `packages/runner/runtime-tools/gate-worker/lib.sh` explains it:
@@ -523,13 +521,12 @@ changing host capacity.
 
 **`GATE NOT RUN: the slot locks are unusable (...)`** — the named slots have a
 lock this dispatcher cannot operate, so nothing was gated and nothing will be
-until they are cleared. Look at the runner account's cache
-(`$AGENTOS_RUNNER_HOME/.cache/gate-dispatch/` in a Run, otherwise
-`${XDG_CACHE_HOME:-$HOME/.cache}/gate-dispatch/`): a `<slot>.lock`
+until they are cleared. Look in the slot directory named by the dispatcher's
+startup line (see the accounting-unit paragraph above): a `<slot>.lock`
 *directory* is a leftover from the pre-#132 dispatcher and can go once no old
 `gate-dispatch.sh` is running; a `<slot>.slot` file that does not contain a pid
 was not written by this script and is cleared by hand, again only once no gate
-is running; and a message about not being able to write a lock means the cache
+is running; and a message about not being able to write a lock means the slot
 directory itself is read-only or full. Re-dispatch after clearing.
 
 **`docker: permission denied` / `the docker daemon is not reachable`** — the
@@ -601,10 +598,8 @@ must be reported with its verdict.
 
 ## Undoing it
 
-The local machine carries only the slot lock files under
-the runner account's cache (`$AGENTOS_RUNNER_HOME/.cache/gate-dispatch/` in a
-Run, otherwise `${XDG_CACHE_HOME:-$HOME/.cache}/gate-dispatch/`), which are inert
-when nothing runs. To return a
+The local machine carries only the slot lock files in the directory named by the
+dispatcher's startup line; they are inert when nothing runs. To return a
 capacity-two worker to one slot, remove `~/gate/worker-capacity` after its gates
 finish. To retire one repository from the worker, delete `~/gate/<repo>` on it;
 to decommission the worker, delete `~/gate`.

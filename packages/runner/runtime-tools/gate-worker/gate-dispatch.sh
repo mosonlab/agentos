@@ -23,10 +23,9 @@
 # the slots belong to the account, not to a checkout. lib.sh holds the locking
 # itself and says why it is shaped the way it is. Sessions of one account contend
 # for the same slots. A direct merge-gate.sh is invisible to this accounting. A
-# direct
-# remote-gate.sh bypasses the local accounting too, but run-gate.sh enforces the
-# worker's configured capacity with worker-wide execution locks held for the
-# real process lifetime.
+# direct remote-gate.sh bypasses the local accounting too, but run-gate.sh
+# enforces the worker's configured capacity with worker-wide execution locks
+# held for the real process lifetime.
 #
 # The optional local slots are only eligible when this worktree is already the
 # thing a local gate would test: HEAD at the requested commit and the tree clean.

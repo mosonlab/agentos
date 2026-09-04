@@ -706,7 +706,6 @@ test("local slots are shared by sessions of one runner account", async (t) => {
 test("without a runner account home, local slots remain under HOME", (t) => {
   const repo = fixtureRepo(t, {});
   const home = join(scratch(t), "legacy-home");
-  const cache = join(scratch(t), "legacy-xdg-cache");
   mkdirSync(home, { recursive: true });
   const result = dispatch(t, repo, [repo.head, "--master", repo.head, "--allow-local"], {
     AGENTOS_RUNNER_HOME: undefined,
@@ -718,9 +717,8 @@ test("without a runner account home, local slots remain under HOME", (t) => {
   const homeSlots = join(home, ".cache", "gate-dispatch");
   const rootLine = startupLineFor(result.stderr, homeSlots);
   assert.ok(rootLine, result.stderr);
-  assert.match(rootLine, /HOME/u);
+  assert.match(rootLine, /\(from HOME\)/u);
   assert.ok(existsSync(homeSlots));
-  assert.equal(existsSync(join(cache, "gate-dispatch")), false);
 });
 
 test("an invalid local slot count is a usage error before any lock is touched", (t) => {
