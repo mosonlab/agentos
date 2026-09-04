@@ -6,14 +6,28 @@ import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { type BuildInfo } from "@anneal/build-info";
+
 import { RUNNER_KINDS } from "./adapters.js";
-import { DEFAULT_API_URL, defaultRunnerPath, loadRunnerConfig, runnerProxyEnvironment } from "./config.js";
+import { DEFAULT_API_URL, defaultRunnerPath, loadRunnerConfig, runnerDaemonVersion, runnerProxyEnvironment } from "./config.js";
 import { LocalApiDestinationError } from "./local-origin.js";
 
 const require = createRequire(import.meta.url);
 
 const apiSource = (relative: string): string =>
   readFileSync(fileURLToPath(new URL(`../../api/src/${relative}`, import.meta.url)), "utf8");
+
+const OID = "0123456789abcdef0123456789abcdef01234567";
+
+const built = (overrides: Partial<BuildInfo> = {}): BuildInfo => ({
+  stamped: true,
+  commit: OID,
+  dirty: false,
+  packageName: "@anneal/runner",
+  version: "0.0.0",
+  builtAt: "2026-08-18T00:00:00.000Z",
+  ...overrides,
+});
 
 test("the default workspace root matches the API's definition of it", () => {
   const previous = process.env.RUNNER_WORKSPACE_ROOT;
@@ -113,6 +127,12 @@ test("the repository mirror defaults into the task account's home and accepts an
 test("the daemon reports the runner package version", () => {
   const metadata = require("../package.json") as { version: string };
   assert.equal(loadRunnerConfig().daemonVersion, metadata.version);
+});
+
+test("a stamped runner reports its build commit as daemonVersion", () => {
+  const metadata = require("../package.json") as { version: string };
+  assert.equal(runnerDaemonVersion(built()), OID);
+  assert.equal(runnerDaemonVersion(built({ commit: null })), metadata.version);
 });
 
 test("served runner kinds are optional, exact, deduplicated, and normalized", () => {

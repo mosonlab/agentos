@@ -1,4 +1,7 @@
 import { deployPhasesForRole, upgradeDeployPhasesForRole } from "./deploy-phases.mjs";
+import { DEFAULT_DEPLOY_ROLE, DEPLOY_ROLES, resolveDeployRole } from "./deploy-role.mjs";
+
+export { DEFAULT_DEPLOY_ROLE, DEPLOY_ROLES, resolveDeployRole };
 
 export const BLOCKING_RUN_STATUSES = Object.freeze(["claimed", "provisioning", "running"]);
 
@@ -41,17 +44,20 @@ const runnerLabelForIndex = (index) => index === 1
 export const generateServiceInventory = (
   runnerCount = resolveRunnerCount(),
   runnerIdPrefix = resolveRunnerIdPrefix(),
+  deployRole = resolveDeployRole(),
 ) => {
   const count = validatedRunnerCount(runnerCount);
   const prefix = resolveRunnerIdPrefix({ AGENTOS_RUNNER_ID_PREFIX: runnerIdPrefix });
+  if (!DEPLOY_ROLES.includes(deployRole)) throw new Error(`deploy-role-invalid:${String(deployRole)}`);
   const entries = [
-    { label: "com.agentos.api", runnerId: null },
-    { label: "com.agentos.inbox", runnerId: null },
+    ...(deployRole === DEFAULT_DEPLOY_ROLE
+      ? [{ label: "com.agentos.api", runnerId: null }, { label: "com.agentos.inbox", runnerId: null }]
+      : []),
     ...Array.from({ length: count }, (_unused, offset) => {
       const index = offset + 1;
       return { label: runnerLabelForIndex(index), runnerId: `${prefix}runner-${index}` };
     }),
-    { label: "com.agentos.web", runnerId: null },
+    ...(deployRole === DEFAULT_DEPLOY_ROLE ? [{ label: "com.agentos.web", runnerId: null }] : []),
   ];
   return Object.freeze(entries.map((entry) => Object.freeze({
     ...entry,

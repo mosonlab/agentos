@@ -57,9 +57,9 @@ export const runServiceInstaller = (args, context = {}) => {
         serviceUser: options.serviceUser,
       });
       if (result.platform === "linux") {
-        const prefix = result.runnerIdPrefix
+        const prefix = `${result.deployRole === "runner" ? "AGENTOS_DEPLOY_ROLE=runner " : ""}${result.runnerIdPrefix
           ? `AGENTOS_RUNNER_ID_PREFIX=${shellQuote(result.runnerIdPrefix)} `
-          : "";
+          : ""}`;
         const phase = options.revert ? "REVERT" : options.apply || options.installUnits ? "APPLY" : "PLAN";
         process.stdout.write(`${phase} platform=linux\n`);
         process.stdout.write(`${phase} unit-directory=${result.unitDirectory ?? "/etc/systemd/system"}\n`);

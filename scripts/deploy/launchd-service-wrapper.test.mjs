@@ -194,6 +194,22 @@ test("runner inventory is generated in order with ids and systemd names", () => 
   assert.deepEqual(generateServiceInventory(), SERVICE_INVENTORY_ENTRIES);
 });
 
+test("runner deploy role inventory contains only the configured local runners", () => {
+  const expected = [
+    "com.agentos.runner",
+    "com.agentos.runner-2",
+    "com.agentos.runner-3",
+  ];
+  const generated = generateServiceInventory(3, "mac-", "runner");
+  assert.deepEqual(generated.map(({ label }) => label), expected);
+  assert.deepEqual(generated.map(({ runnerId }) => runnerId), ["mac-runner-1", "mac-runner-2", "mac-runner-3"]);
+  assert.deepEqual(
+    generateDeployServiceInventory(3, "mac-", "runner"),
+    generated,
+  );
+  assert.equal(generated.some(({ label }) => ["com.agentos.api", "com.agentos.inbox", "com.agentos.web"].includes(label)), false);
+});
+
 test("a configured count drives both runtime inventory modules", () => {
   const source = [
     'import { SERVICE_INVENTORY, SERVICE_LABELS as wrapperLabels } from "./scripts/deploy/launchd-service-wrapper.mjs";',

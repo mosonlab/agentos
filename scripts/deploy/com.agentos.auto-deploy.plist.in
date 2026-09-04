@@ -27,6 +27,7 @@
     <string>__NPM_BINARY__</string>
     <key>DEPLOY_SOURCE_REMOTE</key>
     <string>__SOURCE_REMOTE__</string>
+__DEPLOY_ROLE_ENVIRONMENT__
 __BACKUP_ENVIRONMENT__
   </dict>
   <key>RunAtLoad</key>
