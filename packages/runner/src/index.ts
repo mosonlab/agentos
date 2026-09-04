@@ -14,7 +14,7 @@ loadEnvironment({ path: new URL("../../../.env", import.meta.url), quiet: true }
 // one of them being stale while the other was current (issue #140).
 console.log(`Anneal runner build: ${formatBuildLine(readBuildInfo(import.meta.url))}`);
 
-const [{ loadRunnerConfig }, { nodeBinaryPath, runtimeDescriptor }, { pollForTask, runStartupPreflight, startCliAvailabilityMonitor }, { reclaimWorkspaces }, { prepareHostProofSlots }, { runPollingLoop }] = await Promise.all([
+const [{ loadRunnerConfig }, { nodeBinaryPath, runtimeDescriptor }, { pollForTask, runStartupPreflight, startCliAvailabilityMonitor, startupPreflightLog }, { reclaimWorkspaces }, { prepareHostProofSlots }, { runPollingLoop }] = await Promise.all([
   import("./config.js"),
   import("./adapters.js"),
   import("./runner.js"),
@@ -76,7 +76,7 @@ const sharedLock = await holdSharedServiceMaintenanceLock({
 });
 
 const preflight = await runStartupPreflight(config);
-console.log(`CLI preflight: ${Object.entries(preflight).map(([runner, ok]) => `${runner.toLowerCase()}=${ok ? "ok" : "blocked"}`).join(" ")}`);
+console.log(startupPreflightLog(preflight));
 const availabilityMonitor = startCliAvailabilityMonitor(config);
 const stop = (signal: string): void => {
   console.log(`Received ${signal}; stopping local runner after the current task`);

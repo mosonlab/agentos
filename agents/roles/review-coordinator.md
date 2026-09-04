@@ -1,8 +1,8 @@
 ---
 name: review-coordinator
 title: Review Coordinator
-model: openai-codex/gpt-5.6-sol:xhigh
-runner: pi
+model: gpt-5.6-sol:xhigh
+runner: codex
 inboxAccess: false
 collaborators: []
 ---

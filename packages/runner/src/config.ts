@@ -60,6 +60,7 @@ export type RunnerConfig = {
   toolDeadlineMs: number;
   apiTimeoutMs: number;
   runAsPrefix: string[];
+  servedKinds: readonly RunnerKind[] | null;
   binaries: Record<RunnerKind, string>;
 };
 
@@ -113,9 +114,24 @@ const optionalSshDestination = (name: string, value: string | undefined): string
   return value;
 };
 
+const parseServedKinds = (value: string | undefined): readonly RunnerKind[] | null => {
+  if (value === undefined) return null;
+  const entries = value.split(",").map((raw) => ({ raw, name: raw.trim() }));
+  const acceptedNames = RUNNER_KINDS.join(", ");
+  for (const { raw, name } of entries) {
+    if (!RUNNER_KINDS.includes(name as RunnerKind)) {
+      throw new Error(
+        `RUNNER_SERVED_KINDS contains invalid entry ${JSON.stringify(raw)} in ${JSON.stringify(value)}; accepted names: ${acceptedNames}`,
+      );
+    }
+  }
+  return RUNNER_KINDS.filter((runner) => entries.some(({ name }) => name === runner));
+};
+
 export const loadRunnerConfig = ({ cpuCount = cpus().length }: { cpuCount?: number } = {}): RunnerConfig => {
   const leaseSeconds = Number.parseInt(process.env.RUNNER_LEASE_SECONDS ?? "60", 10);
   const runAsPrefix = splitPrefix(process.env.RUNNER_RUN_AS_PREFIX ?? "");
+  const servedKinds = parseServedKinds(process.env.RUNNER_SERVED_KINDS);
   const workspaceRoot = process.env.RUNNER_WORKSPACE_ROOT ?? join(homedir(), ".agentos", "runs");
   const home = process.env.RUNNER_HOME ?? process.env.HOME ?? "/var/empty";
   const gateServer = optionalSshDestination("RUNNER_GATE_SERVER", process.env.RUNNER_GATE_SERVER);
@@ -179,6 +195,7 @@ export const loadRunnerConfig = ({ cpuCount = cpus().length }: { cpuCount?: numb
     // no work — so a flat ceiling is safe.
     apiTimeoutMs: positiveInteger("RUNNER_API_TIMEOUT_MS", process.env.RUNNER_API_TIMEOUT_MS ?? "10000"),
     runAsPrefix,
+    servedKinds,
     binaries: Object.fromEntries(RUNNER_KINDS.map((runner) => {
       const definition = RUNNER_DEFINITIONS[runner];
       return [runner, process.env[definition.binaryEnvironment] ?? definition.defaultBinary];

@@ -23,6 +23,7 @@ import {
   Prisma,
   type PrismaClient,
   RunStatus,
+  RunnerKind,
   SessionExecutionStatus,
   taskIsIntegratorStep,
   TaskStatus,
@@ -76,6 +77,7 @@ export const claimInput = z.object({
   runnerId: z.string().trim().min(1).max(120),
   leaseSeconds: z.number().int().min(15).max(3600).default(60),
   contractVersion: z.number().int().optional(),
+  servedKinds: z.array(z.nativeEnum(RunnerKind)).min(1).max(Object.values(RunnerKind).length).optional(),
   ...runnerTelemetryFields,
 });
 
@@ -341,6 +343,9 @@ export const claimRun = async (
         });
       })()
       : await (async () => {
+        const servedKindPredicate = body.servedKinds === undefined
+          ? Prisma.empty
+          : Prisma.sql`AND candidate."runner" IN (${Prisma.join(body.servedKinds.map((runner) => Prisma.sql`lower(${runner})::"RunnerKind"`))})`;
         // Rank in PostgreSQL before applying the window so the transaction
         // returns only the candidates it can inspect. Mechanical rows are not
         // in the ordinary runner's lane and therefore cannot consume that
@@ -371,6 +376,7 @@ export const claimRun = async (
             AND task."archivedAt" IS NULL
             AND (candidate."blockedByRunId" IS NULL OR blocker."status" = lower(${RunStatus.SUCCEEDED})::"RunStatus")
             AND COALESCE(template_step."outputKind", '') <> ${INTEGRATOR_OUTPUT_KIND}
+            ${servedKindPredicate}
             AND NOT EXISTS (
               SELECT 1
               FROM "ChainControl" AS chain_control
@@ -669,6 +675,7 @@ export const claimRun = async (
       // spawns no CLI, so an open CLI circuit is not evidence about it; the
       // `runner` on its row is an inert artifact of the sentinel Agent.
       if (executionMode === "agent") {
+        if (body.servedKinds !== undefined && !body.servedKinds.includes(candidate.runner)) return SKIP;
         const backend = await tx.runnerBackendState.findUnique({ where: { runner: candidate.runner } });
         if (!runnerBackendAllowsClaim(backend)) return SKIP;
       }

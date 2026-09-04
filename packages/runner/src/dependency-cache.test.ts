@@ -40,6 +40,7 @@ const config = (root: string, runAsPrefix: string[] = []): RunnerConfig => ({
   hostProofSlots: 3,
   dependencyCacheRoot: join(root, "cache"),
   runAsPrefix,
+  servedKinds: null,
   path: process.env.PATH ?? "/usr/bin:/bin",
   home: root,
   gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },

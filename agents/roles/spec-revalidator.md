@@ -1,8 +1,8 @@
 ---
 name: spec-revalidator
 title: Specification Revalidator
-model: openai-codex/gpt-5.6-luna:xhigh
-runner: pi
+model: gpt-5.6-luna:xhigh
+runner: codex
 inboxAccess: true
 collaborators: []
 ---

@@ -71,6 +71,7 @@ const runnerConfig = (root: string, runnerId: string): RunnerConfig => ({
   apiUrl: API_ORIGIN,
   runnerToken: RUNNER_TOKEN,
   runnerId,
+  servedKinds: null,
   daemonVersion: "0.0.0-dbtest",
   pollIntervalMs: 1_000,
   claimMaxLoadAverage: 1.5,
