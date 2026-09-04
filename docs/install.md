@@ -60,6 +60,33 @@ LaunchDaemon and Linux systemd profiles in the public
 Those procedures do not change the platform classifications above or the
 authoritative support matrix.
 
+## Pre-seed a repository mirror
+
+Runners keep one bare mirror per remote repository under
+`RUNNER_REPO_MIRROR_ROOT`. When that variable is unset, the mirror root is
+`~/.agentos/repo-mirrors` (in the home of the runner account). A mirror
+directory is named exactly `sha256(remoteUrl).git`: `remoteUrl` is the exact
+remote URL string passed to the runner, hashed byte-for-byte without URL
+normalization, and the lowercase hexadecimal SHA-256 digest is followed by
+`.git`.
+
+On a host whose runners have not started yet, pre-seed the mirror before
+starting them. For example, choose the same remote URL and mirror root, then
+run `git clone --mirror` directly into the computed directory:
+
+```sh
+mirror_root="${RUNNER_REPO_MIRROR_ROOT:-$HOME/.agentos/repo-mirrors}"
+remote_url='https://github.com/example/project.git'
+mirror_dir="$mirror_root/$(printf %s "$remote_url" | sha256sum | awk '{print $1}').git"
+mkdir -p "$mirror_root"
+git clone --mirror "$remote_url" "$mirror_dir"
+```
+
+Alternatively, copy the complete mirror directory with the matching digest
+name from an existing host into the same mirror root. Pre-seeding a host while
+its runners are running is unsupported: stop all runners first because the
+mirror lock protocol is process-owned.
+
 ## Project onboarding
 
 The canonical Tier 0 and Tier 1 onboarding contract — including canonical
