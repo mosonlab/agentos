@@ -23,6 +23,9 @@ export type LockedTask = {
   dispatchAfter: { name: string; status: TaskStatus } | null;
   assigneeType: AssigneeType;
   assigneeAgentId: string | null;
+  /** Read under the lock so a budget-change activity states the value the write
+   *  actually replaced, not one a concurrent patch has already moved. */
+  maxSessionsPerTask: number;
   templateStep: {
     stepIndex: number;
     outputKind: string;
@@ -37,6 +40,7 @@ export const lockedTaskSelect = {
   projectId: true,
   chainId: true,
   approvalGate: true,
+  maxSessionsPerTask: true,
   dispatchAfterTaskId: true,
   dispatchAfter: { select: { name: true, status: true } },
   assigneeType: true,

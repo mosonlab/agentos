@@ -435,6 +435,11 @@ export type BoardCard<DateTime = string> = {
   taskCost: UsageCost | null;
   mergeOutcome: MergeOutcome | null;
   repairOf: RepairBinding | null;
+  /** The server's own budget verdict, so the board's retry affordance and the
+   *  detail page's cannot state the rule differently. Computed by
+   *  `taskStartability`, which is the only thing that reads a task's configured
+   *  budget together with the grants its runs carry. */
+  budgetRemaining: boolean;
   /** Carried once by one visible member of each Chain; null otherwise. */
   chainAggregate: ChainAggregate<DateTime> | null;
 };
@@ -609,6 +614,15 @@ export type TaskDetail<DateTime = string, DecimalValue = string> = TaskBase<Date
   /** The task's own latest merge-result projection. */
   mergeOutcome: MergeOutcome | null;
   mergeRecovery: MergeRecovery<DateTime> | null;
+  /** See `BoardCard.budgetRemaining`. */
+  budgetRemaining: boolean;
+  /** The prompt text an operator may rewrite, or null when this task has none.
+   *  A template Step sends its brief — the fenced section `PATCH /tasks/:id`
+   *  rewrites in place, leaving the platform-authored prompt and suffix alone —
+   *  and an ordinary task sends its whole description, which the same patch
+   *  replaces outright. Platform-authored Steps and an unreadable brief fence
+   *  send null: there is nothing an operator owns to edit. */
+  editableBrief: string | null;
 };
 
 /** HTTP envelope for `GET /tasks/:taskId/startability`. */

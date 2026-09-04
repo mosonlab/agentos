@@ -119,6 +119,7 @@ const nativeBoardCard = (): NativeBoardCard => ({
   taskCost: null,
   mergeOutcome: null,
   repairOf: null,
+  budgetRemaining: true,
   chainAggregate: null,
 });
 
@@ -218,6 +219,8 @@ const nativeTaskDetail = (): NativeTaskDetail => ({
   taskCost: null,
   mergeOutcome: null,
   mergeRecovery: null,
+  budgetRemaining: true,
+  editableBrief: null,
 });
 
 test("native board, task-list, and task-detail salvage fields serialize to the browser shape", () => {

@@ -30,6 +30,25 @@ export const stepHasTaskBrief = (outputKind: string): boolean => {
   return role !== "readiness" && role !== "integrator";
 };
 
+/**
+ * Whether `PATCH /tasks/:id { description }` rewrites this task's brief in
+ * place instead of replacing the whole description.
+ *
+ * The read projection and the write path have to answer this the same way. An
+ * operator who is shown the wrong half of the prompt edits text the patch then
+ * writes somewhere else — the whole canonical prompt copied into the brief
+ * fence, or a brief silently replacing the Step's platform-authored body.
+ */
+export const patchesBriefInPlace = (
+  task: { templateId: string | null; chainId: string | null },
+  outputKind: string | null,
+): boolean => (
+  task.templateId !== null
+  && task.chainId !== null
+  && outputKind !== null
+  && stepHasTaskBrief(outputKind)
+);
+
 const outputIsPlatformAuthored = (outputKind: string): boolean => {
   const role = stepRole({ outputKind });
   return role === "readiness" || role === "integrator" || role === "regression";
@@ -137,4 +156,26 @@ export const rewriteBrief = (
   const result = locateBrief(description, migration);
   if ("unparseable" in result) return result;
   return `${result.prompt}${frameBrief(newBrief)}${result.suffix}`;
+};
+
+/**
+ * The prompt text this task's operator owns, or null when the platform owns all
+ * of it. Mirrors what `PATCH /tasks/:id { description }` will do with the text
+ * it is handed, which is the only reason the two agree.
+ */
+export const editableBrief = (
+  task: { description: string; templateId: string | null; chainId: string | null },
+  templateStep: { outputKind: string; priorOutputKinds: string[] } | null,
+): string | null => {
+  if (patchesBriefInPlace(task, templateStep?.outputKind ?? null)) {
+    const brief = readBrief(task.description, {
+      legacyAttachmentsFromPrevious: (templateStep?.priorOutputKinds.length ?? 0) > 0,
+    });
+    // An unreadable fence is not an invitation to rewrite the description
+    // wholesale: the patch would refuse the write anyway.
+    return "unparseable" in brief ? null : brief.brief;
+  }
+  // Readiness and merge-execution Steps run a server-authored prompt. Nothing
+  // in it belongs to the operator, so nothing in it is offered for editing.
+  return templateStep === null ? task.description : null;
 };

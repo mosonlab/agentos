@@ -1,4 +1,4 @@
-import { type ReactNode, useRef, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 
 import { api } from "../lib/api";
 import { compactTokens, durationWithInboxWait, formatDateTime, pullRequestLabel, repoWebUrl, sha, timeAgo, titleCase, usageCostLabel } from "../lib/format";
@@ -19,9 +19,10 @@ import {
   STAT_PILL, STAT_PILLS, TABLE_NAME, TABLE_SUB, TABLE_TIGHT,
   Card, EmptyState, ErrorNotice, KeyValue, Markdown, MarkdownClamp, Page, Pill, RunPill, TaskPill, Toggle,
 } from "../components/ui";
-import { retryable, runLiveness } from "../lib/board";
+import { retryShape, runLiveness } from "../lib/board";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
+import { Textarea } from "../components/ui/textarea";
 import { Select } from "../components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 
@@ -283,24 +284,104 @@ export const TaskOutput = ({ poll }: { poll: ReturnType<typeof usePoll<TaskStepO
   );
 };
 
-export const TaskPrompt = ({ description }: { description: string }): ReactNode => {
+/**
+ * The prompt, read-only until an operator asks to edit it.
+ *
+ * Read-only is the default because this text is what the next run executes and
+ * it is long: an always-live textarea is a mis-click away from rewriting the
+ * work, and it would bury the rest of the page.
+ *
+ * `editableBrief` is the operator's half — a template Step's brief, or an
+ * ordinary task's whole description — and `null` means the platform authored
+ * all of it and there is nothing here to edit. The server decides which,
+ * because the patch that receives the text decides the same way.
+ */
+export const TaskPrompt = ({ description, editableBrief, pending, onSave }: {
+  description: string;
+  editableBrief: string | null;
+  pending: boolean;
+  onSave: (brief: string) => void;
+}): ReactNode => {
   const t = useT();
+  const [draft, setDraft] = useState<string | null>(null);
   const parts = partitionTaskPrompt(description);
+  const editing = draft !== null;
   return (
-    <Card title={t("taskDetail.prompt.title")}>
+    <Card
+      title={t("taskDetail.prompt.title")}
+      extra={editableBrief === null || editing ? null : (
+        <Button type="button" variant="legacy" size="legacySmall" disabled={pending}
+          onClick={() => setDraft(editableBrief)}>{t("taskDetail.prompt.edit")}</Button>
+      )}
+    >
       <div className={STACK}>
-        {parts.responsibility.length === 0
-          ? <EmptyState>{t("taskDetail.prompt.empty")}</EmptyState>
-          : <Markdown text={parts.responsibility} />}
-        {parts.productContract === null ? null : (
-          <details>
-            <summary className="cursor-pointer text-muted-foreground">{t("taskDetail.prompt.productContract")}</summary>
-            <div className="mt-2.5"><Markdown text={parts.productContract} /></div>
-          </details>
+        {editing ? (
+          <>
+            <Textarea rows={14} value={draft} disabled={pending} aria-label={t("taskDetail.prompt.edit")}
+              onChange={(event) => setDraft(event.target.value)} />
+            <p className="text-[11.5px] text-muted-foreground">
+              {t(description === editableBrief ? "taskDetail.prompt.editWhole" : "taskDetail.prompt.editBrief")}
+            </p>
+            <div className={ROW}>
+              <Button type="button" variant="legacy" size="legacy" disabled={pending || draft === editableBrief}
+                onClick={() => { onSave(draft); setDraft(null); }}>{t("common.save")}</Button>
+              <Button type="button" variant="legacy" size="legacy" disabled={pending}
+                onClick={() => setDraft(null)}>{t("common.cancel")}</Button>
+            </div>
+          </>
+        ) : (
+          <>
+            {parts.responsibility.length === 0
+              ? <EmptyState>{t("taskDetail.prompt.empty")}</EmptyState>
+              : <Markdown text={parts.responsibility} />}
+            {parts.productContract === null ? null : (
+              <details>
+                <summary className="cursor-pointer text-muted-foreground">{t("taskDetail.prompt.productContract")}</summary>
+                <div className="mt-2.5"><Markdown text={parts.productContract} /></div>
+              </details>
+            )}
+            <p className="text-[11.5px] text-muted-foreground">{t("taskDetail.prompt.effective")}</p>
+          </>
         )}
-        <p className="text-[11.5px] text-muted-foreground">{t("taskDetail.prompt.effective")}</p>
       </div>
     </Card>
+  );
+};
+
+/**
+ * The task's configured run budget, editable in place.
+ *
+ * This is the operator's only way past an exhausted budget, so it sits in the
+ * always-visible half of the details card rather than behind the configuration
+ * toggle. The count beside it is attempts already spent; the grants a run
+ * carries are not added in here, because only the server reads those — the
+ * retry control's own state is what reports the effective ceiling.
+ */
+const RunBudgetField = ({ used, limit, pending, onCommit }: {
+  used: number;
+  limit: number;
+  pending: boolean;
+  onCommit: (limit: number) => void;
+}): ReactNode => {
+  const t = useT();
+  const [draft, setDraft] = useState(String(limit));
+  useEffect(() => { setDraft(String(limit)); }, [limit]);
+  // Out-of-range text snaps back to the value in force rather than travelling to
+  // a route that would reject it; `taskFields.maxSessionsPerTask` owns 1..100.
+  const commit = (): void => {
+    const next = Number(draft);
+    if (!Number.isInteger(next) || next < 1 || next > 100) setDraft(String(limit));
+    else if (next !== limit) onCommit(next);
+  };
+  return (
+    <span className={ROW}>
+      <Input type="number" min={1} max={100} className="w-[76px]" value={draft} disabled={pending}
+        aria-label={t("taskDetail.details.runBudget")}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={commit}
+        onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} />
+      <span className="text-[11.5px] text-muted-foreground">{t("taskDetail.details.runBudgetUsed", { n: used })}</span>
+    </span>
   );
 };
 
@@ -435,6 +516,7 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
   const totalTokens = counted.length === 0 ? null : counted.reduce((sum, value) => sum + value, 0);
   // `app.ts` orders runs `runNumber desc`, so the newest run is the head.
   const newest = runs[0];
+  const retryState = retryShape(task, newest);
   const newestIsActive = task.executionOwner === "agent" && newest !== undefined
     && runLiveness(newest).live;
   const newestIsCancelling = newestIsActive && newest.cancelRequestedAt !== null && newest.cancelAcknowledgedAt === null;
@@ -472,8 +554,14 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
             {task.moveTargets.map(({ status }) => <option key={status} value={status}>{t(`status.task.${status}`)}</option>)}
           </Select>
         ) : task.chainId === null ? null : <span className="text-[11.5px] text-muted-foreground">{t("taskDetail.chainStatusReadonly")}</span>}
-        {retryable(task, task.runs[0]) ? (
+        {retryState === "available" ? (
           <Button type="button" variant="legacy" size="legacy" disabled={pending} onClick={retry}><IconRefresh />{t("common.retry")}</Button>
+        ) : retryState === "budget-exhausted" ? (
+          // Shown disabled rather than hidden: the budget field below lifts this
+          // exact refusal, and a control that vanishes never says where to go.
+          <Button type="button" variant="legacy" size="legacy" disabled title={t("taskDetail.retry.budgetExhausted")}>
+            <IconRefresh />{t("common.retry")}
+          </Button>
         ) : null}
         {newestIsActive ? (
           <Button type="button" variant="legacy" size="legacy" disabled={pending || newestIsCancelling} onClick={() => cancelCurrentRun(false)}>
@@ -496,7 +584,15 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
       <div className={STACK}>
         {actionError === null ? null : <ErrorNotice message={actionError} />}
         {error === null ? null : <ErrorNotice message={error.message} onRetry={reload} />}
-        {task.failureReason === null ? null : <ErrorNotice message={task.failureReason} />}
+        {task.failureReason === null ? null : (
+          <ErrorNotice message={
+            <span className={ROW}>
+              <span>{task.failureReason}</span>
+              <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" disabled={pending}
+                onClick={() => patch({ failureReason: null })}>{t("taskDetail.failureReason.clear")}</Button>
+            </span>
+          } />
+        )}
 
         <div className={STAT_PILLS}>
           <span className={STAT_PILL}>{t("taskDetail.stats.runs", { n: runs.length })}</span>
@@ -510,8 +606,10 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
         {newest === undefined ? null : <NowBlock run={newest} />}
 
         <Card title={t("taskDetail.details.title")}>
-          {/* Only these three move while a task runs. Everything else was fixed
-              at creation and sits behind the toggle below. */}
+          {/* Only these move while a task runs. Everything else was fixed at
+              creation and sits behind the toggle below. The run budget is here
+              rather than behind that toggle because it is what an operator
+              reaches for when a task has stopped being able to retry. */}
           <KeyValue items={[
             { k: t("taskDetail.details.executionOwner"), v: executionOwner },
             {
@@ -524,6 +622,11 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
               k: t("taskDetail.details.pullRequest"),
               v: pullRequestUrl === null ? "—"
                 : <ExternalLink href={pullRequestUrl}>{pullRequestLabel(pullRequestUrl)}</ExternalLink>,
+            },
+            {
+              k: t("taskDetail.details.runBudget"),
+              v: <RunBudgetField used={runs.length} limit={task.maxSessionsPerTask} pending={pending}
+                onCommit={(maxSessionsPerTask) => patch({ maxSessionsPerTask })} />,
             },
           ]} />
           {configurationShown ? (
@@ -589,7 +692,8 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
             : chain.loading ? <Card title={t("chain.title")}><EmptyState>{t("chain.loading")}</EmptyState></Card>
               : <Card title={t("chain.title")}><ErrorNotice message={chain.error?.message ?? t("chain.error")} onRetry={chain.reload} /></Card>}
 
-        <TaskPrompt description={task.description} />
+        <TaskPrompt description={task.description} editableBrief={task.editableBrief} pending={pending}
+          onSave={(brief) => patch({ description: brief })} />
 
         <TaskOutput poll={output} />
 

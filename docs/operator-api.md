@@ -1200,8 +1200,10 @@ creation), `approvalGate`, `opensPullRequest`,
   `false`, default `true`).
 
 The `board` view is a compact card projection. It includes `createdAt` for
-stable queue ordering and `assigneeType` so a human-owned task can be
-distinguished from an agent task whose agent assignment is missing.
+stable queue ordering, `assigneeType` so a human-owned task can be
+distinguished from an agent task whose agent assignment is missing, and
+`budgetRemaining`, the same run-budget verdict `GET /tasks/:taskId` and
+`GET /tasks/:taskId/startability` report.
 For a Chain member, the first emitted member also carries the
 `chainAggregate` projection. Its `activation.state` is one of
 `parked-unactivated`, `waiting-on-predecessor`, `running`, `idle`, `held`, or
@@ -1260,6 +1262,16 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/tasks" \
 - Each returned Run includes the report-only `worktreeContainmentViolations`
   fact: absolute worktree paths from that Run's checkout found outside its run
   workspace, or `null` when no observation was reported.
+- `budgetRemaining` is the same verdict `GET /tasks/:taskId/startability`
+  reports in its checklist: whether the task's configured budget plus the
+  grants its Runs carry still leaves an attempt. `POST /tasks/:taskId/retry`
+  refuses with `409 Conflict` and `Run budget exhausted` when it is `false`;
+  raise `maxSessionsPerTask` through `PATCH /tasks/:taskId` to lift it.
+- `editableBrief` is the prompt text a caller may rewrite through `PATCH
+  /tasks/:taskId` with `description`, already extracted: the brief alone for a
+  Chain step that authors one, the whole stored description for an ordinary
+  task, and `null` for a readiness or integrator step, whose prompt the
+  platform owns, or for a description whose brief fence cannot be parsed.
 
 ```sh
 curl "$BASE_URL/tasks/$TASK_ID" -H "Authorization: Bearer $OPERATOR_TOKEN"
@@ -1563,10 +1575,15 @@ must follow [Continuing from a delivered branch](BRIEF-TEMPLATE.md#continuing-fr
   `<!-- /agentos:task-brief:v1 -->`, counting the length itself. Send the brief
   body only: a whole description, prompt and fence included, is not refused but
   becomes the brief inside a second fence, so read the task back and confirm it
-  carries one. A stored description the route cannot parse, or a Chain step
-  whose template Step metadata is missing, refuses with `400 Bad Request` and
+  carries one. `GET /tasks/:taskId` reports the already-extracted text as
+  `editableBrief`, so a caller need not parse the fence to send the right half
+  back. A stored description the route cannot parse, or a Chain step whose
+  template Step metadata is missing, refuses with `400 Bad Request` and
   `Cannot rewrite task brief: <reason>`. Every other task stores `description`
   verbatim.
+- A `maxSessionsPerTask` or `description` change is recorded as an operator
+  TaskActivity naming the budget's previous and new value, or stating that the
+  prompt was edited. The prompt text itself is not copied into the activity.
 
 ```sh
 curl -X PATCH "$BASE_URL/tasks/$TASK_ID" \

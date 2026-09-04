@@ -3,7 +3,7 @@ import test from "node:test";
 
 import {
   chainBinding, chainBindingLabel, chainParked, clampScroll, columnStep, countByStatus, defaultTab, edgeState,
-  focusAfterMove, orderColumn, parseStatus, retryable, runLiveness, sameEdges, scheduleLabel, storedScroll,
+  focusAfterMove, orderColumn, parseStatus, retryShape, retryable, runLiveness, sameEdges, scheduleLabel, storedScroll,
 } from "../lib/board";
 import type { BoardTask, ChainProgress, RunStatus } from "../lib/types";
 
@@ -12,7 +12,7 @@ const task = (overrides: Partial<BoardTask> = {}): BoardTask => ({
   assigneeType: "HUMAN", createdAt: "2026-08-15T00:00:00.000Z",
   scheduleKind: "NOW", runAt: null, cron: null, timezone: null,
   approvalGate: false, templateId: null, source: "MANUAL", chainId: null, chainIndex: null,
-  chainName: null, updatedAt: "2026-08-16T00:00:00.000Z", assigneeAgent: null, chainProgress: null, latestRun: null, strandedSalvageBranches: [], taskCost: null,
+  chainName: null, updatedAt: "2026-08-16T00:00:00.000Z", assigneeAgent: null, chainProgress: null, latestRun: null, strandedSalvageBranches: [], taskCost: null, budgetRemaining: true,
   blockedOn: null, mergeOutcome: null, repairOf: null, chainAggregate: null,
   ...overrides,
 });
@@ -170,6 +170,19 @@ test("a retry waits for the last run to be terminal", () => {
   assert.equal(retryable(task(), { status: "WAITING_INBOX" }), false);
   assert.equal(retryable(task(), { status: "SUCCEEDED" }), false);
   assert.equal(retryable(task({ status: "REVIEW" }), { status: "SUCCEEDED" }), true);
+});
+
+test("an exhausted budget is reported apart from the refusals an operator cannot lift", () => {
+  const failed = { status: "FAILED" as const };
+  const spent = task({ failureReason: "boom", budgetRemaining: false });
+  assert.equal(retryShape(spent, failed), "budget-exhausted");
+  assert.equal(retryable(spent, failed), false, "the API would answer this one 409");
+  // An exhausted budget on a task that could not be retried anyway stays
+  // `unavailable`: raising the budget would not produce a retry, so the detail
+  // page must not offer the field as though it would.
+  assert.equal(retryShape(task({ budgetRemaining: false }), { status: "RUNNING" }), "unavailable");
+  assert.equal(retryShape(task({ budgetRemaining: false }), { status: "SUCCEEDED" }), "unavailable");
+  assert.equal(retryShape(task({ failureReason: "boom" }), failed), "available");
 });
 
 /* ------------------------------------------------------------- run liveness */

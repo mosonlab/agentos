@@ -26,6 +26,7 @@ const task = (id: string, name: string, promptIndex: number, chainId: string | n
   repo: null, runs: [], strandedSalvageBranches: [], chainId, chainIndex: chainId ? 0 : null, source: "MANUAL",
   archivedAt: null, schedulePausedAt: null, recurringSourceTaskId: null,
   templateStep: null, taskCost: null, mergeOutcome: null, mergeRecovery: null,
+  budgetRemaining: true, editableBrief: null,
 });
 
 const output = (taskId: string, body: string): TaskStepOutput => ({
@@ -89,6 +90,73 @@ const startability = (satisfied: boolean): TaskStartability => ({
     budgetRemaining: satisfied, noActiveRun: satisfied, predecessorsDone: satisfied,
   },
   task: { id: "details", name: "Details task", agent: null, repo: null, targetBranch: null },
+});
+
+test("an exhausted budget is a lever on the page, not a button the API answers 409", async () => {
+  const subject = task("spent", "Spent task", 0);
+  subject.runs = [{ ...sourceRun("spent"), status: "FAILED" }];
+  subject.failureReason = "gate refused the candidate";
+  subject.budgetRemaining = false;
+  subject.maxSessionsPerTask = 5;
+  subject.editableBrief = "Ship the retry control.";
+  const page = await mountPage(<TaskDetailPage taskId="spent" />, {
+    "/tasks/spent": subject,
+    "/tasks/spent/output": new Response(JSON.stringify({ error: "not found" }), { status: 404 }),
+    "/tasks/spent/startability": startability(false),
+    "/tasks/spent/activity": [],
+    "/tasks/spent/chain": emptyChain(),
+    "PATCH /tasks/spent": subject,
+  }, "http://localhost/tasks/spent");
+  const retry = (): HTMLButtonElement => {
+    const button = [...page.container.querySelectorAll("button")]
+      .find((candidate) => candidate.textContent?.trim() === "Retry");
+    assert.ok(button instanceof HTMLButtonElement, page.container.innerHTML);
+    return button;
+  };
+  const patches = (): unknown[] => page.requests
+    .filter((request) => request.method === "PATCH")
+    .map((request) => JSON.parse(String(request.init.body)));
+  try {
+    // Offered and disabled, with the way out named. Hiding it would leave the
+    // operator guessing, and enabling it spends a round trip on a refusal.
+    assert.equal(retry().disabled, true);
+    assert.match(retry().title, /Raise this task's run budget/u);
+
+    const budget = page.container.querySelector("input[aria-label='Run budget']");
+    assert.ok(budget instanceof page.dom.window.HTMLInputElement);
+    assert.equal(budget.value, "5");
+    assert.match(page.container.textContent ?? "", /1 used/u);
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(page.dom.window.HTMLInputElement.prototype, "value")!.set!;
+      setter.call(budget, "10");
+      budget.dispatchEvent(new page.dom.window.Event("input", { bubbles: true }));
+    });
+    await act(async () => { // React delegates onBlur through focusout; a bare `blur` event never reaches it.
+      budget.dispatchEvent(new page.dom.window.FocusEvent("focusout", { bubbles: true })); });
+    await page.settle();
+    assert.deepEqual(patches(), [{ maxSessionsPerTask: 10 }]);
+
+    // The prompt is read-only until asked, and what saves is the operator's
+    // half of it — the server decided which half that is.
+    assert.equal(page.container.querySelector("textarea"), null);
+    await page.press("Edit");
+    const draft = page.container.querySelector("textarea");
+    assert.ok(draft instanceof page.dom.window.HTMLTextAreaElement);
+    assert.equal(draft.value, "Ship the retry control.");
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(page.dom.window.HTMLTextAreaElement.prototype, "value")!.set!;
+      setter.call(draft, "Ship it, and say why the last attempt stalled.");
+      draft.dispatchEvent(new page.dom.window.Event("input", { bubbles: true }));
+    });
+    await page.press("Save");
+    assert.deepEqual(patches()[1], { description: "Ship it, and say why the last attempt stalled." });
+
+    // A stale failure the operator has read is theirs to clear; no run invented.
+    await page.press("Clear");
+    assert.deepEqual(patches()[2], { failureReason: null });
+  } finally {
+    await page.dispose();
+  }
 });
 
 test("the Details card leads with the live fields and keeps configuration behind a toggle", async () => {

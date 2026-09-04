@@ -28,7 +28,7 @@ import { blockingPredecessor } from "./chain.js";
 import { FAILURE_REASON_LIMIT, failureReasonText } from "./failure-reason.js";
 import type { Refusal } from "./refusal.js";
 import { validateSchedule } from "./scheduler.js";
-import { rewriteBrief, stepHasTaskBrief } from "./task-brief.js";
+import { patchesBriefInPlace, rewriteBrief } from "./task-brief.js";
 import { taskMoveAuthority } from "./task-move-authority.js";
 import {
   hasActiveRun,
@@ -106,6 +106,26 @@ export type TaskPatchInput = z.infer<typeof taskPatch>;
 export type TaskPatchRefusal = Refusal;
 
 export type TaskPatchResult = { task: Task } | TaskPatchRefusal;
+
+/**
+ * The trail a plain field edit leaves. `writeTask` records status moves and gate
+ * toggles and nothing else, so before this a task's Run budget could go from 5
+ * to 50 without a single row saying who did it or when — and that is a spending
+ * decision. The prompt edit is recorded by name only; the text itself is on the
+ * task.
+ */
+export const fieldEditActivity = (
+  locked: { maxSessionsPerTask: number },
+  body: TaskPatchInput,
+): TaskActivityInput | null => {
+  const notes = [
+    body.maxSessionsPerTask !== undefined && body.maxSessionsPerTask !== locked.maxSessionsPerTask
+      ? `Run budget: ${locked.maxSessionsPerTask} → ${body.maxSessionsPerTask}`
+      : null,
+    body.description !== undefined ? "Prompt edited" : null,
+  ].filter((note): note is string => note !== null);
+  return notes.length === 0 ? null : { actorType: "operator", body: notes.join("; ") };
+};
 
 export const taskStatusChangedActivity = (
   previousStatus: TaskStatus,
@@ -285,7 +305,7 @@ export const patchTask = async (
     if (!templateStep) {
       return { reason: "invalid-request", message: "Cannot rewrite task brief: template Step metadata is missing" };
     }
-    if (stepHasTaskBrief(templateStep.outputKind)) {
+    if (patchesBriefInPlace(before, templateStep.outputKind)) {
       const rewritten = rewriteBrief(before.description, body.description, {
         legacyAttachmentsFromPrevious: templateStep.priorOutputKinds.length > 0,
       });
@@ -576,7 +596,7 @@ export const patchTask = async (
       async (tx) => writeTask(tx, taskId, async (locked) => {
         const gatePatch = gatePatchPlan(locked, body.approvalGate);
         if (gatePatch.refusal) return { update: null, activity: null, value: gatePatch.refusal };
-        return { update: updateData, activity: gatePatch.activity, value: null };
+        return { update: updateData, activity: gatePatch.activity ?? fieldEditActivity(locked, body), value: null };
       }),
       { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
     );
@@ -593,7 +613,7 @@ export const patchTask = async (
       async (tx) => writeTask(tx, taskId, async (locked) => {
         const gatePatch = gatePatchPlan(locked, body.approvalGate);
         if (gatePatch.refusal) return { update: null, activity: null, value: gatePatch.refusal };
-        return { update: updateData, activity: gatePatch.activity, value: null };
+        return { update: updateData, activity: gatePatch.activity ?? fieldEditActivity(locked, body), value: null };
       }),
       { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
     );
@@ -607,7 +627,7 @@ export const patchTask = async (
     async (tx) => writeTask(tx, taskId, async (locked) => {
       const gatePatch = gatePatchPlan(locked, body.approvalGate);
       if (gatePatch.refusal) return { update: null, activity: null, value: gatePatch.refusal };
-      return { update: updateData, activity: gatePatch.activity, value: null };
+      return { update: updateData, activity: gatePatch.activity ?? fieldEditActivity(locked, body), value: null };
     }),
     { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
   );
