@@ -22,6 +22,14 @@ export type RunLeaseClock = {
   clearInterval: (timer: unknown) => void;
 };
 
+/** The authority and lease time observed by an explicit renewal. */
+export type RunLeaseRenewal = {
+  authority: Authority;
+  remainingLeaseMs: number;
+  /** False when no control-plane response was received for this call. */
+  accepted: boolean;
+};
+
 type ProviderStopResult = { processAlive: boolean };
 
 export type RunLeaseOptions<ProviderHandle extends object> = {
@@ -47,6 +55,8 @@ export type RunLease<ProviderHandle extends object> = {
   abandonProviderLaunch: () => void;
   stopProvider: (handle: ProviderHandle, reason: string) => Promise<void>;
   checkpoint: () => Promise<Authority>;
+  /** Perform one immediate renewal and report the authority and live lease time. */
+  renewNow: () => Promise<RunLeaseRenewal>;
   close: () => Promise<void>;
 };
 
@@ -98,13 +108,18 @@ export const createRunLease = <ProviderHandle extends object>(
   let phase: RunLeasePhase = options.initialPhase;
   let authority: Authority = { held: true };
   let renewedAt = clock.now();
+  // `renewedAt` records the last held response for the delivery deadline. The
+  // control plane only extends leaseExpiresAt when processAlive is true, so
+  // keep that timestamp separately for callers deciding whether a dead
+  // provider has enough lease left to relaunch.
+  let leaseRenewedAt = renewedAt;
   let deadline: number | null = null;
   let currentProvider: ProviderHandle | null = null;
   let currentLaunch: LaunchSlot<ProviderHandle> | null = launchSlot();
   const providerStops = new WeakMap<ProviderHandle, Promise<void>>();
   const pendingTransitions = new Set<Promise<void>>();
   let cancellationTask: Promise<void> | null = null;
-  let renewalTask: Promise<void> | null = null;
+  let renewalTask: Promise<boolean> | null = null;
   let closed = false;
 
   const stopProvider = (handle: ProviderHandle, reason: string): Promise<void> => {
@@ -158,13 +173,20 @@ export const createRunLease = <ProviderHandle extends object>(
     }));
   };
 
-  const performRenewal = async (renewalPhase: RunLeasePhase): Promise<void> => {
-    if (!authority.held || closed) return;
+  const performRenewal = async (renewalPhase: RunLeasePhase): Promise<boolean> => {
+    if (!authority.held || closed) return false;
     const sentAt = clock.now();
+    let evidence: RunLeaseEvidence | null = null;
+    let accepted = false;
     try {
-      const next = await options.send(await evidenceFor(renewalPhase));
+      evidence = await evidenceFor(renewalPhase);
+      const next = await options.send(evidence);
+      accepted = true;
       await adopt(next);
-      if (next.held && authority.held) renewedAt = sentAt;
+      if (next.held && authority.held) {
+        renewedAt = sentAt;
+        if (evidence.processAlive) leaseRenewedAt = sentAt;
+      }
     } catch (error: unknown) {
       const next = authorityFor(error);
       await adopt(next);
@@ -172,9 +194,10 @@ export const createRunLease = <ProviderHandle extends object>(
     } finally {
       if (authority.held && renewalPhase.name === "execute") renewalPhase.afterRenewal?.();
     }
+    return accepted;
   };
 
-  const renew = (): Promise<void> => {
+  const renew = (): Promise<boolean> => {
     if (renewalTask) return renewalTask;
     const task = performRenewal(phase).finally(() => {
       if (renewalTask === task) renewalTask = null;
@@ -183,13 +206,23 @@ export const createRunLease = <ProviderHandle extends object>(
     return task;
   };
 
-  const timer = clock.setInterval(renew, options.heartbeatIntervalMs);
+  const timer = clock.setInterval(async () => { await renew(); }, options.heartbeatIntervalMs);
 
   const checkpoint = async (): Promise<Authority> => {
     if (renewalTask) await renewalTask;
     if (cancellationTask) await cancellationTask;
     while (pendingTransitions.size > 0) await Promise.all(pendingTransitions);
     return authority;
+  };
+
+  const remainingLeaseMs = (): number => leaseRenewedAt + options.leaseSeconds * 1_000 - clock.now();
+
+  const renewNow = async (): Promise<RunLeaseRenewal> => {
+    // Reuse the same coalescing path as the interval renewal. If an interval
+    // round is already in flight, waiting for it avoids overlapping writes and
+    // still returns the authority that round adopted.
+    const accepted = await renew();
+    return { authority, remainingLeaseMs: remainingLeaseMs(), accepted };
   };
 
   const enterPhase = async (next: RunLeasePhase): Promise<void> => {
@@ -264,6 +297,7 @@ export const createRunLease = <ProviderHandle extends object>(
     abandonProviderLaunch,
     stopProvider,
     checkpoint,
+    renewNow,
     close,
   };
 };
