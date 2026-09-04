@@ -15,6 +15,7 @@ const config = (workspaceRoot: string): RunnerConfig => ({
   apiUrl: "http://api.invalid",
   runnerToken: "runner-token",
   runnerId: "runner-1",
+  servedKinds: null,
   daemonVersion: "0.0.0-test",
   pollIntervalMs: 1_000,
   claimMaxLoadAverage: 1.5,
