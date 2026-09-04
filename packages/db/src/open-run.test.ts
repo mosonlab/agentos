@@ -295,6 +295,46 @@ test("a null resolved base cannot match an unpublished prior Run", async () => {
   assert.equal(creates[0]?.requiresCommit, true);
 });
 
+test("an automatic retry preserves its declared head while using salvage as its base", async () => {
+  const repo = { id: "repo-1", defaultBranch: "main" };
+  const shared = "feat/shared";
+  const salvage = "agentos/task-1/run-1";
+  const intent: OpenRunIntent = {
+    kind: "retry-after-completion",
+    readyAt: now,
+    sourceRunId: "run-3",
+    sourceMaxRunsPerTask: 5,
+    sourceBudgetGrants: 1,
+    budgetGrant: 1,
+  };
+
+  for (const priorBranch of [shared, null] as const) {
+    const prior = priorRun({
+      repoId: repo.id,
+      targetBranch: shared,
+      branch: priorBranch,
+      pushedBranch: salvage,
+    });
+    const task = taskRow({
+      repoId: repo.id,
+      repo,
+      chainId: null,
+      chainIndex: null,
+      targetBranch: shared,
+      runs: [prior],
+    });
+    const { tx, creates } = fakeTx(task, {
+      publishedRuns: [{ taskId: task.id, repoId: repo.id, pushedBranch: salvage }],
+    });
+
+    const opened = await openRun(tx, task.id, intent);
+
+    assert.equal(opened.ok, true, `prior branch ${priorBranch ?? "null"}`);
+    assert.equal(creates[0]?.branch, priorBranch, `prior branch ${priorBranch ?? "null"}`);
+    assert.equal(creates[0]?.targetBranch, salvage, `prior branch ${priorBranch ?? "null"}`);
+  }
+});
+
 test("a pinned base follows the template Step when conditional tasks use dense chain ordinals", async () => {
   const headSha = "2".repeat(40);
   let where: unknown;
