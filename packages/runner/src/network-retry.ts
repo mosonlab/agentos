@@ -140,6 +140,13 @@ export const NETWORK_OPERATION_BUDGET_MS = 45_000;
 export const CLONE_COMMAND_TIMEOUT_MS = 120_000;
 export const CLONE_OPERATION_BUDGET_MS = 300_000;
 
+/**
+ * First-clone profile — a cold mirror transfers the whole repository and
+ * cannot resume safely after a retry. Give that one fetch a long, single
+ * attempt ceiling instead of restarting a partial transfer from zero.
+ */
+export const CLONE_CREATION_TIMEOUT_MS = 1_800_000;
+
 /** Dependency installation is substantially heavier than cloning this
  * repository, but it still needs a finite process-group ceiling. The runner
  * heartbeat remains active throughout provisioning, so this bound protects

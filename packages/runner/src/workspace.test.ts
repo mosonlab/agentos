@@ -10,6 +10,7 @@ import type { RunnerConfig } from "./config.js";
 import type { DependencyProvisioningDecision } from "./dependency-provisioning.js";
 import { CLONE_COMMAND_TIMEOUT_MS } from "./network-retry.js";
 import { bindCommandRunner, runCommand, type CommandRunner } from "./exec.js";
+import { repoMirrorPath, repoMirrorRoot } from "./repo-mirror.js";
 import { runtimeToolPaths } from "./runtime-tools.js";
 import {
   cleanupAgentScratch, materializeRuntimeTools, provisionAgentScratch, provisionSessionConfig, provisionWorkspace, sessionConfigBaselineRoot,
@@ -546,6 +547,11 @@ test("the mirror fetch retries two transient failures and succeeds on the third 
       },
       run: { id: "run-retry", runNumber: 1, targetBranch: "main", branch: "main" },
     });
+    const mirrorRoot = repoMirrorRoot(config);
+    const mirror = repoMirrorPath(mirrorRoot, claim.repo.remoteUrl);
+    await mkdir(mirrorRoot, { recursive: true });
+    git(mirrorRoot, "init", "--bare", mirror);
+    git(mirror, "remote", "add", "origin", claim.repo.remoteUrl);
     const production = provisioningRun(config);
     const fake: CommandRunner = async (executable, args) => {
       const shell = await realShell(production, executable, args);
@@ -556,6 +562,8 @@ test("the mirror fetch retries two transient failures and succeeds on the third 
       }
       if (executable === "git" && args[0] === "clone") cloneCalls += 1;
       if (executable === "git" && args[0] === "for-each-ref") return args[2] ?? "";
+      if (executable === "git" && args[0] === "config" && args[1] === "--get") return claim.repo.remoteUrl;
+      if (executable === "git" && args[0] === "rev-parse" && args[1] === "--is-bare-repository") return "true";
       if (executable === "git" && args[0] === "rev-parse") return "base-sha";
       return "";
     };
@@ -563,9 +571,9 @@ test("the mirror fetch retries two transient failures and succeeds on the third 
       run: fake,
       retryOptions: { wait: async () => undefined },
     });
-    // The retried operation is now the mirror's fetch. The clone that follows
-    // reads local disk, so retrying it would only repeat a failure that no
-    // amount of waiting can change.
+    // The retried operation is the warm mirror's incremental fetch. The clone
+    // that follows reads local disk, so retrying it would only repeat a failure
+    // that no amount of waiting can change.
     assert.equal(fetchCalls, 3);
     assert.equal(cloneCalls, 1);
     assert.equal(workspace.baseSha, "base-sha");
@@ -610,9 +618,16 @@ test("the mirror's remote fetch carries a per-command ceiling while local git co
       run: { id: "run-timeout", runNumber: 1, targetBranch: "main", branch: "agentos/task-timeout/run-1" },
     });
     const calls: RecordedCommand[] = [];
+    const mirrorRoot = repoMirrorRoot(config);
+    const mirror = repoMirrorPath(mirrorRoot, claim.repo.remoteUrl);
+    await mkdir(mirrorRoot, { recursive: true });
+    git(mirrorRoot, "init", "--bare", mirror);
+    git(mirror, "remote", "add", "origin", claim.repo.remoteUrl);
     // Only main is published: the intended head's probe finds nothing, exactly
     // as the `ls-remote` round trip it replaced used to report.
     const fake = recordingExecutor(calls, (args) => {
+      if (args[0] === "config" && args[1] === "--get") return claim.repo.remoteUrl;
+      if (args[0] === "rev-parse" && args[1] === "--is-bare-repository") return "true";
       if (args[0] === "for-each-ref") return args[2] === "refs/heads/main" ? "refs/heads/main" : "";
       if (args[0] === "rev-parse") return "base-sha";
       return "";
@@ -673,7 +688,14 @@ test("the pinned range is fetched out of the mirror, and only the mirror's own f
       },
     });
     const calls: RecordedCommand[] = [];
+    const mirrorRoot = repoMirrorRoot(config);
+    const mirror = repoMirrorPath(mirrorRoot, claim.repo.remoteUrl);
+    await mkdir(mirrorRoot, { recursive: true });
+    git(mirrorRoot, "init", "--bare", mirror);
+    git(mirror, "remote", "add", "origin", claim.repo.remoteUrl);
     const fake = recordingExecutor(calls, (args) => {
+      if (args[0] === "config" && args[1] === "--get") return claim.repo.remoteUrl;
+      if (args[0] === "rev-parse" && args[1] === "--is-bare-repository") return "true";
       if (args[0] === "cat-file") return "impl-base-sha commit\npinned-sha commit";
       if (args[0] === "rev-parse") return "pinned-sha";
       return "";
