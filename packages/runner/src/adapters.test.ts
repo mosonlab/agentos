@@ -15,11 +15,17 @@ import {
   PREFLIGHT_REASONS, RUNNER_DEFINITIONS, RUNNER_KINDS, runtimeDescriptor, type AdapterState, type ExitEvidence,
 } from "./adapters.js";
 import { parseClaudeTranscript } from "./adapters/claude.js";
-import { CODEX_STARTER_MODEL, parseCodexEvent, parseCodexTranscript } from "./adapters/codex.js";
+import {
+  CODEX_STARTER_MODEL,
+  isCodexInRunResumeCandidate,
+  parseCodexEvent,
+  parseCodexTranscript,
+} from "./adapters/codex.js";
 import { parsePiTranscript, piDeclaration } from "./adapters/pi.js";
 import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
 import { hostProofSlotDirectory } from "./host-proof-slots.js";
+import { isTransientNetworkError } from "./network-retry.js";
 import { cleanupAgentScratch, provisionAgentScratch } from "./workspace.js";
 
 const claim: ClaimedTask = {
@@ -1476,6 +1482,8 @@ const evidenceFromState = (state: AdapterState, exitCode = 0): ExitEvidence => (
   terminationReason: state.terminationReason,
   finalOutput: state.finalOutput,
   providerError: state.providerError,
+  sawNonReconnectProviderError: state.sawNonReconnectProviderError,
+  firstNonReconnectProviderError: state.firstNonReconnectProviderError,
   stdout: state.stdout,
   stderr: state.stderr,
 });
@@ -1585,6 +1593,72 @@ test("Codex preserves reconnect evidence when the stream ends before completion"
   assert.equal(evidence.terminalSuccess, false);
   assert.equal(agentExecutionSucceeded(evidence), false);
   assert.equal(failureReasonFromEvidence(evidence), reconnectMessage);
+});
+
+test("Codex in-Run resume predicate covers reconnect, network, and disqualifying exits", () => {
+  const reconnectMessage = "Reconnecting... 3/5 (stream disconnected before completion: tls handshake eof)";
+  const base: ExitEvidence = {
+    exitCode: 0,
+    signal: null,
+    terminalEventSeen: false,
+    terminalSuccess: false,
+    terminationReason: null,
+    finalOutput: null,
+    providerError: null,
+    stdout: "",
+    stderr: "",
+  };
+
+  // The Codex reconnect wording is intentionally not part of the shared
+  // network retry pattern list; the Codex-owned status predicate recognizes it.
+  assert.equal(isTransientNetworkError(reconnectMessage), false);
+  assert.equal(isCodexInRunResumeCandidate({ ...base, providerError: reconnectMessage }, "thread-1"), true);
+  assert.equal(isCodexInRunResumeCandidate({
+    ...base,
+    providerError: "stream disconnected before completion: tls handshake eof",
+  }, "thread-1"), true);
+  assert.equal(isCodexInRunResumeCandidate({ ...base, stderr: "fetch failed" }, "thread-1"), true);
+
+  const disqualified: Array<[string, Partial<ExitEvidence>, string | null]> = [
+    ["terminal event", { terminalEventSeen: true, providerError: reconnectMessage }, "thread-1"],
+    ["signal", { signal: "SIGTERM", providerError: reconnectMessage }, "thread-1"],
+    ["termination", { terminationReason: "cancelled", providerError: reconnectMessage }, "thread-1"],
+    ["missing conversation", { providerError: reconnectMessage }, null],
+    ["binary missing", { exitCode: 127, providerError: "connection reset" }, "thread-1"],
+    ["authentication", { providerError: "authentication_failed: connection reset" }, "thread-1"],
+    ["rate limit", { providerError: "rate limit: connection reset" }, "thread-1"],
+    ["tool failure", {
+      providerError: '"isError":true stream disconnected before completion: tls handshake eof',
+    }, "thread-1"],
+    ["prior provider error", {
+      providerError: reconnectMessage,
+      sawNonReconnectProviderError: true,
+      firstNonReconnectProviderError: "policy denied",
+    }, "thread-1"],
+  ];
+  for (const [name, overrides, conversationId] of disqualified) {
+    assert.equal(isCodexInRunResumeCandidate({ ...base, ...overrides }, conversationId), false, name);
+  }
+});
+
+test("Codex preserves disqualifying provider-error history after reconnect status", () => {
+  const reconnectMessage = "Reconnecting... 3/5 (stream disconnected before completion: tls handshake eof)";
+  const state = parseCodexTranscript([
+    { type: "error", message: "policy denied" },
+    { type: "error", message: reconnectMessage },
+  ]);
+  const evidence = evidenceFromState(state);
+
+  assert.equal(evidence.providerError, reconnectMessage);
+  assert.equal(evidence.sawNonReconnectProviderError, true);
+  assert.equal(evidence.firstNonReconnectProviderError, "policy denied");
+  assert.equal(isCodexInRunResumeCandidate(evidence, "thread-1"), false);
+});
+
+test("only Codex declares the optional in-Run resume capability", () => {
+  assert.equal(typeof adapters.CODEX.isInRunResumeCandidate, "function");
+  assert.equal(adapters.CLAUDE.isInRunResumeCandidate, undefined);
+  assert.equal(adapters.PI.isInRunResumeCandidate, undefined);
 });
 
 test("PI terminal success follows the final provider attempt after an internal retry", () => {

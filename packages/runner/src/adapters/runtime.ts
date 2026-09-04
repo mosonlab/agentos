@@ -31,6 +31,10 @@ export type ExitEvidence = {
   terminationReason: string | null;
   finalOutput: string | null;
   providerError: string | null;
+  /** Whether this child reported any non-reconnect provider error. */
+  sawNonReconnectProviderError?: boolean | undefined;
+  /** The first non-reconnect provider error, when one had a message. */
+  firstNonReconnectProviderError?: string | null | undefined;
   stdout: string;
   stderr: string;
 };
@@ -61,6 +65,10 @@ export type AdapterState = {
   terminationReason: string | null;
   sawError: boolean;
   providerError: string | null;
+  /** A reconnect status is provisional; this flag preserves a real error
+   *  observed earlier in the same provider child. */
+  sawNonReconnectProviderError?: boolean | undefined;
+  firstNonReconnectProviderError?: string | null | undefined;
   providerState: unknown;
   finalOutput: string | null;
   stdout: string;
@@ -109,6 +117,8 @@ export interface CliAdapter {
   kill(handle: RuntimeHandle, reason: string): Promise<KillResult>;
   heartbeat(handle: RuntimeHandle): Promise<HeartbeatSnapshot>;
   classifyError(evidence: ExitEvidence): ClassifiedFailure;
+  /** Provider-owned qualification for an in-Run resume after a dead child. */
+  isInRunResumeCandidate?(evidence: ExitEvidence, providerConversationId: string | null): boolean;
 }
 
 export type AdapterEventParser = (
@@ -152,6 +162,8 @@ export type AdapterDeclaration = {
   providerEventPersistence: ProviderEventPersistencePredicate;
   parseEvent: AdapterEventParser;
   preflight(spec: PreflightSpec): Promise<PreflightResult>;
+  /** Optional provider-owned qualification for in-Run resume. */
+  isInRunResumeCandidate?(evidence: ExitEvidence, providerConversationId: string | null): boolean;
 };
 
 export const createAdapterState = (
@@ -172,6 +184,8 @@ export const createAdapterState = (
   terminationReason: null,
   sawError: false,
   providerError: null,
+  sawNonReconnectProviderError: false,
+  firstNonReconnectProviderError: null,
   providerState,
   finalOutput: null,
   stdout: "",
@@ -348,6 +362,8 @@ export const spawnAdapterRuntime = (
         terminationReason: handle.terminationReason,
         finalOutput: handle.finalOutput,
         providerError: handle.providerError,
+        sawNonReconnectProviderError: handle.sawNonReconnectProviderError,
+        firstNonReconnectProviderError: handle.firstNonReconnectProviderError,
         stdout: handle.stdout,
         stderr: handle.stderr,
       });
@@ -537,6 +553,9 @@ export const createCliAdapter = (declaration: AdapterDeclaration): CliAdapter =>
   kill: (handle, reason) => killRuntime(handle, reason),
   heartbeat: (handle) => heartbeatRuntime(handle),
   classifyError: (evidence) => classifyRuntimeError(evidence),
+  ...(declaration.isInRunResumeCandidate
+    ? { isInRunResumeCandidate: declaration.isInRunResumeCandidate }
+    : {}),
 });
 
 const packageRoot = fileURLToPath(new URL("../..", import.meta.url));
