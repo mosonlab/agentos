@@ -183,10 +183,6 @@ test("all fresh pull-request refusal paths decide without a database", () => {
 });
 
 test("fresh classification narrows reader facts and snapshot outcomes", () => {
-  assert.deepEqual(classifyFresh({ kind: "reader-unavailable" }), {
-    kind: "retry",
-    reason: "server-side GitHub reader is unavailable",
-  });
   assert.deepEqual(classifyFresh({ kind: "reader-failure", reason: "reader timeout" }), {
     kind: "retry",
     reason: "reader timeout",

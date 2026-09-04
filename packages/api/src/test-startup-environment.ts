@@ -9,6 +9,10 @@
  * than the behaviour it names — and the refusal it would hit is exit 78, which
  * looks nothing like the failure it is asserting on.
  *
+ * The helper supplies a fixture GITHUB_READ_TOKEN because the API requires
+ * that read capability at startup. Tests that exercise an unusable value pin
+ * the key to an empty string so the entrypoint's dotenv load cannot refill it.
+ *
  * Three deliberate omissions:
  *
  * - `DATABASE_URL` is the caller's, because only the caller knows whether this
@@ -35,6 +39,7 @@
  *  not a generated secret, so neither ever reads as one in a log. */
 export const SPAWNED_OPERATOR_TOKEN = "spawned-fixture-operator-token-000000";
 export const SPAWNED_RUNNER_TOKEN = "spawned-fixture-runner-token-000000";
+export const SPAWNED_GITHUB_READ_TOKEN = "spawned-fixture-github-read-token-000000";
 
 /**
  * The Node argv for a test child that executes an API source entrypoint.
@@ -69,6 +74,7 @@ export const spawnedStartupEnvironment = (overrides: NodeJS.ProcessEnv = {}): No
   API_PORT: "0",
   OPERATOR_TOKEN: SPAWNED_OPERATOR_TOKEN,
   RUNNER_TOKEN: SPAWNED_RUNNER_TOKEN,
+  GITHUB_READ_TOKEN: SPAWNED_GITHUB_READ_TOKEN,
   AGENTOS_SECRET_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString("base64"),
   MERGE_EXECUTOR_TOKEN: undefined,
   SESSION_COOKIE_SECRET: undefined,

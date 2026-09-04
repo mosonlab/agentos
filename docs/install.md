@@ -16,6 +16,8 @@ need
 - npm 10.9.2 or newer;
 - Docker with Docker Compose, for the PostgreSQL service defined here;
 - Git;
+- a read-only GitHub token for `GITHUB_READ_TOKEN`; every API process requires
+  it at startup, independently of whether Direct or Full Assurance is enabled;
 - the official **Codex CLI, already installed and already signed in**, under the
   same macOS account that will run the Anneal runner;
 - the GitHub CLI (`gh`), installed and authenticated under that account, for
@@ -33,7 +35,12 @@ git clone https://github.com/mosonlab/anneal.git
 cd anneal
 git checkout v0.7.0
 npm ci
+printf 'GitHub read token: '
+IFS= read -r -s GITHUB_READ_TOKEN
+printf '\n'
+export GITHUB_READ_TOKEN
 npm run setup:local
+unset GITHUB_READ_TOKEN
 npm run build
 docker compose up -d --wait --wait-timeout 60 postgres
 npm run db:migrate:release -- --fresh
@@ -129,8 +136,8 @@ different name.
 Direct and Full Assurance are self-hosted workflows, not facilities the
 Quickstart creates. Their operator supplies and configures every additional
 dependency: the Codex, Claude Code and Pi CLIs and model entitlement required by
-the selected roles; authenticated `gh` for GitHub pull-request creation;
-`GITHUB_READ_TOKEN` for merge-readiness evidence; an SSH-reachable gate worker
+the selected roles; authenticated `gh` for GitHub pull-request creation; an
+SSH-reachable gate worker
 configured through `RUNNER_GATE_SERVER`; and a private GitHub App plus the
 isolated `@anneal/merge-executor` service for the mechanical merge. The public
 [`gate-worker`](runbooks/gate-worker.md) and
@@ -183,7 +190,9 @@ general usage backfill only when repairing all derived usage columns.
 `npm run setup:local` writes `.env` once, at mode 0600, with distinct random
 operator and runner tokens, a session-cookie secret, a base64 32-byte encryption
 key, and one database password written identically into `POSTGRES_PASSWORD` and
-`DATABASE_URL`. It prints a class and never a value. Its `--upgrade` form
+`DATABASE_URL`. It also copies the required, operator-provided
+`GITHUB_READ_TOKEN`; it never generates or prints that credential. Its
+`--upgrade` form
 preserves every assignment and adds only missing safe-to-generate keys; it never
 rotates weak credentials automatically. There is no overwrite or rotation flag.
 `.env.example` documents the keys; it is not a file to copy.

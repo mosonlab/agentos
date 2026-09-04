@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -14,13 +15,14 @@ import {
   evaluateStartupConfig,
   loadStartupConfig,
 } from "./startup-config.js";
+import { spawnedSourceEntrypointArgv, spawnedStartupEnvironment } from "./test-startup-environment.js";
 
 const repositoryFile = (relative: string): string =>
   readFileSync(fileURLToPath(new URL(`../../../${relative}`, import.meta.url)), "utf8");
 
-/** A configuration shaped exactly like the one `npm run setup:local` writes:
- *  random, distinct, base64url tokens, a 32-byte base64 key, and a database URL
- *  whose credentials are the same generated value Compose reads. */
+/** A generated local configuration plus the required read-only GitHub
+ *  credential: random, distinct, base64url tokens, a 32-byte base64 key, and a
+ *  database URL whose credentials are the same generated value Compose reads. */
 const generatedEnvironment = (overrides: Record<string, string | undefined> = {}): NodeJS.ProcessEnv => {
   const password = randomBytes(24).toString("base64url");
   const base: Record<string, string> = {
@@ -32,6 +34,7 @@ const generatedEnvironment = (overrides: Record<string, string | undefined> = {}
     API_PORT: "3000",
     OPERATOR_TOKEN: randomBytes(32).toString("base64url"),
     RUNNER_TOKEN: randomBytes(32).toString("base64url"),
+    GITHUB_READ_TOKEN: randomBytes(32).toString("base64url"),
     SESSION_COOKIE_SECRET: randomBytes(32).toString("base64"),
     AGENTOS_SECRET_ENCRYPTION_KEY: randomBytes(32).toString("base64"),
   };
@@ -52,7 +55,11 @@ const refusalReasons = (environment: NodeJS.ProcessEnv): string[] => {
 test("a generated local configuration starts the control plane on loopback", () => {
   const verdict = evaluateStartupConfig(generatedEnvironment());
   assert.ok(verdict.ok, `generated configuration refused: ${verdict.ok ? "" : verdict.reasons.join(", ")}`);
-  assert.deepEqual(verdict.config, { mode: DEVELOPER_PREVIEW, host: LOOPBACK_HOST, port: 3000 });
+  assert.equal(verdict.config.mode, DEVELOPER_PREVIEW);
+  assert.equal(verdict.config.host, LOOPBACK_HOST);
+  assert.equal(verdict.config.port, 3000);
+  assert.equal(typeof verdict.config.githubReadToken, "string");
+  assert.notEqual(verdict.config.githubReadToken, "");
 });
 
 test("an unset API_HOST and API_PORT resolve to the loopback default, never the wildcard", () => {
@@ -108,6 +115,28 @@ test("a missing, placeholder, short or shared principal token is refused", () =>
   assert.deepEqual(
     refusalReasons(generatedEnvironment({ OPERATOR_TOKEN: shared, RUNNER_TOKEN: shared })),
     ["operator-runner-token-identical"],
+  );
+});
+
+test("a missing, blank, or published placeholder GitHub read token is refused", () => {
+  const example = readFileSync(fileURLToPath(new URL("../../../.env.example", import.meta.url)), "utf8");
+  const publishedPlaceholder = /^GITHUB_READ_TOKEN=(.*)$/mu.exec(example)?.[1];
+  assert.equal(publishedPlaceholder, "CHANGE_ME");
+  assert.deepEqual(
+    refusalReasons(generatedEnvironment({ GITHUB_READ_TOKEN: undefined })),
+    ["missing:GITHUB_READ_TOKEN"],
+  );
+  assert.deepEqual(
+    refusalReasons(generatedEnvironment({ GITHUB_READ_TOKEN: "" })),
+    ["placeholder-value:GITHUB_READ_TOKEN"],
+  );
+  assert.deepEqual(
+    refusalReasons(generatedEnvironment({ GITHUB_READ_TOKEN: publishedPlaceholder })),
+    ["placeholder-value:GITHUB_READ_TOKEN"],
+  );
+  assert.deepEqual(
+    refusalReasons(generatedEnvironment({ GITHUB_READ_TOKEN: "  PLACEHOLDER  " })),
+    ["placeholder-value:GITHUB_READ_TOKEN"],
   );
 });
 
@@ -356,6 +385,7 @@ test("no refusal reason ever echoes a configured value", () => {
     generatedEnvironment({ API_HOST: marker }),
     generatedEnvironment({ API_PORT: marker }),
     generatedEnvironment({ AGENTOS_SECRET_ENCRYPTION_KEY: marker }),
+    generatedEnvironment({ GITHUB_READ_TOKEN: marker, API_HOST: "0.0.0.0" }),
     generatedEnvironment({ DATABASE_URL: `postgresql://agentos:${marker}@127.0.0.1:5432/agentos` }),
     generatedEnvironment({ POSTGRES_PASSWORD: marker }),
     { ...generatedEnvironment(), VITE_API_TOKEN: marker },
@@ -444,4 +474,46 @@ test("index.ts calls loadStartupConfig before it acquires ownership or reads the
   // read of the environment with its own default.
   assert.doesNotMatch(index, /process\.env\.API_HOST/u);
   assert.doesNotMatch(index, /0\.0\.0\.0/u);
+});
+
+test("the real API entrypoint refuses a blank GitHub read token before opening a socket", {
+  // The source entrypoint imports the native Files/state guard before the
+  // startup verdict. Environments that have not built that optional native
+  // test dependency cannot exercise a real child entrypoint here.
+  skip: !existsSync(fileURLToPath(new URL("../build/Release/control_plane_directory.node", import.meta.url))),
+}, async () => {
+  const output: string[] = [];
+  const child = spawn(process.execPath, spawnedSourceEntrypointArgv("src/index.ts"), {
+    cwd: fileURLToPath(new URL("..", import.meta.url)),
+    env: {
+      ...process.env,
+      ...spawnedStartupEnvironment({
+        DATABASE_URL: "postgresql://invalid:invalid-fixture-password-000000@127.0.0.1:1/never-contact?schema=public",
+        // Keep the key present so dotenv cannot refill it from the checkout's
+        // root .env before startup validation runs.
+        GITHUB_READ_TOKEN: "",
+      }),
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  child.stdout?.on("data", (chunk: Buffer) => output.push(chunk.toString("utf8")));
+  child.stderr?.on("data", (chunk: Buffer) => output.push(chunk.toString("utf8")));
+  const result = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`API entrypoint did not refuse startup: ${output.join("")}`));
+    }, 20_000);
+    child.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.once("exit", (code, signal) => {
+      clearTimeout(timeout);
+      resolve({ code, signal });
+    });
+  });
+  const diagnostic = output.join("");
+  assert.equal(result.code, 78, diagnostic);
+  assert.match(diagnostic, /GITHUB_READ_TOKEN/u);
+  assert.doesNotMatch(diagnostic, /Anneal API listening|Startup reconciliation|CONTROL_PLANE_OWNERSHIP_ACQUIRED/u);
 });
