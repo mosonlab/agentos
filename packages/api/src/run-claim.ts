@@ -343,6 +343,9 @@ export const claimRun = async (
         });
       })()
       : await (async () => {
+        const servedKindPredicate = body.servedKinds === undefined
+          ? Prisma.empty
+          : Prisma.sql`AND candidate."runner" IN (${Prisma.join(body.servedKinds.map((runner) => Prisma.sql`lower(${runner})::"RunnerKind"`))})`;
         // Rank in PostgreSQL before applying the window so the transaction
         // returns only the candidates it can inspect. Mechanical rows are not
         // in the ordinary runner's lane and therefore cannot consume that
@@ -373,9 +376,7 @@ export const claimRun = async (
             AND task."archivedAt" IS NULL
             AND (candidate."blockedByRunId" IS NULL OR blocker."status" = lower(${RunStatus.SUCCEEDED})::"RunStatus")
             AND COALESCE(template_step."outputKind", '') <> ${INTEGRATOR_OUTPUT_KIND}
-            ${body.servedKinds === undefined
-              ? Prisma.empty
-              : Prisma.sql`AND candidate."runner" IN (${Prisma.join(body.servedKinds.map((runner) => Prisma.sql`lower(${runner})::"RunnerKind"`))})`}
+            ${servedKindPredicate}
             AND NOT EXISTS (
               SELECT 1
               FROM "ChainControl" AS chain_control

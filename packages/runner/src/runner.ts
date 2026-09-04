@@ -20,7 +20,6 @@ import {
   PREFLIGHT_CLASS,
   promptHashFor,
   RUNNER_DEFINITIONS,
-  RUNNER_KINDS,
   type AdapterEvent,
   type CliAdapter,
   type ExitEvidence,
@@ -1093,27 +1092,20 @@ export const runStartupPreflight = async (
   // Resolve and print every served backend before any API report or full
   // preflight can fail. Startup remains alive when one backend is absent, and
   // the operator still gets a complete local inventory in the daemon log.
-  const servedKinds = config.servedKinds ?? RUNNER_KINDS;
-  for (const runner of servedKinds) {
-    const probe = availability[runner];
-    if (probe) onAvailability(probe);
-  }
-  for (const runner of servedKinds) {
-    const probe = availability[runner];
-    if (!probe) continue;
+  const probes = Object.values(availability);
+  for (const probe of probes) onAvailability(probe);
+  for (const probe of probes) {
     await reportAvailabilityWithRetry(config, probe, retryOptions);
   }
   const env = workspaceEnvironment(config);
-  for (const runner of servedKinds) {
-    const probe = availability[runner];
-    if (!probe) continue;
+  for (const probe of probes) {
     if (!probe.available) {
-      results[runner] = false;
+      results[probe.runner] = false;
       continue;
     }
-    const result = await runBackendPreflight(config, runner, env);
-    results[runner] = result.ok;
-    await reportPreflightWithRetry(config, runner, result, retryOptions);
+    const result = await runBackendPreflight(config, probe.runner, env);
+    results[probe.runner] = result.ok;
+    await reportPreflightWithRetry(config, probe.runner, result, retryOptions);
   }
   return results;
 };
@@ -1152,9 +1144,7 @@ export const reportCliAvailabilityHeartbeat = async (
   const onPreflightError = options.onPreflightError ?? ((probe: CliAvailability, error: unknown) => {
     console.error(`Failed to revalidate ${probe.runner.toLowerCase()} runner preflight`, error);
   });
-  for (const runner of config.servedKinds ?? RUNNER_KINDS) {
-    const probe = availability[runner];
-    if (!probe) continue;
+  for (const probe of Object.values(availability)) {
     let revalidatePreflight = false;
     try {
       ({ revalidatePreflight } = await controlPlane.reportCliAvailability(probe));
@@ -1164,7 +1154,7 @@ export const reportCliAvailabilityHeartbeat = async (
     }
     if (revalidatePreflight && probe.available) {
       try {
-        await controlPlane.reportPreflight(runner, await runBackendPreflight(config, runner));
+        await controlPlane.reportPreflight(probe.runner, await runBackendPreflight(config, probe.runner));
       } catch (error: unknown) {
         onPreflightError(probe, error);
       }
