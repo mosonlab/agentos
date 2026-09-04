@@ -91,7 +91,7 @@ const createFixture = async (
   const chainId = `prior-output-whitelist-chain-${Math.floor(Math.random() * 1e9)}`;
   const tasks = [];
   for (const step of template.steps) {
-    if (omitStepIndexes.has(step.stepIndex - 1)) continue;
+    if (omitStepIndexes.has(step.stepIndex)) continue;
     tasks.push(await db.task.create({ data: {
       projectId: project.id,
       repoId: repo.id,
@@ -200,7 +200,7 @@ test("an omitted producer kind is satisfied by absence without parking the targe
     { outputKind: "sol-findings", priorOutputKinds: ["implementation"] },
     { outputKind: "blind-findings", priorOutputKinds: ["implementation"] },
     { outputKind: "fixed-implementation", priorOutputKinds: ["sol-findings", "blind-findings"] },
-  ], new Set([2]));
+  ], new Set([3]));
   const implementationRun = await db.$transaction((tx) => enqueueTaskRun(tx as never, tasks[0]!.id));
   await db.run.update({ where: { id: implementationRun.id }, data: { status: RunStatus.SUCCEEDED, endedAt: new Date() } });
   await db.task.update({ where: { id: tasks[0]!.id }, data: { status: TaskStatus.DONE } });

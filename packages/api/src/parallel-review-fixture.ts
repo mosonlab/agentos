@@ -9,6 +9,7 @@ import {
   RepoPermission,
   RunStatus,
   TaskStatus,
+  type CanonicalReviewArtifact,
   type PrismaClient,
 } from "@anneal/db";
 import type { ClaimContract } from "@anneal/db/claim-contract";
@@ -439,12 +440,15 @@ const createParallelReviewHarness = ({
     testsRun: ["npm test -- parallel review"],
   });
 
-  const reviewOutput = (kind: "sol-findings" | "blind-findings") => ({
+  const reviewOutput = (
+    kind: "sol-findings" | "blind-findings",
+    findings: CanonicalReviewArtifact["findings"] = [],
+  ) => ({
     schemaVersion: 1,
     headSha: IMPLEMENTATION_HEAD,
     reviewedBase: IMPLEMENTATION_BASE,
     reviewedHead: IMPLEMENTATION_HEAD,
-    findings: [],
+    findings,
     ...(kind === "sol-findings" ? { commandsRun: ["git diff --check"] } : {}),
   });
 
@@ -482,10 +486,15 @@ const createParallelReviewHarness = ({
     return { first, second };
   };
 
-  const completeReview = async (claimed: Claim, runnerId: string, kind: "sol-findings" | "blind-findings") => {
+  const completeReview = async (
+    claimed: Claim,
+    runnerId: string,
+    kind: "sol-findings" | "blind-findings",
+    findings: CanonicalReviewArtifact["findings"] = [],
+  ) => {
     const result = await complete(claimed, runnerId, {
       outputKind: kind,
-      output: reviewOutput(kind),
+      output: reviewOutput(kind, findings),
       headSha: IMPLEMENTATION_HEAD,
       baseSha: IMPLEMENTATION_BASE,
     });

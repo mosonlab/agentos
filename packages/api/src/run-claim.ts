@@ -845,15 +845,11 @@ export const claimRun = async (
             },
           })
           : [];
-        const producerKinds = new Set(producerSteps.map(({ outputKind }) => outputKind));
-        const presentProducerKinds = new Set(
-          producerSteps.filter(({ tasks }) => tasks.length > 0).map(({ outputKind }) => outputKind),
-        );
-        const omittedProducerKinds = new Set(
-          [...producerKinds].filter((kind) => !presentProducerKinds.has(kind)),
-        );
-        const unresolvedMissingKinds = missingKinds.filter((kind) =>
-          !omittedProducerKinds.has(kind) || presentProducerKinds.has(kind));
+        const producerHasTask = new Map<string, boolean>();
+        for (const { outputKind, tasks } of producerSteps) {
+          producerHasTask.set(outputKind, (producerHasTask.get(outputKind) ?? false) || tasks.length > 0);
+        }
+        const unresolvedMissingKinds = missingKinds.filter((kind) => producerHasTask.get(kind) !== false);
         if (unresolvedMissingKinds.length > 0) {
           const reason = `Prior output claim refused: missing declared output kind${unresolvedMissingKinds.length === 1 ? "" : "s"}: ${unresolvedMissingKinds.join(", ")}`;
           await parkQueuedCandidate(candidate, {

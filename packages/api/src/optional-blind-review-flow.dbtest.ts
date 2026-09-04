@@ -13,6 +13,7 @@ import {
   IMPLEMENTATION_HEAD,
   installParallelReviewLifecycle,
 } from "./parallel-review-fixture.js";
+import { createApp } from "./test-app.js";
 
 const {
   db,
@@ -24,6 +25,15 @@ const {
 } = installParallelReviewLifecycle();
 
 const DEFAULT_HEAD = "3".repeat(40);
+const SOL_FINDING = {
+  id: "OPTIONAL-SOL-1",
+  severity: "P2" as const,
+  file: "packages/api/src/templates.ts",
+  line: 1,
+  title: "Exercise sole-report disposition coverage",
+  evidence: "The optional blind-review flow must account for findings from the Sol report.",
+  requiredFix: "Submit exactly one disposition for this finding.",
+};
 
 const snapshot = (): PullRequestSnapshot => ({
   repository: "example/optional-review",
@@ -73,23 +83,48 @@ test("a direct chain without blind review advances through fixes and regression 
   const sol = await claim("optional-sol");
   assert.equal(sol.run.taskId, fixture.solTaskId);
   assert.deepEqual(sol.priorOutputs.map(({ kind }) => kind), ["implementation"]);
-  await completeReview(sol, "optional-sol", "sol-findings");
+  await completeReview(sol, "optional-sol", "sol-findings", [SOL_FINDING]);
 
   const fix = await claim("optional-fix");
   assert.equal(fix.run.taskId, fixture.fixTaskId);
   assert.deepEqual(fix.priorOutputs.map(({ kind }) => kind), ["sol-findings"]);
-  const fixed = await complete(fix, "optional-fix", {
-    outputKind: "fixed-implementation",
-    output: {
+  const writeFixedOutput = (body: Record<string, unknown>) => createApp(db).request(`/session/runs/${fix.run.id}/output`, {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${fix.sessionToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      fencingToken: fix.fencingToken,
+      kind: "fixed-implementation",
+      body: JSON.stringify(body),
+      commitSha: IMPLEMENTATION_HEAD,
+    }),
+  });
+  const fixedBody = {
       schemaVersion: 1,
       headSha: IMPLEMENTATION_HEAD,
       sourceHead: IMPLEMENTATION_HEAD,
-      dispositions: [],
-      closedFindings: [],
       testsRun: ["npm test -- optional blind review"],
       residualRisks: [],
-    },
+  };
+  let fixedOutput = await writeFixedOutput({ ...fixedBody, dispositions: [], closedFindings: [] });
+  assert.equal(fixedOutput.status, 409);
+  assert.match(await fixedOutput.text(), /missing: OPTIONAL-SOL-1/u);
+
+  fixedOutput = await writeFixedOutput({
+    ...fixedBody,
+    dispositions: [{ id: SOL_FINDING.id, disposition: "ADOPTED", reason: "The flow must prove Sol-only coverage." }],
+    closedFindings: [{
+      id: SOL_FINDING.id,
+      status: "CLOSED",
+      codeEvidence: "The fixed output accounts for the sole Sol finding.",
+      testEvidence: "The preceding output write without the disposition is refused.",
+    }],
   });
+  assert.equal(fixedOutput.status, 200, await fixedOutput.text());
+
+  const fixed = await complete(fix, "optional-fix");
   assert.equal(fixed.status, 200, JSON.stringify(fixed.body));
 
   const regression = await claim("optional-regression");
