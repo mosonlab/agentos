@@ -214,6 +214,21 @@ test("non-default runner count is persisted in service and auto-deploy definitio
   assert.match(renderAutoDeploySystemdUnit(undefined, autoValues), /^Environment=AGENTOS_RUNNER_COUNT="16"$/mu);
 });
 
+test("sudoers rendering resolves unit names from the given labels, not the import-time inventory", () => {
+  const source = String.raw`
+    import { renderSystemdSudoers } from "./scripts/deploy/install-launchd.mjs";
+    import { generateServiceInventory } from "./scripts/deploy/launchd-service-wrapper.mjs";
+    const labels = generateServiceInventory(16).map(({ label }) => label);
+    const sudoers = renderSystemdSudoers({ serviceUser: "anneal-test", labels });
+    console.log(JSON.stringify({ labels: labels.length, restarts: (sudoers.match(/\/bin\/systemctl restart /gu) ?? []).length, last: sudoers.includes(generateServiceInventory(16).at(-1).unitName) }));
+  `;
+  const env = { ...process.env, AGENTOS_SERVICE_PLATFORM: "linux" };
+  delete env.AGENTOS_RUNNER_COUNT;
+  const result = spawnSync(process.execPath, ["--input-type=module", "-e", source], { cwd: process.cwd(), env, encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { labels: 19, restarts: 19, last: true });
+});
+
 test("systemd path directives escape whitespace and percent specifiers", () => {
   const root = "/opt/Anneal Runtime 100%";
   const values = servicePlistValues({

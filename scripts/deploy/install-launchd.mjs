@@ -825,9 +825,10 @@ export const renderSystemdSudoers = ({ serviceUser, labels = SERVICE_LABELS, sys
   if (typeof systemctlPath !== "string" || systemctlPath === "" || !systemctlPath.startsWith("/")) {
     throw new Error("systemd-command-not-absolute:systemctl");
   }
+  const inventory = inventoryForCount(labels.length - 3);
   const rules = [];
   for (const label of labels) {
-    const unit = unitNameForLabel(label);
+    const unit = unitNameForLabel(label, inventory);
     rules.push(`${systemctlPath} restart ${unit}`);
     rules.push(`${systemctlPath} show -p ExecStart --value ${unit}`);
     rules.push(`${systemctlPath} is-active ${unit}`);
@@ -1302,18 +1303,18 @@ const systemdStagePlan = ({
     staging: stageRoot,
     unitDirectory: resolvedUnitDirectory,
     serviceUser: account,
-    units: labels.map((label) => join(resolvedUnitDirectory, unitNameForLabel(label))),
+    units: labels.map((label) => join(resolvedUnitDirectory, unitNameForLabel(label, inventory))),
     wrapper,
-    entries: [wrapper, ...labels.map((label) => join(resolvedUnitDirectory, unitNameForLabel(label)))],
+    entries: [wrapper, ...labels.map((label) => join(resolvedUnitDirectory, unitNameForLabel(label, inventory)))],
     rendered: unitDefinitions,
   });
   const unitEntries = labels.map((label) => {
     const staged = stageSystemdDefinition({
       stagingRoot: stageRoot,
-      relativePath: `units/${unitNameForLabel(label)}`,
+      relativePath: `units/${unitNameForLabel(label, inventory)}`,
       contents: unitDefinitions[label],
     });
-    const target = join(resolvedUnitDirectory, unitNameForLabel(label));
+    const target = join(resolvedUnitDirectory, unitNameForLabel(label, inventory));
     const entry = serviceUnitEntry({
       label,
       unit: inventory.find((entry) => entry.label === label).unitName,
