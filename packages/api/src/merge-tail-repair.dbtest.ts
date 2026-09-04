@@ -275,6 +275,7 @@ const completeRepair = async (
 ) => {
   const run = await db.run.findFirstOrThrow({ where: { taskId: repairId, runNumber } });
   const repair = await db.task.findUniqueOrThrow({ where: { id: repairId } });
+  const publishBranch = run.branch ?? `agentos/${repairId}/run-${runNumber}`;
   const runnerId = `repair-runner-${run.id}`;
   const fencingToken = `repair:${run.id}:1`;
   await db.run.update({ where: { id: run.id }, data: {
@@ -296,7 +297,7 @@ const completeRepair = async (
       headers: { Authorization: "Bearer merge-tail-repair-token", "Content-Type": "application/json" },
       body: JSON.stringify({
         runnerId, fencingToken, exitCode: 0, outcome: { case: "succeeded" },
-        cleanupStatus: "SUCCEEDED", branch: BRANCH, pushedBranch: BRANCH,
+        cleanupStatus: "SUCCEEDED", branch: publishBranch, pushedBranch: publishBranch,
         pushStatus: "SUCCEEDED", headSha,
       }),
     });
@@ -318,6 +319,7 @@ const failRepairAfterDelivery = async (
   repairId: string,
   runNumber: number,
   headSha: string,
+  pushedBranch = BRANCH,
 ) => {
   const run = await db.run.findFirstOrThrow({ where: { taskId: repairId, runNumber } });
   const repair = await db.task.findUniqueOrThrow({ where: { id: repairId } });
@@ -339,7 +341,7 @@ const failRepairAfterDelivery = async (
       headers: { Authorization: "Bearer merge-tail-repair-token", "Content-Type": "application/json" },
       body: JSON.stringify({
         runnerId, fencingToken, exitCode: 0,
-        cleanupStatus: "SUCCEEDED", branch: BRANCH, pushedBranch: BRANCH,
+        cleanupStatus: "SUCCEEDED", branch: BRANCH, pushedBranch,
         pushStatus: "SUCCEEDED", headSha,
         outcome: {
           case: "provider-failure",
@@ -504,6 +506,53 @@ test("a repair Run that fails retryably opens a second Run instead of stopping t
   const marker = latestMarker(await readMarkers(db, seeded.regression.id), "repairResult");
   assert.equal(marker?.repairKind, "review-fix");
   assert.equal(marker?.state, null);
+});
+
+test("retryable repairs retain the shared publish head while retrying from salvage", async () => {
+  const cases = [
+    { outcome: "refresh-conflict", repairKind: "refresh-conflict" },
+    { outcome: "review-fail", repairKind: "review-fix" },
+    { outcome: "gate-fail", repairKind: "gate-fix" },
+  ] as const;
+
+  for (const [index, { outcome, repairKind }] of cases.entries()) {
+    if (index > 0) await resetTestDb(db);
+    const seeded = await exercise(outcome);
+    const repair = await repairFor(seeded, repairKind);
+    const salvageBranch = `agentos/${repair.id}/run-1`;
+
+    const failed = await failRepairAfterDelivery(seeded, repair.id, 1, REPAIRED, salvageBranch);
+    assert.equal(failed.branch, BRANCH, repairKind);
+    assert.equal(failed.pushedBranch, salvageBranch, repairKind);
+    assert.equal(failed.pushStatus, "SUCCEEDED", repairKind);
+
+    const retry = await db.run.findFirstOrThrow({ where: { taskId: repair.id, runNumber: 2 } });
+    assert.equal(retry.status, "QUEUED", repairKind);
+    assert.equal(retry.branch, BRANCH, repairKind);
+    assert.equal(retry.targetBranch, salvageBranch, repairKind);
+
+    const output = repairKind === "refresh-conflict"
+      ? JSON.stringify({
+        schemaVersion: 1, outcome: "resolved", startHeadSha: HEAD, targetHeadSha: BASE,
+        resolvedHeadSha: REPAIRED, tradeOffs: [], changedTestExpectations: [],
+      })
+      : `${repairKind} completed`;
+    await completeRepair(seeded, repair.id, output, REPAIRED, 2);
+    const completed = await db.run.findFirstOrThrow({ where: { taskId: repair.id, runNumber: 2 } });
+    assert.equal(completed.status, "SUCCEEDED", repairKind);
+    assert.equal(completed.pushedBranch, BRANCH, repairKind);
+    assert.equal(completed.pushStatus, "SUCCEEDED", repairKind);
+
+    const claimed = await claimNext();
+    assert.equal(claimed.status, 200, repairKind);
+    const body = claimed.body as {
+      regressionRepairHandoff: {
+        repair: { taskId: string; resolvedHeadSha: string };
+      };
+    };
+    assert.equal(body.regressionRepairHandoff.repair.taskId, repair.id, repairKind);
+    assert.equal(body.regressionRepairHandoff.repair.resolvedHeadSha, REPAIRED, repairKind);
+  }
 });
 
 test("a repair whose whole budget fails retryably still stops the tail", async () => {
