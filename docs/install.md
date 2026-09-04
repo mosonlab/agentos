@@ -87,7 +87,9 @@ and a missing prerequisite stops the chain rather than authorizing a weaker
 merge.
 
 When the control plane and runners are on separate hosts, install the second,
-runner-only host with `AGENTOS_DEPLOY_ROLE=runner`. Leave the control-plane
+runner-only host with `AGENTOS_DEPLOY_ROLE=runner`, a nonempty host-specific
+`AGENTOS_RUNNER_ID_PREFIX`, the loopback tunnel origin in `RUNNER_API_URL`, and
+`OPERATOR_TOKEN` for the runner registry verification. Leave the control-plane
 host at the default role; the runner host follows the control plane's deployed
 build and verifies its runners against that build. See the
 [Runner-only host](runbooks/quiet-window-auto-deploy.md#runner-only-host)

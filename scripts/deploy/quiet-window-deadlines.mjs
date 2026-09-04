@@ -12,6 +12,7 @@ const minutes = (value) => seconds(value * 60);
  * real migration plus backfill was observed at 75 seconds. */
 export const DEPLOY_STEP_TIMEOUT_MS = Object.freeze({
   remoteMainRead: seconds(30),
+  sourceCommitProbe: seconds(30),
   serviceInspection: seconds(15),
   releaseArtifactBuild: minutes(15),
   migrationPreflight: minutes(2),
@@ -37,6 +38,7 @@ export const DEPLOY_BARRIER_PHASE_TIMEOUT_MS = Object.freeze({
   "canonical-prompt-sync": DEPLOY_STEP_TIMEOUT_MS.canonicalPromptSync,
   "verify-runtime-prisma-client": 0,
   "assert-quiet-before-restart": 0,
+  "verify-control-plane-target": 0,
   "publish-build": 0,
   "restart-services": serviceRestartBudget,
   "verify-services": serviceSweepBudget,

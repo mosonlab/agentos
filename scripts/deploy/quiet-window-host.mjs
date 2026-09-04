@@ -1,9 +1,10 @@
 import { deployPhasesForRole } from "./deploy-phases.mjs";
+import { DEFAULT_DEPLOY_ROLE } from "./deploy-role.mjs";
 
 /** Import-safe production adapter for the deployment host seam. Every phase
  * method, the read-only methods dry-run drives, and the recovery and
  * notification methods must all be present before a deployment starts. */
-export const createProductionHost = (adapters, deployRole = "control-plane") => {
+export const createProductionHost = (adapters, deployRole = DEFAULT_DEPLOY_ROLE) => {
   for (const { hostMethod: method } of deployPhasesForRole(deployRole)) {
     if (typeof adapters[method] !== "function") throw new TypeError(`production-host-adapter-missing:${method}`);
   }
@@ -11,7 +12,7 @@ export const createProductionHost = (adapters, deployRole = "control-plane") => 
     "blockingRuns",
     "artifactState",
     "serviceState",
-    ...(deployRole === "control-plane" ? ["backupState"] : []),
+    ...(deployRole === DEFAULT_DEPLOY_ROLE ? ["backupState"] : []),
     "restorePreviousServices",
     "escalate",
     "notify",

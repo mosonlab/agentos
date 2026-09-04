@@ -187,7 +187,7 @@ export const decideInvocation = async (startup, mode) => {
 
 /** Execute the full deployment attempt through the host seam. Every phase
  * receives the attempt and establishes facts for the phases that follow. */
-export const executeUpgrade = async (host, attempt, deployRole = "control-plane") => {
+export const executeUpgrade = async (host, attempt, deployRole = DEFAULT_DEPLOY_ROLE) => {
   let schemaAdvanced = false;
   let activationAttempted = false;
   let activationOutcomeProven = false;
@@ -318,8 +318,8 @@ export const executeUpgrade = async (host, attempt, deployRole = "control-plane"
 
 /** Dry-run reads the deployment host every upgrade uses, calling only the
  * methods that establish no facts and mutate nothing. */
-export const dryRunDecision = async (host, attempt, deployRole = "control-plane") => {
-  const backupPromise = deployRole === "control-plane"
+export const dryRunDecision = async (host, attempt, deployRole = DEFAULT_DEPLOY_ROLE) => {
+  const backupPromise = deployRole === DEFAULT_DEPLOY_ROLE
     ? host.backupState()
     : Promise.resolve({ ok: true, mode: "skipped" });
   const [{ revisions }, runs, artifact, services, backup] = await Promise.all([

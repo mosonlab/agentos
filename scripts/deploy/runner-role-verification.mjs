@@ -1,4 +1,5 @@
 import { DeployFailure } from "./quiet-window-lib.mjs";
+import { controlPlaneApiBaseUrl } from "./runner-role-target.mjs";
 
 const fail = (reason, detail = "") => { throw new DeployFailure(reason, detail); };
 
@@ -7,12 +8,13 @@ export const runnerIdsFromInventory = (inventory) => Object.freeze(
 );
 
 export const readRunnerRegistry = async ({ apiBaseUrl, operatorToken, fetchImpl = fetch }) => {
+  const verifiedApiBaseUrl = controlPlaneApiBaseUrl({ RUNNER_API_URL: apiBaseUrl });
   if (typeof operatorToken !== "string" || operatorToken === "") {
     fail("runner-registration-verification-unavailable", "OPERATOR_TOKEN-missing");
   }
   let response;
   try {
-    response = await fetchImpl(`${apiBaseUrl.replace(/\/+$/u, "")}/runners`, {
+    response = await fetchImpl(`${verifiedApiBaseUrl}/runners`, {
       headers: { accept: "application/json", authorization: `Bearer ${operatorToken}` },
       signal: AbortSignal.timeout(2_000),
     });

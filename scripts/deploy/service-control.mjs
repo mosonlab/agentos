@@ -91,20 +91,17 @@ export const createServiceControl = ({
     inspect: 15_000,
   }),
   environment = process.env,
-  deployRole = resolveDeployRole(environment),
-  runnerCount = resolveRunnerCount(environment),
-  runnerIdPrefix = resolveRunnerIdPrefix(environment),
-  inventory = null,
-  labels = null,
 } = {}) => {
   if (platform !== "darwin" && platform !== "linux") {
     throw new Error(`service-platform-unsupported:${String(platform)}`);
   }
   if (typeof run !== "function") throw new TypeError("service-control-run-required");
   if (typeof wrapperPath !== "string") throw new TypeError("service-control-wrapper-path-invalid");
-  const serviceInventory = inventory
-    ?? (labels ? labels.map((label) => ({ label, unitName: `${label}.service` }))
-      : generateServiceInventory(runnerCount, runnerIdPrefix, deployRole));
+  const serviceInventory = generateServiceInventory(
+    resolveRunnerCount(environment),
+    resolveRunnerIdPrefix(environment),
+    resolveDeployRole(environment),
+  );
   if (!Array.isArray(serviceInventory) || serviceInventory.length === 0
       || serviceInventory.some((entry) => typeof entry?.label !== "string" || typeof entry?.unitName !== "string")) {
     throw new Error("service-control-inventory-invalid");

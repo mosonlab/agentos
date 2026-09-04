@@ -217,14 +217,15 @@ const deployRoleEnvironment = (deployRole) => deployRole === undefined || deploy
   ? {}
   : { AGENTOS_DEPLOY_ROLE: deployRole };
 
-const backupEnvironment = (backup, runnerCount, runnerIdPrefix) => {
-  if (!backup) return "";
-  const values = backup.mode === "host"
-    ? {
+const autoDeployRuntimeEnvironment = (backup, runnerCount, runnerIdPrefix) => {
+  const values = !backup
+    ? {}
+    : backup.mode === "host"
+      ? {
         DEPLOY_PG_DUMP_MODE: "host",
         DEPLOY_PG_DUMP_BINARY: backup.pgDumpBinary,
       }
-    : {
+      : {
         DEPLOY_PG_DUMP_MODE: "container",
         DEPLOY_DOCKER_BINARY: backup.dockerBinary,
         DEPLOY_PG_DUMP_CONTAINER: backup.container,
@@ -253,7 +254,10 @@ export const renderLaunchdPlist = (template, values) => {
   for (const [placeholder, value] of Object.entries(replacements)) {
     rendered = rendered.replaceAll(placeholder, xml(value));
   }
-  rendered = rendered.replaceAll("__BACKUP_ENVIRONMENT__", backupEnvironment(values.backup, values.runnerCount, values.runnerIdPrefix));
+  rendered = rendered.replaceAll(
+    "__BACKUP_ENVIRONMENT__",
+    autoDeployRuntimeEnvironment(values.backup, values.runnerCount, values.runnerIdPrefix),
+  );
   const roleEnvironment = Object.entries(deployRoleEnvironment(values.deployRole))
     .map(([key, value]) => `    <key>${xml(key)}</key>\n    <string>${xml(value)}</string>`)
     .join("\n");
@@ -2534,7 +2538,10 @@ export const installLaunchd = (args, context = {}) => {
     process.stdout.write(`${apply ? "APPLY" : "PLAN"} units=2\n`);
     process.stdout.write(`${apply ? "APPLY" : "PLAN"} staging=${result.staging}\n`);
     if (!apply) process.stdout.write("PLAN no files or systemd state changed\n");
-    else process.stdout.write(`NEXT sudo node ${shellQuote(process.argv[1])} --install-units --service-user ${shellQuote(serviceUser)}\n`);
+    else {
+      const role = deployRole === DEFAULT_DEPLOY_ROLE ? "" : `AGENTOS_DEPLOY_ROLE=${deployRole} `;
+      process.stdout.write(`NEXT sudo ${role}node ${shellQuote(process.argv[1])} --install-units --service-user ${shellQuote(serviceUser)}\n`);
+    }
     return 0;
   }
   if (installUnits) throw new Error("systemd-installer-unsupported:darwin");

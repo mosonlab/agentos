@@ -14,4 +14,3 @@ export const resolveDeployRole = (environment = process.env) => {
   }
   return role;
 };
-

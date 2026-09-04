@@ -28,6 +28,7 @@ export const DEPLOY_PHASES = Object.freeze([
   phase("upgrade", "canonical-prompt-sync", "syncCanonicalPrompts", true, null, Object.freeze(["control-plane"])),
   phase("upgrade", "verify-runtime-prisma-client", "verifyRuntimePrismaClient", false, null, Object.freeze(["control-plane"])),
   phase("upgrade", "assert-quiet-before-restart", "assertQuietBeforeRestart", false),
+  phase("upgrade", "verify-control-plane-target", "verifyControlPlaneTarget", false, null, Object.freeze(["runner"])),
   phase("upgrade", "publish-build", "publishBuild", true, "ACTIVATED"),
   phase("upgrade", "restart-services", "restartServices", true),
   phase("upgrade", "verify-services", "verifyServices", false, "VERIFIED"),
