@@ -1254,6 +1254,79 @@ test("a run-as launcher cannot strip the operator-selected gate destination", ()
   assert.equal(launch.args.includes("AGENTOS_GATE_SERVER=agentos-gate"), true);
 });
 
+test("configured local gate capacity is runner-owned and survives a run-as launcher", () => {
+  const runAsPrefix = ["/usr/bin/env", "-i"];
+  const config = {
+    path: "/bin",
+    home: "/runner",
+    apiUrl: "http://api",
+    runAsPrefix,
+    workspaceRoot: productionRoot,
+    hostProofSlots: 3,
+    gateLocalSlots: 2,
+  };
+  const env = buildChildEnvironment(
+    config,
+    {
+      ...claim,
+      secrets: {
+        ...claim.secrets,
+        AGENTOS_GATE_ALLOW_LOCAL: "0",
+        AGENTOS_GATE_LOCAL_SLOTS: "99",
+      },
+    },
+    scratch,
+    "/work",
+  );
+  assert.equal(env.AGENTOS_GATE_ALLOW_LOCAL, "1");
+  assert.equal(env.AGENTOS_GATE_LOCAL_SLOTS, "2");
+
+  const launch = launchArgv(
+    { binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" }, runAsPrefix },
+    "CODEX",
+    [],
+    env,
+  );
+  assert.equal(launch.args.includes("AGENTOS_GATE_ALLOW_LOCAL=1"), true);
+  assert.equal(launch.args.includes("AGENTOS_GATE_LOCAL_SLOTS=2"), true);
+});
+
+test("unset local gate capacity contributes neither child variables nor launcher assignments", () => {
+  const runAsPrefix = ["/usr/bin/env", "-i"];
+  const config = {
+    path: "/bin",
+    home: "/runner",
+    apiUrl: "http://api",
+    runAsPrefix,
+    workspaceRoot: productionRoot,
+    hostProofSlots: 3,
+  };
+  const env = buildChildEnvironment(
+    config,
+    {
+      ...claim,
+      secrets: {
+        ...claim.secrets,
+        AGENTOS_GATE_ALLOW_LOCAL: "1",
+        AGENTOS_GATE_LOCAL_SLOTS: "99",
+      },
+    },
+    scratch,
+    "/work",
+  );
+  assert.equal(env.AGENTOS_GATE_ALLOW_LOCAL, undefined);
+  assert.equal(env.AGENTOS_GATE_LOCAL_SLOTS, undefined);
+
+  const launch = launchArgv(
+    { binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" }, runAsPrefix },
+    "CODEX",
+    [],
+    env,
+  );
+  assert.equal(launch.args.includes("AGENTOS_GATE_ALLOW_LOCAL=1"), false);
+  assert.equal(launch.args.includes("AGENTOS_GATE_LOCAL_SLOTS=99"), false);
+});
+
 // The launcher named by RUNNER_RUN_AS_PREFIX is an arbitrary command that may
 // scrub the environment it was handed — `sudo` resets it by policy, and #126
 // wants OS isolation built on precisely this prefix. `/usr/bin/env -i` is that
