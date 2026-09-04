@@ -819,14 +819,49 @@ export const claimRun = async (
         const missingKinds = legacyAllPriorOutputs
           ? []
           : declaredPriorOutputKinds.filter((kind) => !presentKinds.has(kind));
-        if (missingKinds.length > 0) {
-          const reason = `Prior output claim refused: missing declared output kind${missingKinds.length === 1 ? "" : "s"}: ${missingKinds.join(", ")}`;
+        // A retained step may still declare an output whose producer was
+        // omitted when this chain was instantiated. Only that narrow case is
+        // satisfied by absence: an unknown kind, or any template step
+        // producing the kind that has a task in this chain, remains a claim
+        // refusal.
+        const producerSteps = missingKinds.length > 0
+          && candidate.task.templateStep !== null
+          && candidate.task.chainId !== null
+          && candidate.task.chainIndex !== null
+          ? await tx.taskTemplateStep.findMany({
+            where: {
+              taskTemplateId: candidate.task.templateStep.taskTemplateId,
+              outputKind: { in: missingKinds },
+            },
+            select: {
+              outputKind: true,
+              tasks: {
+                where: {
+                  projectId: candidate.task.projectId,
+                  chainId: candidate.task.chainId,
+                },
+                select: { id: true },
+              },
+            },
+          })
+          : [];
+        const producerKinds = new Set(producerSteps.map(({ outputKind }) => outputKind));
+        const presentProducerKinds = new Set(
+          producerSteps.filter(({ tasks }) => tasks.length > 0).map(({ outputKind }) => outputKind),
+        );
+        const omittedProducerKinds = new Set(
+          [...producerKinds].filter((kind) => !presentProducerKinds.has(kind)),
+        );
+        const unresolvedMissingKinds = missingKinds.filter((kind) =>
+          !omittedProducerKinds.has(kind) || presentProducerKinds.has(kind));
+        if (unresolvedMissingKinds.length > 0) {
+          const reason = `Prior output claim refused: missing declared output kind${unresolvedMissingKinds.length === 1 ? "" : "s"}: ${unresolvedMissingKinds.join(", ")}`;
           await parkQueuedCandidate(candidate, {
             reason,
             condition: PRIOR_OUTPUT_MISSING_REASON,
             activityBody: `Prior output claim stopped: ${reason}`,
             inboxBody: `Prior output claim failed and the task was parked in Backlog: ${reason}`,
-            metadata: { missingKinds },
+            metadata: { missingKinds: unresolvedMissingKinds },
           });
           return { error: reason, reason: PRIOR_OUTPUT_MISSING_REASON };
         }

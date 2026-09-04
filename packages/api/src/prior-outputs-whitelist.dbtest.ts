@@ -31,7 +31,10 @@ const claim = () => createApp(db).request("/runner/tasks/claim", {
   body: JSON.stringify({ runnerId: "prior-output-whitelist-runner", leaseSeconds: 60 }),
 });
 
-const createFixture = async (steps: Array<{ outputKind: string; priorOutputKinds: string[] }>) => {
+const createFixture = async (
+  steps: Array<{ outputKind: string; priorOutputKinds: string[] }>,
+  omitStepIndexes: ReadonlySet<number> = new Set(),
+) => {
   const project = await db.project.create({ data: {
     name: `prior-output-whitelist-${Date.now()}`,
     slug: `prior-output-whitelist-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
@@ -88,6 +91,7 @@ const createFixture = async (steps: Array<{ outputKind: string; priorOutputKinds
   const chainId = `prior-output-whitelist-chain-${Math.floor(Math.random() * 1e9)}`;
   const tasks = [];
   for (const step of template.steps) {
+    if (omitStepIndexes.has(step.stepIndex - 1)) continue;
     tasks.push(await db.task.create({ data: {
       projectId: project.id,
       repoId: repo.id,
@@ -188,6 +192,84 @@ test("a 12-step toy chain sends every claim exactly its declared prior outputs",
     `expected at least 80 KB saved across the toy chain; saved=${savedPromptBytes}; sizes=${JSON.stringify(promptSizes)}`,
   );
   console.log(JSON.stringify({ audit: "prior-output-prompt-sizes", promptSizes, savedPromptBytes }));
+});
+
+test("an omitted producer kind is satisfied by absence without parking the target", async () => {
+  const { template, tasks } = await createFixture([
+    { outputKind: "implementation", priorOutputKinds: [] },
+    { outputKind: "sol-findings", priorOutputKinds: ["implementation"] },
+    { outputKind: "blind-findings", priorOutputKinds: ["implementation"] },
+    { outputKind: "fixed-implementation", priorOutputKinds: ["sol-findings", "blind-findings"] },
+  ], new Set([2]));
+  const implementationRun = await db.$transaction((tx) => enqueueTaskRun(tx as never, tasks[0]!.id));
+  await db.run.update({ where: { id: implementationRun.id }, data: { status: RunStatus.SUCCEEDED, endedAt: new Date() } });
+  await db.task.update({ where: { id: tasks[0]!.id }, data: { status: TaskStatus.DONE } });
+  await db.taskStepOutput.create({ data: {
+    taskId: tasks[0]!.id,
+    runId: implementationRun.id,
+    kind: template.steps[0]!.outputKind,
+    body: "available implementation",
+  } });
+
+  const solRun = await db.$transaction((tx) => enqueueTaskRun(tx as never, tasks[1]!.id));
+  await db.run.update({ where: { id: solRun.id }, data: { status: RunStatus.SUCCEEDED, endedAt: new Date() } });
+  await db.task.update({ where: { id: tasks[1]!.id }, data: { status: TaskStatus.DONE } });
+  await db.taskStepOutput.create({ data: {
+    taskId: tasks[1]!.id,
+    runId: solRun.id,
+    kind: template.steps[1]!.outputKind,
+    body: "available sol findings",
+  } });
+
+  const targetRun = await db.$transaction((tx) => enqueueTaskRun(tx as never, tasks[2]!.id));
+  const response = await claim();
+  const body = await response.json() as ClaimedTask;
+  assert.equal(response.status, 200);
+  assert.equal(body.run.id, targetRun.id);
+  assert.deepEqual(body.priorOutputs.map(({ kind }) => kind), ["sol-findings"]);
+});
+
+test("a present producer without output keeps refusing the declared kind", async () => {
+  const { template, tasks } = await createFixture([
+    { outputKind: "implementation", priorOutputKinds: [] },
+    { outputKind: "sol-findings", priorOutputKinds: ["implementation"] },
+    { outputKind: "blind-findings", priorOutputKinds: ["implementation"] },
+    { outputKind: "fixed-implementation", priorOutputKinds: ["sol-findings", "blind-findings"] },
+  ]);
+  const implementationRun = await db.$transaction((tx) => enqueueTaskRun(tx as never, tasks[0]!.id));
+  await db.run.update({ where: { id: implementationRun.id }, data: { status: RunStatus.SUCCEEDED, endedAt: new Date() } });
+  await db.task.update({ where: { id: tasks[0]!.id }, data: { status: TaskStatus.DONE } });
+  await db.taskStepOutput.create({ data: {
+    taskId: tasks[0]!.id,
+    runId: implementationRun.id,
+    kind: template.steps[0]!.outputKind,
+    body: "available implementation",
+  } });
+
+  const solRun = await db.$transaction((tx) => enqueueTaskRun(tx as never, tasks[1]!.id));
+  await db.run.update({ where: { id: solRun.id }, data: { status: RunStatus.SUCCEEDED, endedAt: new Date() } });
+  await db.task.update({ where: { id: tasks[1]!.id }, data: { status: TaskStatus.DONE } });
+  await db.taskStepOutput.create({ data: {
+    taskId: tasks[1]!.id,
+    runId: solRun.id,
+    kind: template.steps[1]!.outputKind,
+    body: "available sol findings",
+  } });
+
+  const targetRun = await db.$transaction((tx) => enqueueTaskRun(tx as never, tasks[3]!.id));
+  const response = await claim();
+  const body = await response.json() as { error: string; reason: string };
+  assert.equal(response.status, 409);
+  assert.equal(body.reason, "prior-output-missing");
+  assert.equal(body.error, "Prior output claim refused: missing declared output kind: blind-findings");
+  const [failedRun, parkedTask] = await Promise.all([
+    db.run.findUniqueOrThrow({ where: { id: targetRun.id } }),
+    db.task.findUniqueOrThrow({ where: { id: tasks[3]!.id } }),
+  ]);
+  assert.equal(failedRun.status, RunStatus.FAILED);
+  assert.equal(failedRun.failureClass, FailureClass.TASK_FAILED);
+  assert.equal(failedRun.retryable, false);
+  assert.equal(parkedTask.status, TaskStatus.BACKLOG);
 });
 
 test("a missing declared prior output loudly refuses the claim", async () => {
