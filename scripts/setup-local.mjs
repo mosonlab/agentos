@@ -109,8 +109,8 @@ const WEAK_SECRET_VALUES = new Set([...SENTINEL_VALUES, "secret", "password", "p
 
 const SHORTEST_ACCEPTABLE_SECRET = 24;
 
-/** Keys a local checkout cannot start without. Optional integrations (Feishu,
- *  the merge executor, GitHub reads) stay empty by design and are not listed. */
+/** Keys a local checkout cannot start without. The GitHub token is supplied by
+ *  the operator; setup copies it into `.env` but never generates or prints it. */
 export const REQUIRED_KEYS = Object.freeze([
   "POSTGRES_DB",
   "POSTGRES_USER",
@@ -123,6 +123,7 @@ export const REQUIRED_KEYS = Object.freeze([
   "RUNNER_TOKEN",
   "SESSION_COOKIE_SECRET",
   "AGENTOS_SECRET_ENCRYPTION_KEY",
+  "GITHUB_READ_TOKEN",
 ]);
 
 const SECRET_KEYS = Object.freeze([
@@ -224,9 +225,10 @@ export function composeDatabaseUrl({
   return url.href;
 }
 
-/** The whole set, generated together so distinctness can be asserted here
- *  rather than hoped for by every caller. */
-export function generateConfiguration(randomBytes = cryptoRandomBytes) {
+/** Assemble the complete set from one operator credential and locally generated
+ *  values. Generated-secret distinctness is asserted here for every caller. */
+export function generateConfiguration(randomBytes = cryptoRandomBytes, githubReadToken) {
+  const requiredGitHubReadToken = requireGitHubReadToken(githubReadToken);
   const databasePassword = urlSafeSecret(randomBytes, 24);
   const values = {
     postgresDatabase: DATABASE_DEFAULTS.database,
@@ -244,6 +246,7 @@ export function generateConfiguration(randomBytes = cryptoRandomBytes) {
     // `packages/api/src/secrets.ts` requires base64 that decodes to exactly 32
     // bytes; anything else fails at the first Secret a Run touches.
     secretEncryptionKey: base64Secret(randomBytes, 32),
+    githubReadToken: requiredGitHubReadToken,
   };
 
   const secrets = [
@@ -290,6 +293,9 @@ RUNNER_TOKEN=${values.runnerToken}
 SESSION_COOKIE_SECRET=${values.sessionCookieSecret}
 # 32 random bytes, base64. Stays outside the database and the runner environment.
 AGENTOS_SECRET_ENCRYPTION_KEY=${values.secretEncryptionKey}
+# Required read-only GitHub credential supplied by the operator. setup:local
+# copies this value into the protected file; it does not generate the token.
+GITHUB_READ_TOKEN=${values.githubReadToken}
 
 # The web dev/preview server proxies to the API and attaches the operator token
 # in its own process. No token is compiled into or stored by the browser, so
@@ -335,6 +341,17 @@ function decodedByteLength(value, encoding) {
 function isPlaceholder(key, value) {
   const weak = SECRET_KEYS.includes(key) ? WEAK_SECRET_VALUES : SENTINEL_VALUES;
   return weak.has(value);
+}
+
+function requireGitHubReadToken(value) {
+  if (typeof value !== "string") {
+    throw new SetupError(SETUP_CLASSES.invalid, "missing-key:GITHUB_READ_TOKEN");
+  }
+  const normalized = value.trim();
+  if (isPlaceholder("GITHUB_READ_TOKEN", normalized)) {
+    throw new SetupError(SETUP_CLASSES.invalid, "placeholder-value:GITHUB_READ_TOKEN");
+  }
+  return normalized;
 }
 
 /** Answers one question — is this file safe to keep and use? — and answers it
@@ -702,6 +719,7 @@ export function runSetup({
   fileName = CONFIG_FILE_NAME,
   nodeVersion = process.versions.node,
   randomBytes = cryptoRandomBytes,
+  githubReadToken,
   dryRun = false,
   upgrade = false,
   fs = nodeFileSystem,
@@ -780,11 +798,19 @@ export function runSetup({
     return finish(SETUP_CLASSES.invalid, reasons.join(" "));
   }
 
+  let requiredGitHubReadToken;
+  try {
+    requiredGitHubReadToken = requireGitHubReadToken(githubReadToken);
+  } catch (error) {
+    if (error instanceof SetupError) return finish(error.setupClass, error.reason);
+    throw error;
+  }
+
   if (dryRun) return finish(SETUP_CLASSES.created, "absent-a-real-run-would-publish");
 
   try {
     assertDurableDirectory(directory, fs);
-    const contents = renderEnvFile(generateConfiguration(randomBytes));
+    const contents = renderEnvFile(generateConfiguration(randomBytes, requiredGitHubReadToken));
     publishConfiguration({ directory, fileName, contents, fs, beforePublish });
   } catch (error) {
     // Every stable failure below this line already knows its class. The losing
@@ -825,8 +851,8 @@ class line; upgrade adds changed/remaining report lines. Both keep stderr empty:
   configuration-created            the file did not exist and this invocation published it
   configuration-valid              a usable 0600 file already existed and was left untouched
   configuration-raced              another writer published first; nothing was changed
-  configuration-invalid            a file exists but is not usable, or is not a regular
-                                   file at mode 0600; it was left untouched
+  configuration-invalid            required operator input is unusable, or a file exists
+                                   but is not usable; no existing file was changed
   configuration-unsupported-node   this Node does not satisfy ${SUPPORTED_NODE_RANGE}
   configuration-unsupported-filesystem  the directory cannot publish the file durably
   configuration-entropy-unusable   the entropy source returned unusable material
@@ -837,8 +863,10 @@ class line; upgrade adds changed/remaining report lines. Both keep stderr empty:
 
 Upgrade preserves every existing assignment, adds only missing locally generated
 secret keys, and reports changed key names plus remaining value-free reason codes.
-Weak or placeholder credentials are never rotated automatically. No generated
-value is ever printed. There is no overwrite or rotation flag.`;
+Create requires GITHUB_READ_TOKEN in the environment and copies it into .env;
+setup never generates or prints that credential. Weak or placeholder credentials
+are never rotated automatically. No generated value is ever printed. There is no
+overwrite or rotation flag.`;
 
 export function main(argv = process.argv.slice(2)) {
   let options;
@@ -864,6 +892,7 @@ export function main(argv = process.argv.slice(2)) {
       directory: options.directory ?? repositoryRoot,
       dryRun: options.dryRun,
       upgrade: options.upgrade,
+      githubReadToken: process.env.GITHUB_READ_TOKEN,
     });
     return exitCode;
   } catch (error) {

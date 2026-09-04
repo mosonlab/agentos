@@ -10,8 +10,8 @@
  * looks nothing like the failure it is asserting on.
  *
  * The helper supplies a fixture GITHUB_READ_TOKEN because the API requires
- * that read capability at startup. Tests that exercise its absence override
- * the key with `undefined`.
+ * that read capability at startup. Tests that exercise an unusable value pin
+ * the key to an empty string so the entrypoint's dotenv load cannot refill it.
  *
  * Three deliberate omissions:
  *

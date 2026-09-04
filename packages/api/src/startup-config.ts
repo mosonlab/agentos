@@ -36,9 +36,6 @@ const HIGHEST_PORT = 65_535;
  *  by reading that file, so a sentinel added there cannot be accepted here. */
 const SENTINEL_VALUES = new Set(["", "CHANGE_ME", "CHANGEME", "TODO", "PLACEHOLDER", "REPLACE_ME", "changeme"]);
 const WEAK_SECRET_VALUES = new Set([...SENTINEL_VALUES, "secret", "password", "postgres", "agentos"]);
-/** The public fixtures use this value as a visibly fake GitHub credential. */
-const GITHUB_READ_TOKEN_PLACEHOLDERS = new Set(["ghp_exampletoken"]);
-
 /** Same floor as the generator, which mints 32 random bytes as base64url. */
 const SHORTEST_ACCEPTABLE_SECRET = 24;
 
@@ -145,7 +142,7 @@ const checkGitHubReadToken = (reasons: string[], env: NodeJS.ProcessEnv): void =
     return;
   }
   const normalized = value.trim();
-  if (normalized === "" || isPlaceholder(variable, normalized) || GITHUB_READ_TOKEN_PLACEHOLDERS.has(normalized)) {
+  if (isPlaceholder(variable, normalized)) {
     reasons.push(`placeholder-value:${variable}`);
   }
 };

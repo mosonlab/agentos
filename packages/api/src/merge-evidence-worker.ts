@@ -25,7 +25,7 @@ import {
   serializeEvidence,
 } from "@anneal/db";
 
-import { checkConclusionFor, createGitHubReader, GitHubReadError, type PullRequestReader, type PullRequestSnapshot } from "./github-read.js";
+import { checkConclusionFor, GitHubReadError, type PullRequestReader, type PullRequestSnapshot } from "./github-read.js";
 
 export const evidenceReadTimeoutMs = (): number => {
   const raw = Number(process.env.MERGE_EVIDENCE_READ_TIMEOUT_MS);
@@ -222,7 +222,7 @@ const chainBaseRefFor = async (db: PrismaClient, request: PendingEvidenceRequest
 
 export const startEvidenceWorker = (
   db: PrismaClient,
-  reader: PullRequestReader = createGitHubReader(process.env.GITHUB_READ_TOKEN ?? ""),
+  reader: PullRequestReader,
 ): ReturnType<typeof setInterval> | null => {
   const interval = evidencePollIntervalMs();
   const timer = setInterval(() => {

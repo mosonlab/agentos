@@ -24,7 +24,7 @@ import {
   type MergeRecoveryAttempt,
 } from "@anneal/db";
 
-import { createGitHubReader, type PullRequestReader, type PullRequestSnapshot } from "./github-read.js";
+import type { PullRequestReader, PullRequestSnapshot } from "./github-read.js";
 import {
   classifyCandidate,
   classifyDurable,
@@ -492,7 +492,7 @@ const addTickDelta = (result: BaseDriftRecoveryTickResult, delta: RecoveryTickDe
 
 export const baseDriftRecoveryTick = async (
   db: PrismaClient,
-  reader: PullRequestReader = createGitHubReader(process.env.GITHUB_READ_TOKEN ?? ""),
+  reader: PullRequestReader,
   now = new Date(),
   limit = 5,
 ): Promise<BaseDriftRecoveryTickResult> => {
@@ -597,7 +597,7 @@ export const baseDriftRecoveryTick = async (
 
 export const startBaseDriftRecoveryWorker = (
   db: PrismaClient,
-  reader: PullRequestReader = createGitHubReader(process.env.GITHUB_READ_TOKEN ?? ""),
+  reader: PullRequestReader,
 ): ReturnType<typeof setInterval> => {
   let inFlight = false;
   const run = (): void => {

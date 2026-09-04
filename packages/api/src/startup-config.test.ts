@@ -119,6 +119,9 @@ test("a missing, placeholder, short or shared principal token is refused", () =>
 });
 
 test("a missing, blank, or published placeholder GitHub read token is refused", () => {
+  const example = readFileSync(fileURLToPath(new URL("../../../.env.example", import.meta.url)), "utf8");
+  const publishedPlaceholder = /^GITHUB_READ_TOKEN=(.*)$/mu.exec(example)?.[1];
+  assert.equal(publishedPlaceholder, "CHANGE_ME");
   assert.deepEqual(
     refusalReasons(generatedEnvironment({ GITHUB_READ_TOKEN: undefined })),
     ["missing:GITHUB_READ_TOKEN"],
@@ -128,7 +131,7 @@ test("a missing, blank, or published placeholder GitHub read token is refused", 
     ["placeholder-value:GITHUB_READ_TOKEN"],
   );
   assert.deepEqual(
-    refusalReasons(generatedEnvironment({ GITHUB_READ_TOKEN: "ghp_exampletoken" })),
+    refusalReasons(generatedEnvironment({ GITHUB_READ_TOKEN: publishedPlaceholder })),
     ["placeholder-value:GITHUB_READ_TOKEN"],
   );
   assert.deepEqual(
@@ -473,7 +476,7 @@ test("index.ts calls loadStartupConfig before it acquires ownership or reads the
   assert.doesNotMatch(index, /0\.0\.0\.0/u);
 });
 
-test("the real API entrypoint refuses a missing GitHub read token before opening a socket", {
+test("the real API entrypoint refuses a blank GitHub read token before opening a socket", {
   // The source entrypoint imports the native Files/state guard before the
   // startup verdict. Environments that have not built that optional native
   // test dependency cannot exercise a real child entrypoint here.
@@ -486,7 +489,9 @@ test("the real API entrypoint refuses a missing GitHub read token before opening
       ...process.env,
       ...spawnedStartupEnvironment({
         DATABASE_URL: "postgresql://invalid:invalid-fixture-password-000000@127.0.0.1:1/never-contact?schema=public",
-        GITHUB_READ_TOKEN: undefined,
+        // Keep the key present so dotenv cannot refill it from the checkout's
+        // root .env before startup validation runs.
+        GITHUB_READ_TOKEN: "",
       }),
     },
     stdio: ["ignore", "pipe", "pipe"],

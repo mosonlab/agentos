@@ -37,6 +37,7 @@ fresh install.
 | Git | Any recent version, with `user.name` and `user.email` configured for the runner account. The source must be a working clone. |
 | Codex CLI | The official Codex CLI, already installed **and already signed in**, under the same macOS account that will run the Anneal runner. The runner does not inherit your interactive shell's `PATH`; see the preflight below. |
 | GitHub CLI | Optional for branch-only delivery and the deterministic smoke task. `gh` is required for automatic pull-request creation and must be authenticated as the runner account. If a run must open a pull request and `gh` cannot record one, Anneal preserves the pushed branch and fails the run for retry. Manual PR instructions are reserved for non-GitHub remotes, where automatic creation is impossible by design. |
+| GitHub read token | A read-only token exported as `GITHUB_READ_TOKEN` while running setup. Every API process requires it at startup; setup copies it into the mode-0600 `.env` and never prints it. |
 
 Anneal orchestrates a coding CLI you already have. It bundles no subscription
 and resells no capacity: your provider account, its plan limits, its rate
@@ -98,13 +99,20 @@ rewritten.
 ### 3. Generate local configuration
 
 ```sh
+printf 'GitHub read token: '
+IFS= read -r -s GITHUB_READ_TOKEN
+printf '\n'
+export GITHUB_READ_TOKEN
 npm run setup:local
+unset GITHUB_READ_TOKEN
 ```
 
 This writes `.env` once, at mode `0600`, containing values it generates: a
 stable random `RUNNER_ID`, distinct random operator and runner tokens, a
 session-cookie secret, a base64-encoded 32-byte encryption key, and one database
-password written identically into `POSTGRES_PASSWORD` and `DATABASE_URL`.
+password written identically into `POSTGRES_PASSWORD` and `DATABASE_URL`. It
+also copies the operator-provided `GITHUB_READ_TOKEN`; it cannot generate that
+credential, and refuses without it.
 
 The create form prints a class — `configuration-created`,
 `configuration-valid`, or `configuration-raced` — and never a value. It refuses
@@ -365,6 +373,7 @@ from an older checkout whose checks were weaker.
 | Reason | What to do |
 | --- | --- |
 | `missing:AGENTOS_SECRET_ENCRYPTION_KEY` | The file predates the encrypted-secrets store. Add the key as 32 random bytes in base64: `AGENTOS_SECRET_ENCRYPTION_KEY=$(openssl rand -base64 32)`. Do not invent a shorter one — the value is parsed strictly and must decode to exactly 32 bytes. |
+| `missing:GITHUB_READ_TOKEN` / `placeholder-value:GITHUB_READ_TOKEN` | Supply the required read-only GitHub token. The API does not start without it, even when merge automation is unused. |
 | `encryption-key-not-base64:…` / `encryption-key-not-32-bytes:…` | The key is present but malformed. Node's base64 decoder discards characters outside the alphabet, so a padded or prefixed key can look right and decode to the wrong bytes; regenerate it with the command above. Note that replacing this key while encrypted rows exist destroys them unrecoverably. |
 | `placeholder-value:POSTGRES_PASSWORD` or `placeholder-value:DATABASE_URL_PASSWORD` | The database password is one of the well-known defaults this repository's Compose file falls back to (`agentos`, `postgres`, `password`, `secret`) or a `CHANGE_ME`-style sentinel — on a port published on this machine. Choose a real one. |
 | `database-credentials-disagree:POSTGRES_PASSWORD` (or `_USER`, `_DB`) | `.env` gives Compose one value and `DATABASE_URL` another. Exactly one of them is what the database actually has, and which one is not knowable from here. Make them identical. |

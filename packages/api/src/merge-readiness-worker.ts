@@ -34,7 +34,7 @@ import {
   RECOVERY_HEAD_ADOPTION_CONFLICT_MESSAGE,
   reopenAfterHeadAdoption,
 } from "./merge-tail-state.js";
-import { createGitHubReader, type PullRequestReader } from "./github-read.js";
+import type { PullRequestReader } from "./github-read.js";
 import {
   evaluateReadiness,
   READINESS_READ_BUDGET_MS,
@@ -847,7 +847,7 @@ export const readinessTick = async (
 
 export const startReadinessWorker = (
   db: PrismaClient,
-  reader: PullRequestReader = createGitHubReader(process.env.GITHUB_READ_TOKEN ?? ""),
+  reader: PullRequestReader,
 ): ReturnType<typeof setInterval> => {
   let inFlight = false;
   const timer = setInterval(() => {

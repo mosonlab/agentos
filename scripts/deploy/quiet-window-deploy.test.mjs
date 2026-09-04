@@ -428,7 +428,7 @@ test("an unusable poll interval refuses before any mode work", async () => {
   assert.deepEqual(state.calls, []);
 });
 
-test("deploy preflight refuses an environment without GITHUB_READ_TOKEN", () => {
+test("deploy preflight refuses a shared environment file without GITHUB_READ_TOKEN", () => {
   const root = mkdtempSync(join(tmpdir(), "anneal-deploy-github-token-missing-"));
   try {
     mkdirSync(join(root, "shared"), { recursive: true });
@@ -439,7 +439,9 @@ test("deploy preflight refuses an environment without GITHUB_READ_TOKEN", () => 
     };
     delete environment.DATABASE_URL;
     delete environment.FEISHU_DEFAULT_CHAT_ID;
-    delete environment.GITHUB_READ_TOKEN;
+    // An inherited value must not make a shared/.env missing the required key
+    // look deployable.
+    environment.GITHUB_READ_TOKEN = "inherited-fixture-token";
 
     const result = spawnSync(
       process.execPath,

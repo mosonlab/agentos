@@ -89,7 +89,7 @@ const readFailureDecision = (failure: {
  * decides which GitHub facts are needed and when a later read can be skipped.
  */
 export const evaluateReadiness = async (
-  facts: PullRequestReader | null,
+  facts: PullRequestReader,
   input: ReadinessInput,
 ): Promise<ReadinessDecision> => {
   switch (input.stage) {
@@ -106,7 +106,7 @@ export const evaluateReadiness = async (
       break;
   }
 
-  if (!facts?.compareCommits) {
+  if (!facts.compareCommits) {
     return stop("github-reader-unavailable", "server-side GitHub comparison reader is unavailable");
   }
   if (!input.target.resolved) {

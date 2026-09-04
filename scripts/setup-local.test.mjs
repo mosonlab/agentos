@@ -47,16 +47,26 @@ import {
   TEMPORARY_PREFIX,
   UPGRADE_GENERATED_KEYS,
   composeDatabaseUrl,
-  generateConfiguration,
+  generateConfiguration as generateConfigurationWithoutGitHubToken,
   isSupportedNodeVersion,
   parseArguments,
   parseEnvAssignments,
   parseSemanticVersion,
   publishConfiguration,
   renderEnvFile,
-  runSetup,
+  runSetup as runSetupWithoutGitHubToken,
   validateEnvContent,
 } from "./setup-local.mjs";
+
+const TEST_GITHUB_READ_TOKEN = "github_pat_setup_fixture_000000000000";
+const generateConfiguration = (randomBytes) =>
+  generateConfigurationWithoutGitHubToken(randomBytes, TEST_GITHUB_READ_TOKEN);
+const runSetup = (options = {}) => runSetupWithoutGitHubToken({
+  githubReadToken: Object.hasOwn(options, "githubReadToken")
+    ? options.githubReadToken
+    : TEST_GITHUB_READ_TOKEN,
+  ...options,
+});
 
 const repositoryRoot = fileURLToPath(new URL("../", import.meta.url));
 const modulePath = fileURLToPath(new URL("./setup-local.mjs", import.meta.url));
@@ -227,6 +237,17 @@ test("generation refuses a source that cannot tell two principals apart", () => 
   );
 });
 
+test("generation refuses before drawing entropy without an operator GitHub token", () => {
+  let draws = 0;
+  assert.throws(
+    () => generateConfigurationWithoutGitHubToken(() => { draws += 1; return Buffer.alloc(32); }),
+    (error) => error instanceof Error
+      && error.name === "SetupError"
+      && error.reason === "missing-key:GITHUB_READ_TOKEN",
+  );
+  assert.equal(draws, 0);
+});
+
 test("the generated DATABASE_URL names its schema and carries the generated password", () => {
   const values = generateConfiguration();
   const url = new URL(values.databaseUrl);
@@ -264,6 +285,7 @@ test("the rendered file agrees with itself, exposes no browser token, and valida
   assert.equal(assignments.get("DATABASE_URL"), values.databaseUrl);
   assert.equal(assignments.get("API_HOST"), "127.0.0.1");
   assert.equal(assignments.get("OPERATOR_TOKEN"), values.operatorToken);
+  assert.equal(assignments.get("GITHUB_READ_TOKEN"), TEST_GITHUB_READ_TOKEN);
   assert.notEqual(assignments.get("OPERATOR_TOKEN"), assignments.get("RUNNER_TOKEN"));
 
   for (const key of assignments.keys()) {
@@ -285,6 +307,18 @@ test("validation refuses placeholders, and says so without quoting them", () => 
   assert.equal(valid, false);
   assert.ok(reasons.some((reason) => reason.startsWith("placeholder-value:")));
   for (const reason of reasons) assert.doesNotMatch(reason, /CHANGE_ME/);
+});
+
+test("validation requires a non-placeholder GitHub read token", () => {
+  const rendered = renderEnvFile(generateConfiguration());
+  assert.deepEqual(
+    validateEnvContent(rendered.replace(/^GITHUB_READ_TOKEN=.*\n/m, "")).reasons,
+    ["missing-key:GITHUB_READ_TOKEN"],
+  );
+  assert.deepEqual(
+    validateEnvContent(rendered.replace(/^GITHUB_READ_TOKEN=.*$/m, "GITHUB_READ_TOKEN=CHANGE_ME")).reasons,
+    ["placeholder-value:GITHUB_READ_TOKEN"],
+  );
 });
 
 test("validation names every defect it can find, and never a value", () => {
@@ -359,12 +393,27 @@ test("a first run creates the file at mode 0600 and prints no value", () => {
       assert.equal(output.includes(assignments.get(key)), false, `${key} reached the output`);
     }
     assert.equal(output.includes(assignments.get("DATABASE_URL")), false, "the rendered DATABASE_URL reached the output");
+    assert.equal(output.includes(assignments.get("GITHUB_READ_TOKEN")), false, "GITHUB_READ_TOKEN reached the output");
 
     // Nothing of this invocation's own is left behind.
     assert.deepEqual(
       readdirSync(directory).filter((name) => name !== CONFIG_FILE_NAME),
       [],
     );
+  });
+});
+
+test("a first run refuses to create a configuration without an operator-provided GitHub token", () => {
+  withTemporaryDirectory((directory) => {
+    const missing = runSetup({ directory, githubReadToken: undefined, stdout: () => {}, stderr: () => {} });
+    assert.equal(missing.setupClass, SETUP_CLASSES.invalid);
+    assert.equal(missing.reason, "missing-key:GITHUB_READ_TOKEN");
+    assert.equal(existsSync(join(directory, CONFIG_FILE_NAME)), false);
+
+    const placeholder = runSetup({ directory, githubReadToken: "CHANGE_ME", stdout: () => {}, stderr: () => {} });
+    assert.equal(placeholder.setupClass, SETUP_CLASSES.invalid);
+    assert.equal(placeholder.reason, "placeholder-value:GITHUB_READ_TOKEN");
+    assert.equal(existsSync(join(directory, CONFIG_FILE_NAME)), false);
   });
 });
 
@@ -771,6 +820,7 @@ const beforePublish = () => {
 const { exitCode } = runSetup({
   directory,
   randomBytes: seededRandomBytes(),
+  githubReadToken: process.env.GITHUB_READ_TOKEN,
   beforePublish,
   stdout: (line) => process.stdout.write(line + "\\n"),
   stderr: (line) => process.stderr.write(line + "\\n"),
@@ -781,6 +831,7 @@ process.exitCode = exitCode;
 function runWriter(scriptPath, directory, seed, label, barrierDirectory) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [scriptPath, directory, String(seed), label, barrierDirectory], {
+      env: { ...process.env, GITHUB_READ_TOKEN: TEST_GITHUB_READ_TOKEN },
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";
@@ -920,6 +971,7 @@ const [directory, signalPath] = process.argv.slice(2);
 
 runSetup({
   directory,
+  githubReadToken: process.env.GITHUB_READ_TOKEN,
   // At this instant the temporary file holds the complete .env bytes, is 0600
   // and is fsynced, and .env has not been linked yet. This is the window a
   // SIGKILL, a crash or a power cut lands in.
@@ -943,7 +995,10 @@ test("a run killed between the write and the link leaves an ignored temporary fi
     writeFileSync(scriptPath, INTERRUPTED_WRITER);
     const signalPath = join(harness, "reached-the-window");
 
-    const child = spawn(process.execPath, [scriptPath, directory, signalPath], { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(process.execPath, [scriptPath, directory, signalPath], {
+      env: { ...process.env, GITHUB_READ_TOKEN: TEST_GITHUB_READ_TOKEN },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
     const closed = new Promise((resolve) => child.on("close", (code, signal) => resolve({ code, signal })));
 
     const deadline = Date.now() + 20_000;
@@ -1080,12 +1135,30 @@ test("upgrade reports weak credentials for manual rotation while preserving them
   });
 });
 
+test("upgrade names a missing operator-provided GitHub token without inventing one", () => {
+  withTemporaryDirectory((directory) => {
+    const target = join(directory, CONFIG_FILE_NAME);
+    const original = renderEnvFile(generateConfiguration(seededRandomBytes(61)))
+      .replace(/^GITHUB_READ_TOKEN=.*\n/m, "");
+    writeFileSync(target, original, { mode: CONFIG_FILE_MODE });
+
+    const result = runSetup({ directory, upgrade: true, stdout: () => {}, stderr: () => {} });
+    assert.equal(result.setupClass, SETUP_CLASSES.upgradeNeedsAction);
+    assert.deepEqual(result.changed, []);
+    assert.deepEqual(result.remaining, ["add:GITHUB_READ_TOKEN"]);
+    assert.equal(readFileSync(target, "utf8"), original);
+  });
+});
+
 test("the CLI publishes, reports its class, and prints no value", async () => {
   const directory = mkdtempSync(join(tmpdir(), "agentos-setup-cli-"));
   try {
     const run = () =>
       new Promise((resolve) => {
-        const child = spawn(process.execPath, [modulePath, "--directory", directory], { stdio: ["ignore", "pipe", "pipe"] });
+        const child = spawn(process.execPath, [modulePath, "--directory", directory], {
+          env: { ...process.env, GITHUB_READ_TOKEN: TEST_GITHUB_READ_TOKEN },
+          stdio: ["ignore", "pipe", "pipe"],
+        });
         let stdout = "";
         let stderr = "";
         child.stdout.on("data", (chunk) => {
@@ -1121,7 +1194,11 @@ test("the CLI publishes, reports its class, and prints no value", async () => {
 
 function runCli(argv, options = {}) {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [modulePath, ...argv], { stdio: ["ignore", "pipe", "pipe"], ...options });
+    const child = spawn(process.execPath, [modulePath, ...argv], {
+      env: { ...process.env, GITHUB_READ_TOKEN: TEST_GITHUB_READ_TOKEN },
+      stdio: ["ignore", "pipe", "pipe"],
+      ...options,
+    });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => {
