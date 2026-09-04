@@ -8,7 +8,7 @@ import test from "node:test";
 
 import type { RunnerConfig } from "./config.js";
 import type { DependencyProvisioningDecision } from "./dependency-provisioning.js";
-import { bindCommandRunner, CommandTimeoutError, KILL_OVERHEAD_MS, type CommandRunner } from "./exec.js";
+import { bindCommandRunner, CommandTimeoutError, isCommandTimeout, KILL_OVERHEAD_MS, type CommandRunner } from "./exec.js";
 import { CLONE_COMMAND_TIMEOUT_MS, CLONE_CREATION_TIMEOUT_MS, CLONE_OPERATION_BUDGET_MS } from "./network-retry.js";
 import {
   mirrorRevisionsPresent, repoMirrorPath, RepoMirrorError, withRepoMirror,
@@ -258,6 +258,7 @@ test("a cold clone that reaches its ceiling fails once with a first-clone messag
     assert.ok(fetchTimeout !== undefined);
     assert.ok(fetchTimeout > CLONE_OPERATION_BUDGET_MS);
     assert.ok(failure instanceof Error);
+    assert.equal(isCommandTimeout(failure), true, "the first-clone timeout must remain retryable infrastructure");
     assert.match(failure.message, new RegExp(escapedRegExp(mirror), "u"));
     assert.match(failure.message, /first[- ]clone|first clone|initial clone/u);
     const ceiling = CLONE_CREATION_TIMEOUT_MS.toLocaleString("en-US");
@@ -371,7 +372,7 @@ test("a held lock is waited for, and one left behind by a dead holder is stolen"
   }
 });
 
-test("a live heartbeating holder can outlast the former 600-second lock wait", async () => {
+test("a live heartbeating holder can cross the creation ceiling before releasing the lock", async () => {
   const { root, remote, config, mirror } = await fixture("lock-live");
   const holderReady = deferred<void>();
   const holderRelease = deferred<void>();
@@ -398,16 +399,16 @@ test("a live heartbeating holder can outlast the former 600-second lock wait", a
       bound(config, root),
       {
         // Deliberately leave lockWaitMs at its default. The synthetic waiter
-        // crosses the former 600-second default before releasing the holder.
+        // crosses the entire first-clone ceiling before releasing the holder.
         lockPollMs: 1,
         now: () => clock,
         sleep: async () => {
           clock += 1_000;
           // Keep the lock held through the first acquisition attempt after the
-          // old deadline. The new creation-sized default then gets one more
-          // poll, during which the live holder releases it.
-          if (clock > 600_000 && released === false) {
-            if (clock > 601_000) {
+          // creation ceiling. The waiter's explicit slack then gives the live
+          // holder time to finish its in-lock setup and teardown.
+          if (clock > CLONE_CREATION_TIMEOUT_MS && released === false) {
+            if (clock > CLONE_CREATION_TIMEOUT_MS + 1_000) {
               released = true;
               holderRelease.resolve();
             }
@@ -420,7 +421,7 @@ test("a live heartbeating holder can outlast the former 600-second lock wait", a
     );
 
     assert.equal(result, mirror);
-    assert.ok(clock > 600_000, "the waiter must outlive the former ten-minute wait");
+    assert.ok(clock > CLONE_CREATION_TIMEOUT_MS, "the waiter must outlive the full creation ceiling");
     assert.equal(progress.some(({ event }) => event === "lock-steal"), false, "a live holder must not be stolen");
   } finally {
     holderRelease.resolve();
@@ -612,6 +613,9 @@ test("the documented pre-seed naming rule matches repoMirrorPath", async () => {
   assert.match(installDocument, /Pre-seed a repository mirror/u);
   assert.match(installDocument, /sha256\(remoteUrl\)\.git/u);
   assert.match(installDocument, /RUNNER_REPO_MIRROR_ROOT/u);
+  assert.match(installDocument, /runner account/u);
+  assert.match(installDocument, /refs\/heads/u);
+  assert.match(installDocument, /refs\/pull/u);
 
   const documentedDirectory = `${createHash("sha256").update(remoteUrl).digest("hex")}.git`;
   assert.equal(repoMirrorPath(mirrorRoot, remoteUrl), join(mirrorRoot, documentedDirectory));

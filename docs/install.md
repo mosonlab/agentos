@@ -71,11 +71,16 @@ normalization, and the lowercase hexadecimal SHA-256 digest is followed by
 `.git`.
 
 On a host whose runners have not started yet, pre-seed the mirror before
-starting them. For example, choose the same remote URL and mirror root, then
-run `git clone --mirror` directly into the computed directory:
+starting them. Run the procedure while logged in as the runner account; the
+mirror root and everything below it must be owned by that account so the runner
+can acquire its process-owned lock. Set `runner_home` to that account's actual
+home rather than relying on the invoking shell's `$HOME`, choose the same remote
+URL and mirror root, then run `git clone --mirror` directly into the computed
+directory:
 
 ```sh
-mirror_root="${RUNNER_REPO_MIRROR_ROOT:-$HOME/.agentos/repo-mirrors}"
+runner_home='/home/agentrunner' # Replace with the runner account's actual home.
+mirror_root="${RUNNER_REPO_MIRROR_ROOT:-$runner_home/.agentos/repo-mirrors}"
 remote_url='https://github.com/example/project.git'
 if command -v shasum >/dev/null 2>&1; then
   digest="$(printf %s "$remote_url" | shasum -a 256 | awk '{print $1}')"
@@ -85,12 +90,28 @@ fi
 mirror_dir="$mirror_root/$digest.git"
 mkdir -p "$mirror_root"
 git clone --mirror "$remote_url" "$mirror_dir"
+git --git-dir="$mirror_dir" config --unset-all remote.origin.fetch
+git --git-dir="$mirror_dir" config --add remote.origin.fetch '+refs/heads/*:refs/heads/*'
+git --git-dir="$mirror_dir" config uploadpack.allowAnySHA1InWant true
+git --git-dir="$mirror_dir" for-each-ref --format='%(refname)' |
+while IFS= read -r ref; do
+  case "$ref" in
+    refs/heads/*|refs/tags/*) ;;
+    *) git --git-dir="$mirror_dir" update-ref -d "$ref" ;;
+  esac
+done
 ```
 
+`git clone --mirror` initially copies every advertised ref, including GitHub's
+`refs/pull/*`. The configuration and cleanup above make the seed match the
+runner's heads-and-tags mirror contract, so pull-request history is not retained
+and later refreshes fetch only `refs/heads/*` plus tags.
+
 Alternatively, copy the complete mirror directory with the matching digest
-name from an existing host into the same mirror root. Pre-seeding a host while
-its runners are running is unsupported: stop all runners first because the
-mirror lock protocol is process-owned.
+name from an existing host into the same mirror root, preserving or correcting
+ownership for the runner account. Pre-seeding a host while its runners are
+running is unsupported: stop all runners first because the mirror lock protocol
+is process-owned.
 
 ## Project onboarding
 

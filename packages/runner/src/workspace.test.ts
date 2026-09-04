@@ -8,8 +8,9 @@ import test from "node:test";
 
 import type { RunnerConfig } from "./config.js";
 import type { DependencyProvisioningDecision } from "./dependency-provisioning.js";
-import { CLONE_CREATION_TIMEOUT_MS, CLONE_OPERATION_BUDGET_MS } from "./network-retry.js";
-import { bindCommandRunner, KILL_OVERHEAD_MS, runCommand, type CommandRunner } from "./exec.js";
+import { CLONE_COMMAND_TIMEOUT_MS } from "./network-retry.js";
+import { bindCommandRunner, runCommand, type CommandRunner } from "./exec.js";
+import { repoMirrorPath, repoMirrorRoot } from "./repo-mirror.js";
 import { runtimeToolPaths } from "./runtime-tools.js";
 import {
   cleanupAgentScratch, materializeRuntimeTools, provisionAgentScratch, provisionSessionConfig, provisionWorkspace, sessionConfigBaselineRoot,
@@ -525,12 +526,11 @@ test("a pinned workspace fetches only the recorded commit and never creates the 
   }
 });
 
-test("the first mirror clone uses one long creation fetch", async () => {
+test("the mirror fetch retries two transient failures and succeeds on the third attempt", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentos-workspace-retry-"));
   try {
     let fetchCalls = 0;
     let cloneCalls = 0;
-    let fetchTimeoutMs: number | undefined;
     const config = {
       workspaceRoot: join(root, "workspaces"),
       runAsPrefix: [],
@@ -547,16 +547,23 @@ test("the first mirror clone uses one long creation fetch", async () => {
       },
       run: { id: "run-retry", runNumber: 1, targetBranch: "main", branch: "main" },
     });
+    const mirrorRoot = repoMirrorRoot(config);
+    const mirror = repoMirrorPath(mirrorRoot, claim.repo.remoteUrl);
+    await mkdir(mirrorRoot, { recursive: true });
+    git(mirrorRoot, "init", "--bare", mirror);
+    git(mirror, "remote", "add", "origin", claim.repo.remoteUrl);
     const production = provisioningRun(config);
-    const fake: CommandRunner = async (executable, args, options) => {
+    const fake: CommandRunner = async (executable, args) => {
       const shell = await realShell(production, executable, args);
       if (shell !== null) return shell;
       if (executable === "git" && args[0] === "fetch") {
         fetchCalls += 1;
-        fetchTimeoutMs = options?.timeoutMs;
+        if (fetchCalls < 3) throw new Error("fatal: unable to access remote: ECONNRESET");
       }
       if (executable === "git" && args[0] === "clone") cloneCalls += 1;
       if (executable === "git" && args[0] === "for-each-ref") return args[2] ?? "";
+      if (executable === "git" && args[0] === "config" && args[1] === "--get") return claim.repo.remoteUrl;
+      if (executable === "git" && args[0] === "rev-parse" && args[1] === "--is-bare-repository") return "true";
       if (executable === "git" && args[0] === "rev-parse") return "base-sha";
       return "";
     };
@@ -564,11 +571,10 @@ test("the first mirror clone uses one long creation fetch", async () => {
       run: fake,
       retryOptions: { wait: async () => undefined },
     });
-    // A first clone cannot resume safely from a partial staged mirror, so it
-    // gets one creation attempt instead of restarting the transfer on retry.
-    assert.equal(fetchCalls, 1);
-    assert.equal(fetchTimeoutMs, CLONE_CREATION_TIMEOUT_MS - KILL_OVERHEAD_MS);
-    assert.ok(CLONE_CREATION_TIMEOUT_MS > CLONE_OPERATION_BUDGET_MS);
+    // The retried operation is the warm mirror's incremental fetch. The clone
+    // that follows reads local disk, so retrying it would only repeat a failure
+    // that no amount of waiting can change.
+    assert.equal(fetchCalls, 3);
     assert.equal(cloneCalls, 1);
     assert.equal(workspace.baseSha, "base-sha");
   } finally {
@@ -612,9 +618,16 @@ test("the mirror's remote fetch carries a per-command ceiling while local git co
       run: { id: "run-timeout", runNumber: 1, targetBranch: "main", branch: "agentos/task-timeout/run-1" },
     });
     const calls: RecordedCommand[] = [];
+    const mirrorRoot = repoMirrorRoot(config);
+    const mirror = repoMirrorPath(mirrorRoot, claim.repo.remoteUrl);
+    await mkdir(mirrorRoot, { recursive: true });
+    git(mirrorRoot, "init", "--bare", mirror);
+    git(mirror, "remote", "add", "origin", claim.repo.remoteUrl);
     // Only main is published: the intended head's probe finds nothing, exactly
     // as the `ls-remote` round trip it replaced used to report.
     const fake = recordingExecutor(calls, (args) => {
+      if (args[0] === "config" && args[1] === "--get") return claim.repo.remoteUrl;
+      if (args[0] === "rev-parse" && args[1] === "--is-bare-repository") return "true";
       if (args[0] === "for-each-ref") return args[2] === "refs/heads/main" ? "refs/heads/main" : "";
       if (args[0] === "rev-parse") return "base-sha";
       return "";
@@ -626,7 +639,7 @@ test("the mirror's remote fetch carries a per-command ceiling while local git co
     const ceiling = (name: string): number | undefined => calls.find(({ args }) => args[0] === name)?.timeoutMs;
     // The only command still talking to GitHub is the mirror's fetch, and a
     // hung one is what nothing else bounds before the agent starts.
-    assert.equal(ceiling("fetch"), CLONE_CREATION_TIMEOUT_MS - KILL_OVERHEAD_MS);
+    assert.equal(ceiling("fetch"), CLONE_COMMAND_TIMEOUT_MS);
     // The clone now reads local disk. Capping it would kill a working run on a
     // large repository to protect against a network that is no longer in play.
     assert.equal(ceiling("clone"), undefined);
@@ -675,7 +688,14 @@ test("the pinned range is fetched out of the mirror, and only the mirror's own f
       },
     });
     const calls: RecordedCommand[] = [];
+    const mirrorRoot = repoMirrorRoot(config);
+    const mirror = repoMirrorPath(mirrorRoot, claim.repo.remoteUrl);
+    await mkdir(mirrorRoot, { recursive: true });
+    git(mirrorRoot, "init", "--bare", mirror);
+    git(mirror, "remote", "add", "origin", claim.repo.remoteUrl);
     const fake = recordingExecutor(calls, (args) => {
+      if (args[0] === "config" && args[1] === "--get") return claim.repo.remoteUrl;
+      if (args[0] === "rev-parse" && args[1] === "--is-bare-repository") return "true";
       if (args[0] === "cat-file") return "impl-base-sha commit\npinned-sha commit";
       if (args[0] === "rev-parse") return "pinned-sha";
       return "";
@@ -686,7 +706,7 @@ test("the pinned range is fetched out of the mirror, and only the mirror's own f
     });
     const remoteFetch = calls.find(({ args }) => args[0] === "fetch" && args.includes("origin"));
     const rangeFetch = calls.find(({ args }) => args[0] === "fetch" && args.includes("pinned-sha"));
-    assert.equal(remoteFetch?.timeoutMs, CLONE_CREATION_TIMEOUT_MS - KILL_OVERHEAD_MS);
+    assert.equal(remoteFetch?.timeoutMs, CLONE_COMMAND_TIMEOUT_MS);
     // Both endpoints were already in the mirror, so the range is assembled from
     // local disk: slow on a long history, but it cannot hang.
     assert.equal(rangeFetch?.timeoutMs, undefined);
