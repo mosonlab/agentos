@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -7,7 +8,8 @@ import test from "node:test";
 
 import type { RunnerConfig } from "./config.js";
 import type { DependencyProvisioningDecision } from "./dependency-provisioning.js";
-import { bindCommandRunner, type CommandRunner } from "./exec.js";
+import { bindCommandRunner, CommandTimeoutError, KILL_OVERHEAD_MS, type CommandRunner } from "./exec.js";
+import { CLONE_COMMAND_TIMEOUT_MS, CLONE_CREATION_TIMEOUT_MS, CLONE_OPERATION_BUDGET_MS } from "./network-retry.js";
 import {
   mirrorRevisionsPresent, repoMirrorPath, RepoMirrorError, withRepoMirror,
   type RepoMirrorProgress,
@@ -91,6 +93,14 @@ const recorded = (
 
 const silent = (): ((progress: RepoMirrorProgress) => void) => (): void => undefined;
 
+const deferred = <T>(): { promise: Promise<T>; resolve: (value: T) => void } => {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+};
+
+const escapedRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+
 test("the second run reuses the machine's mirror and fetches only what changed", async () => {
   const { root, remote, seed, config, mirror } = await fixture("reuse");
   try {
@@ -121,6 +131,142 @@ test("the second run reuses the machine's mirror and fetches only what changed",
     assert.deepEqual(remoteReaders.map(({ args }) => args[0]), ["remote"]);
     const clone = calls.find(({ args }) => args[0] === "clone");
     assert.equal(clone?.args.at(-2), mirror);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a slow cold mirror clone gets its own ceiling and reports creating before created", async () => {
+  const { root, remote, config, mirror } = await fixture("cold-slow");
+  const progress: RepoMirrorProgress[] = [];
+  let clock = 0;
+  let fetchCalls = 0;
+  let fetchTimeout: number | undefined;
+  const production = bound(config, root);
+  const run: CommandRunner = async (executable, args, options) => {
+    if (executable === "git" && args[0] === "fetch") {
+      fetchCalls += 1;
+      fetchTimeout = options?.timeoutMs;
+      // This is deliberately just beyond the warm-mirror budget. The fake
+      // command returns successfully, so no wall-clock sleep or retry is
+      // needed to exercise the cold-clone profile.
+      clock += CLONE_OPERATION_BUDGET_MS + 1;
+      return "";
+    }
+    return production(executable, args, options);
+  };
+
+  try {
+    const result = await withRepoMirror(
+      config,
+      remote,
+      run,
+      {
+        fetchRetryOptions: { now: () => clock, wait: async () => undefined },
+        report: (event) => progress.push(event),
+      },
+      async (path) => path,
+    );
+
+    assert.equal(result, mirror);
+    assert.equal(fetchCalls, 1, "a clone cannot retry from zero bytes");
+    assert.ok(fetchTimeout !== undefined);
+    assert.ok(fetchTimeout > CLONE_OPERATION_BUDGET_MS, "creation must outlive the refresh budget");
+    assert.ok(fetchTimeout <= CLONE_CREATION_TIMEOUT_MS);
+    assert.ok(CLONE_CREATION_TIMEOUT_MS >= 30 * 60 * 1_000, "the creation ceiling must be at least thirty minutes");
+    assert.deepEqual(
+      progress
+        .filter(({ event }) => String(event) === "creating" || event === "created")
+        .map(({ event, mirror: path }) => [event, path]),
+      [["creating", mirror], ["created", mirror]],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a warm mirror keeps the refresh budget, timeout message, and retry profile", async () => {
+  const { root, remote, config } = await fixture("warm-timeout");
+  try {
+    await withRepoMirror(config, remote, bound(config, root), { report: silent() }, async (path) => path);
+
+    const progress: RepoMirrorProgress[] = [];
+    const timeouts: number[] = [];
+    let clock = 0;
+    const production = bound(config, root);
+    const run: CommandRunner = async (executable, args, options) => {
+      if (executable === "git" && args[0] === "fetch") {
+        const timeout = options?.timeoutMs;
+        assert.ok(timeout !== undefined);
+        timeouts.push(timeout);
+        clock += timeout + KILL_OVERHEAD_MS;
+        throw new CommandTimeoutError(executable, args, timeout);
+      }
+      return production(executable, args, options);
+    };
+
+    const failure = await withRepoMirror(
+      config,
+      remote,
+      run,
+      {
+        fetchRetryOptions: { now: () => clock, wait: async () => undefined },
+        report: (event) => progress.push(event),
+      },
+      async () => "unreachable",
+    ).then(() => null, (error: unknown) => error);
+
+    assert.ok(failure instanceof Error);
+    assert.match(failure.message, /timed out after/u);
+    assert.equal(timeouts[0], CLONE_COMMAND_TIMEOUT_MS);
+    assert.ok(timeouts.length > 1, "the existing refresh retry profile remains active");
+    assert.ok(timeouts.every((timeout) => timeout <= CLONE_COMMAND_TIMEOUT_MS));
+    assert.equal(clock, CLONE_OPERATION_BUDGET_MS);
+    assert.equal(progress.some(({ event }) => String(event) === "creating"), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a cold clone that reaches its ceiling fails once with a first-clone message", async () => {
+  const { root, remote, config, mirror } = await fixture("cold-timeout");
+  let clock = 0;
+  let fetchCalls = 0;
+  let fetchTimeout: number | undefined;
+  const production = bound(config, root);
+  const run: CommandRunner = async (executable, args, options) => {
+    if (executable === "git" && args[0] === "fetch") {
+      fetchCalls += 1;
+      fetchTimeout = options?.timeoutMs;
+      assert.ok(fetchTimeout !== undefined);
+      clock += fetchTimeout + KILL_OVERHEAD_MS;
+      throw new CommandTimeoutError(executable, args, fetchTimeout);
+    }
+    return production(executable, args, options);
+  };
+
+  try {
+    const failure = await withRepoMirror(
+      config,
+      remote,
+      run,
+      { fetchRetryOptions: { now: () => clock, wait: async () => undefined }, report: silent() },
+      async () => "unreachable",
+    ).then(() => null, (error: unknown) => error);
+
+    assert.equal(fetchCalls, 1, "a failed first clone must not restart from zero");
+    assert.ok(fetchTimeout !== undefined);
+    assert.ok(fetchTimeout > CLONE_OPERATION_BUDGET_MS);
+    assert.ok(failure instanceof Error);
+    assert.match(failure.message, new RegExp(escapedRegExp(mirror), "u"));
+    assert.match(failure.message, /first[- ]clone|first clone|initial clone/u);
+    const ceiling = CLONE_CREATION_TIMEOUT_MS.toLocaleString("en-US");
+    assert.ok(
+      failure.message.includes(String(CLONE_CREATION_TIMEOUT_MS))
+        || failure.message.includes(ceiling)
+        || failure.message.includes(`${CLONE_CREATION_TIMEOUT_MS / 60_000} minute`),
+      "the first-clone timeout must name its creation ceiling",
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -221,6 +367,64 @@ test("a held lock is waited for, and one left behind by a dead holder is stolen"
     // minutes for a mirror nobody is holding.
     await assert.rejects(stat(lock));
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a live heartbeating holder can outlast the former 600-second lock wait", async () => {
+  const { root, remote, config, mirror } = await fixture("lock-live");
+  const holderReady = deferred<void>();
+  const holderRelease = deferred<void>();
+  const holder = withRepoMirror(
+    config,
+    remote,
+    bound(config, root),
+    { lockHeartbeatMs: 1, report: silent() },
+    async () => {
+      holderReady.resolve();
+      await holderRelease.promise;
+      return "holder";
+    },
+  );
+
+  let clock = 0;
+  let released = false;
+  const progress: RepoMirrorProgress[] = [];
+  try {
+    await holderReady.promise;
+    const result = await withRepoMirror(
+      config,
+      remote,
+      bound(config, root),
+      {
+        // Deliberately leave lockWaitMs at its default. The synthetic waiter
+        // crosses the former 600-second default before releasing the holder.
+        lockPollMs: 1,
+        now: () => clock,
+        sleep: async () => {
+          clock += 1_000;
+          // Keep the lock held through the first acquisition attempt after the
+          // old deadline. The new creation-sized default then gets one more
+          // poll, during which the live holder releases it.
+          if (clock > 600_000 && released === false) {
+            if (clock > 601_000) {
+              released = true;
+              holderRelease.resolve();
+            }
+          }
+          await new Promise<void>((resolve) => { setImmediate(resolve); });
+        },
+        report: (event) => progress.push(event),
+      },
+      async (path) => path,
+    );
+
+    assert.equal(result, mirror);
+    assert.ok(clock > 600_000, "the waiter must outlive the former ten-minute wait");
+    assert.equal(progress.some(({ event }) => event === "lock-steal"), false, "a live holder must not be stolen");
+  } finally {
+    holderRelease.resolve();
+    await holder.catch(() => undefined);
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -399,4 +603,16 @@ test("object presence is read from cat-file's own answer, never from an exit cod
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("the documented pre-seed naming rule matches repoMirrorPath", async () => {
+  const remoteUrl = "https://github.com/acme/word-factory.git";
+  const mirrorRoot = "/srv/agentos/shared/repo-mirrors";
+  const installDocument = await readFile(new URL("../../../docs/install.md", import.meta.url), "utf8");
+  assert.match(installDocument, /Pre-seed a repository mirror/u);
+  assert.match(installDocument, /sha256\(remoteUrl\)\.git/u);
+  assert.match(installDocument, /RUNNER_REPO_MIRROR_ROOT/u);
+
+  const documentedDirectory = `${createHash("sha256").update(remoteUrl).digest("hex")}.git`;
+  assert.equal(repoMirrorPath(mirrorRoot, remoteUrl), join(mirrorRoot, documentedDirectory));
 });
