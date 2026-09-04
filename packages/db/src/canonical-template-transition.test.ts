@@ -164,6 +164,7 @@ test("a structure-identical generation is decided by its prompt digest alone", (
     id: "step-1", taskTemplateId: "template", stepIndex: 1, name: "Implementation",
     assigneeAgent: { name: "senior-dev" }, assigneeType: "AGENT", layer: 1,
     approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false,
+    optional: false,
     priorOutputKinds: [],
     opensPullRequest: true, requiresCommit: true, provisionDependencies: true,
     baseFromStepIndex: null, spawnPolicy: null, prompt,

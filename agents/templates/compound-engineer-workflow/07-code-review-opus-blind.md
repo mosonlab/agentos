@@ -3,6 +3,7 @@ stepIndex: 7
 layer: 6
 agent: review-coordinator-opus
 approvalGate: false
+optional: true
 outputKind: blind-findings
 priorOutputKinds: []
 attachmentsFromPrevious: false

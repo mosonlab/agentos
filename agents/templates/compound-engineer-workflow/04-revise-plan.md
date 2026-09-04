@@ -3,6 +3,7 @@ stepIndex: 4
 layer: 4
 agent: plan-reviser
 approvalGate: false
+optional: false
 outputKind: revised-plan
 priorOutputKinds: [spec, plan, plan-review]
 attachmentsFromPrevious: true

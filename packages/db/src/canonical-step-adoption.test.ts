@@ -31,6 +31,7 @@ const asPersisted = (source: TemplateStepSource): PersistedTemplateStepStructure
   assigneeType: source.agentName === null ? "HUMAN" : "AGENT",
   layer: source.layer,
   approvalGate: source.approvalGate,
+  optional: source.optional,
   outputKind: source.outputKind,
   attachmentsFromPrevious: source.attachmentsFromPrevious,
   priorOutputKinds: source.priorOutputKinds,
