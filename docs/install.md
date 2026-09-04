@@ -77,7 +77,12 @@ run `git clone --mirror` directly into the computed directory:
 ```sh
 mirror_root="${RUNNER_REPO_MIRROR_ROOT:-$HOME/.agentos/repo-mirrors}"
 remote_url='https://github.com/example/project.git'
-mirror_dir="$mirror_root/$(printf %s "$remote_url" | sha256sum | awk '{print $1}').git"
+if command -v shasum >/dev/null 2>&1; then
+  digest="$(printf %s "$remote_url" | shasum -a 256 | awk '{print $1}')"
+else
+  digest="$(printf %s "$remote_url" | sha256sum | awk '{print $1}')"
+fi
+mirror_dir="$mirror_root/$digest.git"
 mkdir -p "$mirror_root"
 git clone --mirror "$remote_url" "$mirror_dir"
 ```

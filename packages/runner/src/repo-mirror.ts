@@ -35,10 +35,10 @@ import {
  *   credentials, and nothing outside that 0700 home can read the mirror. That
  *   is also why the filesystem work is small shell scripts rather than node's
  *   fs: the daemon's uid cannot enter a launched account's home.
- * - The remote fetch keeps the clone retry profile from network-retry.ts. The
- *   first fetch into an empty mirror transfers exactly what a clone did, so it
- *   needs the same bound; later fetches are far smaller and finish well inside
- *   it.
+ * - Refreshes keep the clone retry profile from network-retry.ts. A first
+ *   creation transfers the whole repository under its dedicated long ceiling,
+ *   while later fetches are incremental and finish well inside the refresh
+ *   bound.
  * - A mirror that exists but cannot be verified is a hard failure
  *   (`RepoMirrorError`), never a quiet fall back to a full remote clone. The
  *   fallback is precisely the behaviour this module exists to eliminate, and a
@@ -76,7 +76,8 @@ export type RepoMirrorOptions = {
  * it, so a concurrent runner on the same machine cannot repack the object
  * database out from under a clone. Waiting is the correct behaviour rather than
  * a failure: the holder is bounded by the clone budget, and the wait replaces a
- * remote clone that cost longer than this on a bad day.
+ * remote clone that cost longer than this on a bad day. Cold creation uses the
+ * dedicated creation ceiling, and the default wait is sized to cover it.
  */
 const MIRROR_LOCK_WAIT_MS = CLONE_CREATION_TIMEOUT_MS;
 
@@ -295,10 +296,9 @@ const fetchFromRemote = async (
   args: readonly string[],
   retryOptions: RetryOptions,
 ): Promise<void> => {
-  // The clone profile, not delivery's. The first fetch into an empty mirror
-  // moves the same bytes a clone did; every later one is incremental. Both run
-  // while the runner heartbeat holds the lease, so the bound only has to
-  // separate "hung" from "slow".
+  // The refresh clone profile, not delivery's. This path is used for an already
+  // populated mirror (and for object top-ups), where the transfer is
+  // incremental. A cold creation uses fetchForCreation below instead.
   await runWithNetworkRetry("git", args,
     ({ timeoutMs }) => run("git", args, { env: gitDirectory(mirror), timeoutMs }),
     { commandTimeoutMs: CLONE_COMMAND_TIMEOUT_MS, budgetMs: CLONE_OPERATION_BUDGET_MS, ...retryOptions },
