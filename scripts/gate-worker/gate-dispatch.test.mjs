@@ -25,12 +25,13 @@
 // what is being proved is which code comes back from which failure, and a real
 // gate would take minutes to prove one bit of it.
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
   cpSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   realpathSync,
   readFileSync,
   rmSync,
@@ -372,6 +373,46 @@ const runDispatch = (repo, cache, args, env = {}, { cwd = repo.root, script = jo
     },
   });
 
+const startDispatch = (repo, cache, args, env = {}, { cwd = repo.root, script = join(repo.root, "packages/runner/runtime-tools/gate-worker/gate-dispatch.sh") } = {}) => {
+  const child = spawn("bash", [script, ...args], {
+    cwd,
+    encoding: "utf8",
+    env: {
+      ...FIXTURE_ENV,
+      AGENTOS_WORKSPACE_PATH: repo.root,
+      XDG_CACHE_HOME: cache,
+      GATE_DISPATCH_POLL_SECONDS: "1",
+      GATE_DISPATCH_TIMEOUT_MINUTES: "1",
+      AGENTOS_GATE_PRIMARY_SERVER: "primary",
+      AGENTOS_GATE_FALLBACK_SERVER: "fallback",
+      ...env,
+    },
+  });
+  const run = { child, stdout: "", stderr: "" };
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    run.stdout += chunk;
+  });
+  child.stderr.on("data", (chunk) => {
+    run.stderr += chunk;
+  });
+  run.done = new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (status, signal) => resolve({ status, signal, stdout: run.stdout, stderr: run.stderr }));
+  });
+  return run;
+};
+
+const waitFor = async (condition, message, timeoutMs = 10_000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (condition()) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.fail(message);
+};
+
 // A cache root with the named slots already taken, so a case states its queue
 // as a precondition instead of racing one into place.
 const busyCache = (t, busySlots = []) => {
@@ -499,6 +540,139 @@ test("an unconfigured dispatcher runs local-only after explicit opt-in", (t) => 
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /MERGE GATE: PASS local-only/u);
   assert.match(result.stderr, /no remote worker, local\(1, explicit\)/u);
+});
+
+test("local capacity is named local-1 through local-N and an extra dispatch waits", async (t) => {
+  for (const configured of [undefined, 1, 2, 3]) {
+    const count = configured ?? 1;
+    const calls = join(scratch(t), `local-calls-${count}.log`);
+    const release = join(scratch(t), `local-release-${count}`);
+    writeFileSync(calls, "");
+    const repo = fixtureRepo(t, {
+      mergeGate: `
+        printf '%s\\n' "$$" >> "$GATE_FIXTURE_CALLS"
+        while [ ! -e "$GATE_FIXTURE_RELEASE" ]; do sleep 0.05; done
+        printf 'MERGE GATE: PASS local-capacity-%s\\n' "$$"
+        exit 0
+      `,
+      mirrorPush: 'printf "REMOTE MUST NOT RUN\\n"; exit 1',
+      remoteGate: 'printf "REMOTE MUST NOT RUN\\n"; exit 1',
+    });
+    const cache = busyCache(t);
+    const localEnv = {
+      AGENTOS_GATE_PRIMARY_SERVER: "",
+      AGENTOS_GATE_FALLBACK_SERVER: "",
+      AGENTOS_GATE_ALLOW_LOCAL: "1",
+      GATE_FIXTURE_CALLS: calls,
+      GATE_FIXTURE_RELEASE: release,
+    };
+    if (configured !== undefined) localEnv.AGENTOS_GATE_LOCAL_SLOTS = String(configured);
+    const args = [repo.head, "--master", repo.head, "--allow-local"];
+    const active = [];
+    const start = () => {
+      const run = startDispatch(repo, cache, args, localEnv);
+      active.push(run);
+      return run;
+    };
+
+    try {
+      for (let i = 0; i < count; i += 1) start();
+      await waitFor(
+        () => readFileSync(calls, "utf8").trim().split("\n").filter(Boolean).length === count,
+        `expected ${count} local gates to be running`,
+      );
+
+      const slotEntries = readdirSync(join(cache, "gate-dispatch"))
+        .filter((entry) => entry.endsWith(".slot"))
+        .sort();
+      assert.deepEqual(slotEntries, Array.from({ length: count }, (_, i) => `local-${i + 1}.slot`));
+      assert.ok(!slotEntries.includes("local.slot"));
+      assert.ok(!slotEntries.includes(`local-${count + 1}.slot`));
+      for (const run of active) assert.equal(run.child.exitCode, null);
+
+      const extra = start();
+      await waitFor(
+        () => extra.stderr.includes(`${count} slot(s) busy`),
+        `the local-${count + 1} dispatch did not report a busy queue`,
+      );
+      assert.equal(extra.child.exitCode, null);
+      assert.equal(readdirSync(join(cache, "gate-dispatch")).filter((entry) => entry.endsWith(".slot")).length, count);
+      assert.ok(!readdirSync(join(cache, "gate-dispatch")).includes(`local-${count + 1}.slot`));
+      assert.match(active[0].stderr, new RegExp(`local\\(${count}, explicit\\)`));
+      assert.match(extra.stderr, new RegExp(`local\\(${count}, explicit\\)`));
+
+      writeFileSync(release, "release\\n");
+      const results = await Promise.all(active.map((run) => run.done));
+      for (const result of results) {
+        assert.equal(result.status, 0, result.stdout + result.stderr);
+        assert.match(result.stdout, /MERGE GATE: PASS local-capacity/u);
+        assert.doesNotMatch(result.stdout + result.stderr, /REMOTE MUST NOT RUN/u);
+      }
+    } finally {
+      writeFileSync(release, "release\\n");
+      for (const run of active) {
+        if (run.child.exitCode === null && run.child.signalCode === null) run.child.kill("SIGTERM");
+      }
+      await Promise.allSettled(active.map((run) => run.done));
+    }
+  }
+});
+
+test("an invalid local slot count is a usage error before any lock is touched", (t) => {
+  const repo = fixtureRepo(t, {});
+  for (const value of ["0", "-1", "not-a-number"]) {
+    const cache = busyCache(t);
+    const result = runDispatch(repo, cache, [repo.head, "--master", repo.head, "--allow-local"], {
+      AGENTOS_GATE_PRIMARY_SERVER: "",
+      AGENTOS_GATE_FALLBACK_SERVER: "",
+      AGENTOS_GATE_LOCAL_SLOTS: value,
+    });
+    assert.equal(result.status, 2, `${value}: ${result.stdout}${result.stderr}`);
+    assert.match(result.stderr, new RegExp(`AGENTOS_GATE_LOCAL_SLOTS.*${value.replaceAll("-", "\\-")}`));
+    assert.deepEqual(
+      readdirSync(join(cache, "gate-dispatch")).filter((entry) => entry.endsWith(".slot")),
+      [],
+      `${value}: a slot lock was created before validation`,
+    );
+  }
+});
+
+test("eligible local capacity runs before a configured remote worker", (t) => {
+  const calls = join(scratch(t), "order.log");
+  writeFileSync(calls, "");
+  const repo = fixtureRepo(t, {
+    mergeGate: 'printf "local\\n" >> "$GATE_FIXTURE_CALLS"; printf "MERGE GATE: PASS local-first\\n"; exit 0',
+    mirrorPush: 'printf "mirror\\n" >> "$GATE_FIXTURE_CALLS"; exit 1',
+    remoteGate: 'printf "remote\\n" >> "$GATE_FIXTURE_CALLS"; exit 1',
+  });
+  const result = dispatch(t, repo, [repo.head, "--server", "primary", "--allow-local"], {
+    AGENTOS_GATE_LOCAL_SLOTS: "2",
+    GATE_FIXTURE_CALLS: calls,
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /MERGE GATE: PASS local-first/u);
+  assert.deepEqual(readFileSync(calls, "utf8").trim().split("\n"), ["local"]);
+  assert.match(result.stderr, /local\(2, explicit\)/u);
+  assert.doesNotMatch(result.stderr, /running on primary/u);
+});
+
+test("an ineligible local machine falls through to the remote worker", (t) => {
+  const calls = join(scratch(t), "order.log");
+  writeFileSync(calls, "");
+  const repo = fixtureRepo(t, {
+    mergeGate: 'printf "local\\n" >> "$GATE_FIXTURE_CALLS"; exit 1',
+    mirrorPush: 'printf "mirror\\n" >> "$GATE_FIXTURE_CALLS"; printf "MIRROR PUSH: OK\\n"; exit 0',
+    remoteGate: 'printf "remote\\n" >> "$GATE_FIXTURE_CALLS"; printf "MERGE GATE: PASS remote-after-ineligible-local\\n"; exit 0',
+  });
+  writeFileSync(join(repo.root, "dirty.txt"), "dirty\\n");
+  const result = dispatch(t, repo, [repo.head, "--server", "primary", "--allow-local"], {
+    AGENTOS_GATE_LOCAL_SLOTS: "2",
+    GATE_FIXTURE_CALLS: calls,
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /MERGE GATE: PASS remote-after-ineligible-local/u);
+  assert.deepEqual(readFileSync(calls, "utf8").trim().split("\n"), ["mirror", "remote"]);
+  assert.match(result.stderr, /running on primary/u);
 });
 
 test("a fallback without a primary is a usage error", (t) => {
