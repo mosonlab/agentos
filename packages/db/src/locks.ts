@@ -48,9 +48,9 @@ export const lockTemplateRow = async (
 export const lockProjectGateDefaults = async (
   tx: Tx,
   projectId: string,
-): Promise<{ id: string; specGateDefault: boolean; mergeGateDefault: boolean } | null> => {
-  const rows = await tx.$queryRaw<Array<{ id: string; specGateDefault: boolean; mergeGateDefault: boolean }>>`
-    SELECT "id", "specGateDefault", "mergeGateDefault" FROM "Project"
+): Promise<{ id: string; specGateDefault: boolean; mergeGateDefault: boolean; skipOptionalSteps: boolean } | null> => {
+  const rows = await tx.$queryRaw<Array<{ id: string; specGateDefault: boolean; mergeGateDefault: boolean; skipOptionalSteps: boolean }>>`
+    SELECT "id", "specGateDefault", "mergeGateDefault", "skipOptionalSteps" FROM "Project"
     WHERE "id" = ${projectId} FOR UPDATE
   `;
   return rows[0] ?? null;

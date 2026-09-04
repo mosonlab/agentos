@@ -6,6 +6,7 @@ import { join } from "node:path";
 import type { Prisma } from "@prisma/client";
 
 import { DIRECT_TEMPLATE_NAME, PR_TEMPLATE_NAME } from "./agent-contract.js";
+import { gateSlotOf } from "./gate-slot.js";
 import { INTEGRATOR_TEMPLATE_NAME } from "./merge-integrator.js";
 import { parseInlineList, parsePromptDocument, requiredFrontmatter } from "./prompt-document.js";
 
@@ -56,6 +57,7 @@ const STRUCTURAL_FIELDS = [
   "layer",
   "agent",
   "approvalGate",
+  "optional",
   "outputKind",
   "attachmentsFromPrevious",
   "priorOutputKinds",
@@ -72,6 +74,7 @@ export type TemplateStepSource = {
   layer: number;
   agentName: string | null;
   approvalGate: boolean;
+  optional: boolean;
   outputKind: string;
   attachmentsFromPrevious: boolean;
   priorOutputKinds: string[];
@@ -94,6 +97,7 @@ export type PersistedTemplateStepStructure = {
    */
   layer?: number | null;
   approvalGate: boolean;
+  optional?: boolean;
   outputKind: string;
   attachmentsFromPrevious: boolean;
   priorOutputKinds: string[];
@@ -136,6 +140,7 @@ export const templateStepStructureDifferences = (
     ["assigneeType", actual.assigneeType, expectedAssigneeType],
     ["layer", actual.layer, expected.layer],
     ["approvalGate", actual.approvalGate, expected.approvalGate],
+    ["optional", actual.optional, expected.optional],
     ["outputKind", actual.outputKind, expected.outputKind],
     ["attachmentsFromPrevious", actual.attachmentsFromPrevious, expected.attachmentsFromPrevious],
     ["priorOutputKinds", actual.priorOutputKinds, expected.priorOutputKinds],
@@ -217,6 +222,7 @@ export const loadTemplateStepSources = async (
       layer,
       agentName: agent === "null" ? null : agent,
       approvalGate: parseBoolean(requiredFrontmatter(document, "approvalGate", filePath), filePath, "approvalGate"),
+      optional: parseBoolean(requiredFrontmatter(document, "optional", filePath), filePath, "optional"),
       outputKind: requiredFrontmatter(document, "outputKind", filePath),
       attachmentsFromPrevious: parseBoolean(requiredFrontmatter(document, "attachmentsFromPrevious", filePath), filePath, "attachmentsFromPrevious"),
       priorOutputKinds: parseInlineList(document.attributes.priorOutputKinds, filePath, "priorOutputKinds"),
@@ -267,6 +273,27 @@ export const loadTemplateStepSources = async (
   }
 
   const stepsByIndex = new Map(steps.map((step) => [step.stepIndex, step]));
+
+  // Optional steps may be omitted at instantiation, so the entry point,
+  // configurable gate slots, and the immediate predecessor of the merge tail
+  // must remain present in every materialized chain. A retained step may also
+  // not pin its base to a step that can disappear.
+  for (const step of steps) {
+    if (step.stepIndex === 1 && step.optional) {
+      throw new Error(`${templateRoot} step ${step.stepIndex} first_step_optional`);
+    }
+    if (step.baseFromStepIndex !== null && stepsByIndex.get(step.baseFromStepIndex)?.optional) {
+      throw new Error(`${templateRoot} step ${step.stepIndex} base_step_optional ${step.baseFromStepIndex}`);
+    }
+    if (step.optional && gateSlotOf(step) !== null) {
+      throw new Error(`${templateRoot} step ${step.stepIndex} gate_slot_step_optional`);
+    }
+    const next = stepsByIndex.get(step.stepIndex + 1);
+    if (step.optional && (next?.outputKind === "merge-authorization" || next?.outputKind === "merge-result")) {
+      throw new Error(`${templateRoot} step ${step.stepIndex} optional_step_precedes_merge_tail`);
+    }
+  }
+
   for (const step of steps) {
     if (step.baseFromStepIndex !== null && !indexes.includes(step.baseFromStepIndex)) {
       throw new Error(`${templateRoot} step ${step.stepIndex} baseFromStepIndex ${step.baseFromStepIndex} does not reference the same template`);

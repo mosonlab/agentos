@@ -3,6 +3,7 @@ stepIndex: 9
 layer: 8
 agent: librarian
 approvalGate: false
+optional: false
 outputKind: documentation
 priorOutputKinds: [implementation, fixed-implementation]
 attachmentsFromPrevious: true

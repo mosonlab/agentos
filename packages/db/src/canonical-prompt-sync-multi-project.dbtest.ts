@@ -200,6 +200,7 @@ const copyTemplate = async (
         assigneeType: step.assigneeType,
         runner: step.runner,
         approvalGate: step.approvalGate,
+        optional: step.optional,
         outputKind: step.outputKind,
         prompt: step.prompt,
         opensPullRequest: step.opensPullRequest,
@@ -237,7 +238,7 @@ const assertSummaryShape = (summary: CanonicalSyncSummary): void => {
     const roles = Object.values(counter.updatedRoles).reduce((sum, count) => sum + count, 0);
     const scalar = counter.createdCanonicalTemplates + counter.createdAgents + counter.createdAgentRepoGrants
       + counter.adoptedAssignees + counter.adoptedStepBases + counter.adoptedPriorOutputDeclarations
-      + counter.adoptedDependencyProvisioning
+      + counter.adoptedDependencyProvisioning + counter.adoptedOptionalSteps
       + counter.renamedSteps + counter.migratedTasks + counter.adoptedAgentDefaults + counter.runtimeDriftNotices;
     assert.equal(counter.updated, scalar + nested + roles);
   }
@@ -258,6 +259,7 @@ const downgradeDirectToHistoricalSevenStep = async (projectId: string): Promise<
         stepIndex: step.stepIndex - 1,
         layer: step.layer - 1,
         baseFromStepIndex: step.baseFromStepIndex === null ? null : step.baseFromStepIndex - 1,
+        optional: false,
       },
     });
   }

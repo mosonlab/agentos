@@ -3,6 +3,7 @@ stepIndex: 3
 layer: 3
 agent: review-coordinator
 approvalGate: false
+optional: false
 outputKind: plan-review
 priorOutputKinds: [spec, plan]
 attachmentsFromPrevious: true

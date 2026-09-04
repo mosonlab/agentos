@@ -3,6 +3,7 @@ stepIndex: 8
 layer: 7
 agent: merge-integrator
 approvalGate: false
+optional: false
 outputKind: merge-result
 priorOutputKinds: []
 attachmentsFromPrevious: true

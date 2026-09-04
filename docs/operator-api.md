@@ -163,13 +163,16 @@ curl "$BASE_URL/projects" -H "Authorization: Bearer $OPERATOR_TOKEN"
 
 - Required JSON fields: `name`, `slug` (lowercase hyphenated form).
 - Optional JSON field: `yamlDocument` (default `""`).
+- `skipOptionalSteps` is not a create input; a newly created Project uses its
+  database default of `false`.
 - A successful request creates the Project and, in the same transaction, one
   `local` Environment with `networking` `OPEN` and `allowedHosts` `[]`, four
   Agents (`senior-dev-luna`, `review-coordinator-sol`,
   `review-coordinator-opus`, and `senior-dev`) bound to that Environment, and
   the canonical `pr-engineer-workflow` TaskTemplate with its four steps.
-  The returned Project read shape includes `specGateDefault` and
-  `mergeGateDefault`, both `false` for a newly created project.
+  The returned Project read shape includes `specGateDefault`,
+  `mergeGateDefault`, and `skipOptionalSteps`, all `false` for a newly created
+  project.
 - A duplicate slug returns `409 Conflict` with code `project-slug-taken`.
 
 ```sh
@@ -182,9 +185,9 @@ curl -X POST "$BASE_URL/projects" \
 
 - Required path parameter: `projectId`.
 - The Project read shape includes the independent boolean fields
-  `specGateDefault` and `mergeGateDefault`. Both are `false` for a newly
-  created project and are returned by this route, `GET /projects`, and the
-  project PATCH response.
+  `specGateDefault`, `mergeGateDefault`, and `skipOptionalSteps`. All three are
+  `false` for a newly created project and are returned by this route,
+  `GET /projects`, and the project PATCH response.
 
 ```sh
 curl "$BASE_URL/projects/$PROJECT_ID" -H "Authorization: Bearer $OPERATOR_TOKEN"
@@ -194,10 +197,11 @@ curl "$BASE_URL/projects/$PROJECT_ID" -H "Authorization: Bearer $OPERATOR_TOKEN"
 
 - Required path parameter: `projectId`.
 - Required JSON: at least one of `name`, `slug`, `yamlDocument`,
-  `specGateDefault`, or `mergeGateDefault`.
-- `specGateDefault` and `mergeGateDefault` are optional booleans. Omission
-  preserves the stored value, and changing one does not change the other. The
-  response is the complete Project read shape, including both defaults.
+  `specGateDefault`, `mergeGateDefault`, or `skipOptionalSteps`.
+- `specGateDefault`, `mergeGateDefault`, and `skipOptionalSteps` are optional
+  booleans. Omission preserves the stored value, and changing one does not
+  change either of the others. The response is the complete Project read
+  shape, including all three settings.
 
 ```sh
 curl -X PATCH "$BASE_URL/projects/$PROJECT_ID" \
@@ -997,7 +1001,7 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/clone" 
 - Required path parameters: `projectId`, `templateId`.
 - Required JSON field: `steps`, an array of at most 64 Steps. Each Step
   requires `name`, `assigneeType`, `assigneeAgentId`, `prompt`,
-  `approvalGate`, `attachmentsFromPrevious`, `priorOutputKinds`,
+  `approvalGate`, `optional`, `attachmentsFromPrevious`, `priorOutputKinds`,
   `spawnPolicy`, `runner`, `outputKind`, `opensPullRequest`,
   `requiresCommit`, `baseFromStepIndex`, and `layer`; `stepIndex` is
   assigned densely from array order. `baseFromStepIndex` is a 1-based
@@ -1018,6 +1022,10 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/clone" 
   `first_layer_not_single`, `layer_order_invalid`, and `base_step_invalid` are
   the ordering and base-reference checks. Output wiring also refuses
   `prior_kind_unproduced`, `output_kind_duplicate`, and `prior_kind_duplicate`.
+  Optional-step validation refuses `first_step_optional`,
+  `base_step_optional`, `gate_slot_step_optional`, and
+  `optional_step_precedes_merge_tail`, each identifying the offending
+  `stepIndex`.
   Gate and assignee checks refuse `approval_gate_in_parallel_layer`,
   `assignee_invalid`, and `integrator_binding_invalid`. Agent assignments must
   name an existing, non-archived Agent in the addressed project. Repo grants
@@ -1031,7 +1039,7 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/clone" 
 ```sh
 curl -X PUT "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/steps" \
   -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
-  -d '{"steps":[{"name":"Implement","assigneeType":"AGENT","assigneeAgentId":"'$AGENT_ID'","prompt":"Implement the change","approvalGate":false,"attachmentsFromPrevious":false,"priorOutputKinds":[],"spawnPolicy":null,"runner":"CODEX","outputKind":"implementation","opensPullRequest":true,"requiresCommit":true,"baseFromStepIndex":null,"layer":1}]}'
+  -d '{"steps":[{"name":"Implement","assigneeType":"AGENT","assigneeAgentId":"'$AGENT_ID'","prompt":"Implement the change","approvalGate":false,"optional":false,"attachmentsFromPrevious":false,"priorOutputKinds":[],"spawnPolicy":null,"runner":"CODEX","outputKind":"implementation","opensPullRequest":true,"requiresCommit":true,"baseFromStepIndex":null,"layer":1}]}'
 ```
 
 ### GET `/task-templates/:templateId`
@@ -1080,6 +1088,12 @@ curl -X PATCH "$BASE_URL/task-templates/$TEMPLATE_ID" \
   Every other step keeps its template frontmatter value. The resolved values
   are persisted on the created tasks; later project-default changes do not
   change an existing Chain.
+- When the addressed project's `skipOptionalSteps` is `true`, optional template
+  steps are omitted. This omission is resolved once at instantiation; a later
+  change to the project setting does not alter an existing Chain. Retained
+  steps keep their template `stepIndex`, so the resulting Chain's `chainIndex`
+  values may be sparse. If no instantiable step remains, the request is refused
+  with `400 Bad Request` and code `template_has_no_instantiable_steps`.
 - A supplied `gates.spec` for a template without a specification step returns
   `400 Bad Request` with code `gates_spec_step_absent`; a supplied `gates.merge`
   for a template without a merge readiness step returns `400 Bad Request` with

@@ -44,6 +44,7 @@ const templateSteps = (): TemplateStepSource[] => PROJECT_BOOTSTRAP_ROLE_NAMES.m
   layer: index + 1,
   agentName,
   approvalGate: false,
+  optional: false,
   outputKind: `output-${index + 1}`,
   attachmentsFromPrevious: false,
   priorOutputKinds: [],

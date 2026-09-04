@@ -3,6 +3,7 @@ stepIndex: 5
 layer: 5
 agent: implementation-plan-executioner
 approvalGate: false
+optional: false
 outputKind: implementation
 priorOutputKinds: [revised-plan]
 attachmentsFromPrevious: true

@@ -239,6 +239,7 @@ model Project {
   maxSessionsPerTask Int             @default(3)
   specGateDefault    Boolean         @default(false)
   mergeGateDefault   Boolean         @default(false)
+  skipOptionalSteps  Boolean         @default(false)
   spendCap           Decimal?        @db.Decimal(12, 2)
   createdAt          DateTime        @default(now())
   updatedAt          DateTime        @updatedAt
@@ -518,6 +519,7 @@ model TaskTemplateStep {
   assigneeType            AssigneeType
   prompt                  String
   approvalGate            Boolean      @default(false)
+  optional                Boolean      @default(false)
   attachmentsFromPrevious Boolean      @default(false)
   priorOutputKinds        String[]     @default([])
   spawnPolicy             Json?

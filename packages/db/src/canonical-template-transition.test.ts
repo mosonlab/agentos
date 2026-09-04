@@ -43,6 +43,7 @@ const asPersisted = (steps: readonly TemplateStepSource[]): PersistedTransitionS
     assigneeType: step.agentName === null ? "HUMAN" : "AGENT",
     layer: step.layer,
     approvalGate: step.approvalGate,
+    optional: step.optional,
     outputKind: step.outputKind,
     attachmentsFromPrevious: step.attachmentsFromPrevious,
     priorOutputKinds: step.priorOutputKinds,
@@ -72,6 +73,7 @@ const persistedGeneration = (
   assigneeType: step.assigneeType,
   layer: step.layer,
   approvalGate: step.approvalGate,
+  optional: false,
   outputKind: step.outputKind,
   attachmentsFromPrevious: step.attachmentsFromPrevious,
   priorOutputKinds: [],
@@ -164,6 +166,7 @@ test("a structure-identical generation is decided by its prompt digest alone", (
     id: "step-1", taskTemplateId: "template", stepIndex: 1, name: "Implementation",
     assigneeAgent: { name: "senior-dev" }, assigneeType: "AGENT", layer: 1,
     approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false,
+    optional: false,
     priorOutputKinds: [],
     opensPullRequest: true, requiresCommit: true, provisionDependencies: true,
     baseFromStepIndex: null, spawnPolicy: null, prompt,
@@ -286,6 +289,7 @@ test("bound direct revalidation is a registered structural rollover", async () =
       assigneeType: step.assigneeType,
       layer: step.layer,
       approvalGate: step.approvalGate,
+      optional: false,
       outputKind: step.outputKind,
       attachmentsFromPrevious: step.attachmentsFromPrevious,
       opensPullRequest: step.opensPullRequest,
@@ -393,6 +397,26 @@ test("runner-provided Regression tooling is a registered prompt-only rollover in
   }
 });
 
+test("optional review omission is a registered prompt-only rollover in both templates", async () => {
+  const sources = await loadAllTemplateStepSources();
+  const retiredDigests = {
+    "direct-engineer-workflow": "e8fdf5533275e85e33b0cf812db9474b00214de2401e4c97bb6eb0732f864df8",
+    "compound-engineer-workflow": "c3b3bb4692bda266e5afd81bb6ad258f58bd1eed14240f272338e0f44fa5e97e",
+  } as const;
+
+  for (const templateName of PROMPT_ROLLOVER_TEMPLATES) {
+    const current = sources.get(templateName);
+    assert.ok(current);
+    const generation = generationOf(templateName, "pre-optional-review-omission");
+    assert.equal(generation.promptDigest, retiredDigests[templateName]);
+    assert.equal(templatePromptGenerationDigest(current), generation.successorPromptDigest);
+    assert.notEqual(generation.promptDigest, generation.successorPromptDigest);
+    // The retired generation is the one runner-provided tooling rolled to.
+    assert.equal(generationOf(templateName, "pre-runner-provided-regression-tooling").successorPromptDigest, generation.successorPromptDigest);
+    assert.equal(matchedLegacyGeneration(templateName, asPersisted(current)), null);
+  }
+});
+
 test("every prompt-only generation can roll straight to the current source", async () => {
   const sources = await loadAllTemplateStepSources();
   const markers = {
@@ -403,12 +427,14 @@ test("every prompt-only generation can roll straight to the current source", asy
       "pre-internal-npm-scope-rename",
       "pre-product-rename-anneal",
       "pre-runner-provided-regression-tooling",
+      "pre-optional-review-omission",
     ],
     "compound-engineer-workflow": [
       "pre-regression-step-split",
       "pre-internal-npm-scope-rename",
       "pre-product-rename-anneal",
       "pre-runner-provided-regression-tooling",
+      "pre-optional-review-omission",
     ],
   } as const;
   for (const templateName of PROMPT_ROLLOVER_TEMPLATES) {

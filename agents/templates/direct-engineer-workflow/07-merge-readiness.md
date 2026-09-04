@@ -3,6 +3,7 @@ stepIndex: 7
 layer: 6
 agent: review-coordinator
 approvalGate: false
+optional: false
 outputKind: merge-authorization
 priorOutputKinds: []
 attachmentsFromPrevious: true

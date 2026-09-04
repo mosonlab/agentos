@@ -150,6 +150,7 @@ const createA1Project = async (slug: string) => {
         assigneeType: step.assigneeType,
         prompt: step.prompt,
         approvalGate: step.approvalGate,
+        optional: step.optional,
         attachmentsFromPrevious: step.attachmentsFromPrevious,
         priorOutputKinds: step.priorOutputKinds,
         ...(step.spawnPolicy === null ? {} : { spawnPolicy: step.spawnPolicy }),
@@ -212,7 +213,10 @@ test("a fresh seed writes the twelve-step, eight-step, and four-step canonical t
   assert.match(step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 10)?.prompt ?? "", /finalize exit 77[\s\S]*Repeat the full semantic verification/u);
   // The fix step reads both reports itself; no node authors must-fix any more.
   assert.equal(step.taskTemplate.steps.some((candidate) => candidate.outputKind === "must-fix"), false);
-  assert.match(step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 8)?.prompt ?? "", /Read both immutable review outputs from the preceding layer/u);
+  assert.match(
+    step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 8)?.prompt ?? "",
+    /Read the immutable `sol-findings` review output and, when present, the immutable `blind-findings` output/u,
+  );
   assert.match(
     step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 3)?.prompt ?? "",
     /vertical slice[\s\S]*blocked_by[\s\S]*expand–contract staging[\s\S]*fail at base/iu,
@@ -449,6 +453,10 @@ test("canonical sync rolls quiescent adjudication-era graphs only after active R
       data: { provisionDependencies: true },
     });
     let historicalSteps = template.steps;
+    await db.taskTemplateStep.updateMany({
+      where: { taskTemplateId: template.id },
+      data: { optional: false },
+    });
     if (template.name === DIRECT_TEMPLATE_NAME) {
       const revalidation = historicalSteps.find((step) => step.outputKind === "revalidation");
       assert.ok(revalidation);
@@ -584,7 +592,7 @@ test("canonical sync rolls quiescent adjudication-era graphs only after active R
     assert.equal(replacement.steps.some((step) => step.outputKind === "must-fix"), false);
     assert.match(
       replacement.steps.find((step) => step.outputKind === "fixed-implementation")?.prompt ?? "",
-      /Read both immutable review outputs from the preceding layer/u,
+      /Read the immutable `sol-findings` review output and, when present, the immutable `blind-findings` output/u,
     );
   }
 });

@@ -3,6 +3,7 @@ stepIndex: 4
 layer: 3
 agent: senior-dev
 approvalGate: false
+optional: false
 outputKind: fixed-implementation
 priorOutputKinds: [sol-findings, blind-findings]
 attachmentsFromPrevious: true

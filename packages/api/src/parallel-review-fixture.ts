@@ -9,6 +9,7 @@ import {
   RepoPermission,
   RunStatus,
   TaskStatus,
+  type CanonicalReviewArtifact,
   type PrismaClient,
 } from "@anneal/db";
 import type { ClaimContract } from "@anneal/db/claim-contract";
@@ -66,6 +67,17 @@ export type DirectFixture = CanonicalInstallation & {
 
 export type BoundDirectFixture = DirectFixture & {
   revalidationTaskId: string;
+};
+
+export type OptionalDirectFixture = CanonicalInstallation & {
+  chainId: string;
+  branchName: string;
+  implementationTaskId: string;
+  solTaskId: string;
+  fixTaskId: string;
+  regressionTaskId: string;
+  readinessTaskId: string;
+  mergeTaskId: string;
 };
 
 export type FullFixture = CanonicalInstallation & {
@@ -241,6 +253,46 @@ const createParallelReviewHarness = ({
     };
   };
 
+  const instantiateOptionalDirect = async (brief = SPECIFICATION_BRIEF): Promise<OptionalDirectFixture> => {
+    const installation = await canonicalInstallation();
+    await getDb().project.update({
+      where: { id: installation.projectId },
+      data: { skipOptionalSteps: true },
+    });
+    const branchName = `parallel/optional-${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
+    const chain = await instantiateTemplate(getDb(), installation.projectId, installation.directTemplateId, {
+      repoId: installation.repoId,
+      variables: { branchName },
+      name: "parallel optional direct",
+      description: brief,
+      autoStart: true,
+    });
+    const byKind = new Map(chain.tasks.map((task) => [task.templateStepId, task]));
+    const steps = await getDb().taskTemplateStep.findMany({
+      where: { taskTemplateId: installation.directTemplateId },
+      select: { id: true, outputKind: true },
+    });
+    const taskFor = (kind: string) => {
+      const step = steps.find((candidate) => candidate.outputKind === kind)!;
+      return byKind.get(step.id)!;
+    };
+    assert.equal(chain.tasks.length, 6);
+    assert.equal(chain.tasks.some((task) => (
+      steps.find((step) => step.id === task.templateStepId)?.outputKind === "blind-findings"
+    )), false);
+    return {
+      ...installation,
+      chainId: chain.chainId,
+      branchName,
+      implementationTaskId: taskFor("implementation").id,
+      solTaskId: taskFor("sol-findings").id,
+      fixTaskId: taskFor("fixed-implementation").id,
+      regressionTaskId: taskFor("regression-verification-v2").id,
+      readinessTaskId: taskFor("merge-authorization").id,
+      mergeTaskId: taskFor("merge-result").id,
+    };
+  };
+
   /** Full Assurance has approval-gated planning nodes. This fixture completes
    * those already-reviewed nodes as historical evidence, then enters the real
    * implementation-to-parallel-review boundary through the runner API. */
@@ -388,16 +440,19 @@ const createParallelReviewHarness = ({
     testsRun: ["npm test -- parallel review"],
   });
 
-  const reviewOutput = (kind: "sol-findings" | "blind-findings") => ({
+  const reviewOutput = (
+    kind: "sol-findings" | "blind-findings",
+    findings: CanonicalReviewArtifact["findings"] = [],
+  ) => ({
     schemaVersion: 1,
     headSha: IMPLEMENTATION_HEAD,
     reviewedBase: IMPLEMENTATION_BASE,
     reviewedHead: IMPLEMENTATION_HEAD,
-    findings: [],
+    findings,
     ...(kind === "sol-findings" ? { commandsRun: ["git diff --check"] } : {}),
   });
 
-  const completeImplementation = async (fixture: DirectFixture | FullFixture, runnerId = "implementation-runner"): Promise<Claim> => {
+  const completeImplementation = async (fixture: DirectFixture | FullFixture | OptionalDirectFixture, runnerId = "implementation-runner"): Promise<Claim> => {
     const claimed = await claim(runnerId);
     assert.equal(claimed.run.taskId, fixture.implementationTaskId);
     assert.equal(claimed.run.implementationBaseSha, null);
@@ -431,10 +486,15 @@ const createParallelReviewHarness = ({
     return { first, second };
   };
 
-  const completeReview = async (claimed: Claim, runnerId: string, kind: "sol-findings" | "blind-findings") => {
+  const completeReview = async (
+    claimed: Claim,
+    runnerId: string,
+    kind: "sol-findings" | "blind-findings",
+    findings: CanonicalReviewArtifact["findings"] = [],
+  ) => {
     const result = await complete(claimed, runnerId, {
       outputKind: kind,
-      output: reviewOutput(kind),
+      output: reviewOutput(kind, findings),
       headSha: IMPLEMENTATION_HEAD,
       baseSha: IMPLEMENTATION_BASE,
     });
@@ -453,6 +513,7 @@ const createParallelReviewHarness = ({
     operatorRequest,
     instantiateDirect,
     instantiateBoundDirect,
+    instantiateOptionalDirect,
     instantiateFullAtReviewFrontier,
     claim,
     complete,

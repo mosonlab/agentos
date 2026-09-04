@@ -37,6 +37,7 @@ stepIndex: 5
 layer: 5
 agent: implementation-plan-executioner # Agent.name, or null for a human step
 approvalGate: false
+optional: false
 outputKind: implementation
 priorOutputKinds: []         # Prior TaskStepOutput kinds required by this prompt
 attachmentsFromPrevious: true

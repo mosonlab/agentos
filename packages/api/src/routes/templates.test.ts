@@ -107,3 +107,39 @@ test("template instantiate route rejects unknown gate keys before database acces
     assert.equal(response.status, 400);
   });
 });
+
+test("template step replacement requires optional and rejects unknown fields before database access", async () => {
+  await withTokens(async () => {
+    const database = new Proxy({}, {
+      get: () => { throw new Error("database must not be read for invalid template steps"); },
+    }) as unknown as PrismaClient;
+    const validStep = {
+      name: "Implementation",
+      assigneeType: "AGENT",
+      assigneeAgentId: "agent-1",
+      prompt: "work",
+      approvalGate: false,
+      attachmentsFromPrevious: false,
+      priorOutputKinds: [],
+      spawnPolicy: null,
+      runner: null,
+      outputKind: "implementation",
+      opensPullRequest: true,
+      requiresCommit: true,
+      baseFromStepIndex: null,
+      layer: 1,
+    };
+    const cases = [
+      { steps: [validStep] },
+      { steps: [{ ...validStep, optional: false, unexpected: true }] },
+    ];
+    for (const body of cases) {
+      const response = await createApp(database).request("/projects/project-1/task-templates/template-1/steps", {
+        method: "PUT",
+        headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      assert.equal(response.status, 400, JSON.stringify(body));
+    }
+  });
+});

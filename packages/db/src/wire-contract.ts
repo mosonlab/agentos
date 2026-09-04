@@ -71,6 +71,7 @@ export type Project<DateTime = string, DecimalValue = string> = {
   maxSessionsPerTask: number;
   specGateDefault: boolean;
   mergeGateDefault: boolean;
+  skipOptionalSteps: boolean;
   spendCap: DecimalValue | null;
   createdAt: DateTime;
   updatedAt: DateTime;

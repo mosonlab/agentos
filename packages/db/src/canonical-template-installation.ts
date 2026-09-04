@@ -163,6 +163,7 @@ const writeCanonicalTemplate = async (
       assigneeType: step.agentName === null ? AssigneeType.HUMAN : AssigneeType.AGENT,
       runner: null,
       approvalGate: step.approvalGate,
+      optional: step.optional,
       outputKind: step.outputKind,
       prompt: step.prompt,
       opensPullRequest: step.opensPullRequest,

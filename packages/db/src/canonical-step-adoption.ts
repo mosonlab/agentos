@@ -34,6 +34,7 @@ export type CanonicalAdoptionCounter =
   | "adoptedStepBases"
   | "adoptedPriorOutputDeclarations"
   | "adoptedDependencyProvisioning"
+  | "adoptedOptionalSteps"
   | "renamedSteps";
 
 /**
@@ -98,6 +99,16 @@ const ADOPTS_REVIEW_PROVISIONING: AdoptionRule = {
   write: (source) => ({ kind: "set-columns", data: { provisionDependencies: source.provisionDependencies } }),
 };
 
+/** The additive schema migration leaves every existing Step non-optional;
+ * only the two canonical blind-review rows adopt the new source-owned flag. */
+const ADOPTS_OPTIONAL_STEP: AdoptionRule = {
+  difference: "optional",
+  counter: "adoptedOptionalSteps",
+  refusesReferencedStep: false,
+  matches: (actual, source) => actual.optional === false && source.optional === true,
+  write: (source) => ({ kind: "set-columns", data: { optional: source.optional } }),
+};
+
 /**
  * The retired all-output handoff marker is a repository-wide migration state,
  * not a transition at one named step, so it is permitted wherever it survives.
@@ -115,12 +126,12 @@ const ADOPTIONS_AT_EVERY_STEP: readonly AdoptionRule[] = [ADOPTS_PRIOR_OUTPUT_WH
 /** Keyed by `templateName:stepIndex`. This is the roster of canonical review steps too. */
 const ADOPTIONS_BY_STEP: ReadonlyMap<string, readonly AdoptionRule[]> = new Map([
   ["compound-engineer-workflow:6", [ADOPTS_REVIEW_PROVISIONING, adoptsStepBase(null, 5)]],
-  ["compound-engineer-workflow:7", [ADOPTS_REVIEW_PROVISIONING]],
+  ["compound-engineer-workflow:7", [ADOPTS_REVIEW_PROVISIONING, ADOPTS_OPTIONAL_STEP]],
   ["compound-engineer-workflow:10", [adoptsAgent(RETIRED_REGRESSION_ROLES, REGRESSION_VERIFIER_AGENT_NAME)]],
   ["compound-engineer-workflow:11", [adoptsStepName("Merge readiness", "Merge authorization")]],
   ["direct-engineer-workflow:1", [adoptsAgent([null], SPEC_REVALIDATOR_AGENT_NAME)]],
   ["direct-engineer-workflow:3", [ADOPTS_REVIEW_PROVISIONING, adoptsStepBase(null, 2)]],
-  ["direct-engineer-workflow:4", [ADOPTS_REVIEW_PROVISIONING]],
+  ["direct-engineer-workflow:4", [ADOPTS_REVIEW_PROVISIONING, ADOPTS_OPTIONAL_STEP]],
   ["direct-engineer-workflow:6", [adoptsAgent(RETIRED_REGRESSION_ROLES, REGRESSION_VERIFIER_AGENT_NAME)]],
   ["direct-engineer-workflow:7", [adoptsStepName("Merge readiness", "Merge authorization")]],
   ["pr-engineer-workflow:2", [ADOPTS_REVIEW_PROVISIONING]],

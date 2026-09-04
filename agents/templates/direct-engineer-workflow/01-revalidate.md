@@ -3,6 +3,7 @@ stepIndex: 1
 layer: 1
 agent: spec-revalidator
 approvalGate: false
+optional: false
 outputKind: revalidation
 priorOutputKinds: []
 attachmentsFromPrevious: false

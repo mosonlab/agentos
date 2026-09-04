@@ -82,7 +82,7 @@ export const chainStepPosition = (
   const frontier = members.find((member) => member.id === aggregate.frontier.taskId);
   const fromMember = frontier === undefined
     ? null
-    : frontier.chainProgress?.position ?? (frontier.chainIndex === null ? null : frontier.chainIndex + 1);
+    : frontier.chainProgress?.position ?? (frontier.chainIndex === null ? null : Math.min(aggregate.stepCount, frontier.chainIndex + 1));
   if (fromMember !== null && fromMember !== undefined) return fromMember;
   const done = aggregate.statusCounts.DONE;
   return aggregate.stepCount === 0 ? 0 : Math.min(aggregate.stepCount, done + 1);
