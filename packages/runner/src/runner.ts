@@ -585,13 +585,21 @@ export const executeClaim = async (
 
       const attempt = providerResumeAttempts + 1;
       const backoffStartedAt = now();
-      await resumeBackoff(attempt);
-      const backoffMs = Math.max(0, now() - backoffStartedAt);
-      const renewal = await runLease.renewNow();
+      let backoffMs = 0;
+      const [renewal] = await Promise.all([
+        runLease.renewNow(),
+        (async () => {
+          await resumeBackoff(attempt);
+          backoffMs = Math.max(0, now() - backoffStartedAt);
+        })(),
+      ]);
+      const authority = await runLease.checkpoint();
+      const remainingLeaseMs = renewal.remainingLeaseMs - Math.max(0, now() - renewal.observedAt);
       const walltimeAvailable = now() < executionStartedAt.getTime() + claim.run.maxDurationMin * 60_000;
       if (!renewal.accepted
         || !renewal.authority.held
-        || renewal.remainingLeaseMs <= PROVIDER_RESUME_MIN_LEASE_TTL_MS
+        || !authority.held
+        || remainingLeaseMs <= PROVIDER_RESUME_MIN_LEASE_TTL_MS
         || !walltimeAvailable
         || budget.refusal !== null) break;
 
@@ -617,7 +625,11 @@ export const executeClaim = async (
       // A fresh adapter state initializes progress to its spawn time. Seed it
       // with the carried Run-level value so merely spawning cannot forgive a
       // stall that began in the previous child.
-      resumedHandle.lastProgressEventAt = executionLastProgressEventAt;
+      if (resumedHandle.lastProgressEventAt <= resumedHandle.startedAt) {
+        resumedHandle.lastProgressEventAt = executionLastProgressEventAt;
+      } else if (resumedHandle.lastProgressEventAt > executionLastProgressEventAt) {
+        executionLastProgressEventAt = resumedHandle.lastProgressEventAt;
+      }
       evidence = await resumedHandle.exit;
       producedOutput = outputTail(evidence);
     }

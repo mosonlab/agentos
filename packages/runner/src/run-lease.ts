@@ -26,6 +26,8 @@ export type RunLeaseClock = {
 export type RunLeaseRenewal = {
   authority: Authority;
   remainingLeaseMs: number;
+  /** Clock value at which remainingLeaseMs was measured. */
+  observedAt: number;
   /** False when no control-plane response was received for this call. */
   accepted: boolean;
 };
@@ -223,7 +225,8 @@ export const createRunLease = <ProviderHandle extends object>(
     // round so this result is fresh for the decision immediately ahead.
     if (renewalTask) await renewalTask;
     const accepted = await renew();
-    return { authority, remainingLeaseMs: remainingLeaseMs(), accepted };
+    const observedAt = clock.now();
+    return { authority, remainingLeaseMs: remainingLeaseMs(), observedAt, accepted };
   };
 
   const enterPhase = async (next: RunLeasePhase): Promise<void> => {
