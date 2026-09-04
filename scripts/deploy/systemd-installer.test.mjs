@@ -50,6 +50,117 @@ const withLinux = async (work) => {
   }
 };
 
+const withServicePlatform = async (platform, work) => {
+  const previous = process.env.AGENTOS_SERVICE_PLATFORM;
+  process.env.AGENTOS_SERVICE_PLATFORM = platform;
+  try {
+    return await work();
+  } finally {
+    if (previous === undefined) delete process.env.AGENTOS_SERVICE_PLATFORM;
+    else process.env.AGENTOS_SERVICE_PLATFORM = previous;
+  }
+};
+
+const prepareManifestValidationCase = (platform) => {
+  const root = mkdtempSync(join(tmpdir(), `agentos-${platform}-manifest-invalid-`));
+  if (platform === "linux") {
+    const unitDirectory = join(root, "etc/systemd/system");
+    const sudoersPath = join(root, "etc/sudoers.d/anneal-service-control");
+    const options = {
+      repositoryRoot: root,
+      serviceUser: "anneal-test",
+      userLookup: accountLookup,
+      nodeBinary: process.execPath,
+      gitBinary: process.execPath,
+      unitDirectory,
+      sudoersPath,
+      systemctlPath: "/usr/bin/true",
+      visudoPath: "/usr/bin/true",
+      effectiveUid: 501,
+      apply: true,
+      execute: () => "",
+    };
+    installLaunchdServices(options);
+    const manifestPath = join(root, ".agentos-deploy/launchd/manifest.json");
+    return {
+      root,
+      manifestPath,
+      invoke: () => installStagedSystemdServices({
+        ...options,
+        effectiveUid: 0,
+      }),
+    };
+  }
+
+  const home = join(root, "home");
+  mkdirSync(join(root, "shared"), { recursive: true });
+  writeFileSync(join(root, "shared/.env"), "DATABASE_URL=configured\n");
+  mkdirSync(join(root, "releases/release-1"), { recursive: true });
+  symlinkSync("releases/release-1", join(root, "current"));
+  const options = {
+    repositoryRoot: root,
+    userHome: home,
+    nodeBinary: process.execPath,
+    gitBinary: process.execPath,
+    effectiveUid: 501,
+    apply: true,
+  };
+  installLaunchdServices(options);
+  const manifestPath = join(root, ".agentos-deploy/launchd/manifest.json");
+  return {
+    root,
+    manifestPath,
+    invoke: () => installLaunchdServices({
+      ...options,
+      apply: false,
+    }),
+  };
+};
+
+const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+
+const assertManifestValidationFailure = ({ platform, field, mutate }) => {
+  const prepared = prepareManifestValidationCase(platform);
+  try {
+    if (mutate === "unparseable") {
+      writeFileSync(prepared.manifestPath, "{\n");
+    } else {
+      const manifest = JSON.parse(readFileSync(prepared.manifestPath, "utf8"));
+      if (mutate === "entries-null") manifest.entries[1] = null;
+      if (mutate === "entry-path-missing") delete manifest.entries[1].path;
+      if (mutate === "runner-count-string") {
+        manifest.renderInputs = { ...manifest.renderInputs, runnerCount: "10" };
+      }
+      writeFileSync(prepared.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    }
+
+    const reason = `${platform === "linux" ? "systemd" : "launchd"}-service-manifest-invalid`;
+    assert.throws(prepared.invoke, (error) => {
+      assert.match(error.message, new RegExp(reason, "u"));
+      assert.match(error.message, new RegExp(escapeRegExp(prepared.manifestPath), "u"));
+      for (const matcher of field) assert.match(error.message, matcher);
+      assert.notEqual(error.name, "TypeError");
+      assert.notEqual(error.name, "SyntaxError");
+      return true;
+    }, `${platform} ${mutate}`);
+  } finally {
+    rmSync(prepared.root, { recursive: true, force: true });
+  }
+};
+
+for (const { name, mutate, field } of [
+  { name: "an unparseable manifest", mutate: "unparseable", field: [/manifest/u] },
+  { name: "a null manifest entry", mutate: "entries-null", field: [/entries[^\n]*1/u] },
+  { name: "a manifest entry missing path", mutate: "entry-path-missing", field: [/entries[^\n]*1[^\n]*path/u] },
+  { name: "a manifest renderInputs runnerCount string", mutate: "runner-count-string", field: [/renderInputs[^\n]*runnerCount/u] },
+]) {
+  test(`${name} is refused with a named error on both service platforms`, async () => {
+    for (const platform of ["linux", "darwin"]) {
+      await withServicePlatform(platform, () => assertManifestValidationFailure({ platform, field, mutate }));
+    }
+  });
+}
+
 const accountLookup = () => "anneal-test:x:620:620::/var/lib/anneal-test:/bin/bash";
 const digest = (contents) => createHash("sha256").update(contents).digest("hex");
 const launchdNotFound = () => {
