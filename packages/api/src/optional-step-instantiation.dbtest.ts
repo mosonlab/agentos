@@ -115,17 +115,11 @@ test("direct instantiation snapshots optional omission and preserves sparse temp
   assert.equal(await db.task.count({
     where: { chainId: skippedUnbound.chainId, templateStep: { outputKind: "blind-findings" } },
   }), 0);
-  const progress = chainProgress(skippedUnbound.tasks.map((task) => ({
-    id: task.id,
-    projectId: task.projectId,
-    chainId: task.chainId,
-    name: task.name,
-    status: task.status,
-    archivedAt: task.archivedAt,
-    chainIndex: task.chainIndex,
-    chainLayer: task.chainLayer,
-    templateStep: null,
-  })));
+  const progressRows = await db.task.findMany({
+    where: { chainId: skippedUnbound.chainId },
+    include: { templateStep: true },
+  });
+  const progress = chainProgress(progressRows);
   assert.deepEqual(progress, {
     total: 6,
     done: 0,
