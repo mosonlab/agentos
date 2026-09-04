@@ -425,6 +425,15 @@ export const resolveRequeueBase = async (
   return run.targetBranch;
 };
 
+const retryPublishHead = (
+  taskId: string,
+  prior: { branch: string | null; runNumber: number } | null | undefined,
+): string | null => {
+  if (!prior?.branch) return null;
+  const runnerFallback = `agentos/${taskId}/run-${prior.runNumber}`;
+  return prior.branch === runnerFallback ? null : prior.branch;
+};
+
 /**
  * Decides a new Run's head (`branch`) and base (`targetBranch`). `openRun` is
  * its only Run-birth caller; keeping the branch rule behind that seam prevents
@@ -844,11 +853,10 @@ export const openRun = async (
             task.templateId ? { branch: prior?.branch ?? null } : null,
           )
           : {
-            // Publication evidence answers the base; the prior Run's head
-            // answers the publish target. A null head delegates to the
-            // runner's per-Run fallback and is reserved for tasks that never
-            // declared a publish head.
-            branch: prior?.branch ?? null,
+            // Publication evidence answers the base. A head the task declared
+            // answers the publish target; a runner per-Run fallback does not,
+            // so it resets to null and lets this Run receive its own fallback.
+            branch: retryPublishHead(task.id, prior),
             targetBranch: prior
               ? await resolveRequeueBase(tx, { ...task, repo: task.repo }, prior)
               : task.targetBranch ?? task.repo.defaultBranch,

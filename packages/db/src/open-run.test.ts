@@ -335,6 +335,61 @@ test("an automatic retry preserves its declared head while using salvage as its 
   }
 });
 
+test("automatic retries do not inherit the runner's per-Run fallback as a declared head", async () => {
+  const repo = { id: "repo-1", defaultBranch: "main" };
+  const run1Salvage = "agentos/task-1/run-1";
+  const run2Salvage = "agentos/task-1/run-2";
+  const publishedRuns = [
+    { taskId: "task-1", repoId: repo.id, pushedBranch: run2Salvage },
+    { taskId: "task-1", repoId: repo.id, pushedBranch: run1Salvage },
+  ];
+
+  const run1 = priorRun({
+    id: "run-1",
+    runNumber: 1,
+    repoId: repo.id,
+    branch: run1Salvage,
+    pushedBranch: run1Salvage,
+  });
+  const run1Task = taskRow({ repoId: repo.id, repo, runs: [run1] });
+  const firstRetry = fakeTx(run1Task, { publishedRuns });
+  const openedRun2 = await openRun(firstRetry.tx, run1Task.id, {
+    kind: "retry-after-completion",
+    readyAt: now,
+    sourceRunId: run1.id,
+    sourceMaxRunsPerTask: run1.maxRunsPerTask,
+    sourceBudgetGrants: run1.budgetGrants,
+    budgetGrant: 1,
+  });
+
+  assert.equal(openedRun2.ok, true);
+  assert.equal(firstRetry.creates[0]?.branch, null);
+  assert.equal(firstRetry.creates[0]?.targetBranch, run1Salvage);
+
+  const run2 = priorRun({
+    id: "run-2",
+    runNumber: 2,
+    repoId: repo.id,
+    targetBranch: run1Salvage,
+    branch: run2Salvage,
+    pushedBranch: run2Salvage,
+  });
+  const run2Task = taskRow({ repoId: repo.id, repo, runs: [run2] });
+  const secondRetry = fakeTx(run2Task, { publishedRuns });
+  const openedRun3 = await openRun(secondRetry.tx, run2Task.id, {
+    kind: "retry-after-completion",
+    readyAt: now,
+    sourceRunId: run2.id,
+    sourceMaxRunsPerTask: run2.maxRunsPerTask,
+    sourceBudgetGrants: run2.budgetGrants,
+    budgetGrant: 1,
+  });
+
+  assert.equal(openedRun3.ok, true);
+  assert.equal(secondRetry.creates[0]?.branch, null);
+  assert.equal(secondRetry.creates[0]?.targetBranch, run2Salvage);
+});
+
 test("a pinned base follows the template Step when conditional tasks use dense chain ordinals", async () => {
   const headSha = "2".repeat(40);
   let where: unknown;

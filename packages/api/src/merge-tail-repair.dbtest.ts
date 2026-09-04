@@ -275,6 +275,7 @@ const completeRepair = async (
 ) => {
   const run = await db.run.findFirstOrThrow({ where: { taskId: repairId, runNumber } });
   const repair = await db.task.findUniqueOrThrow({ where: { id: repairId } });
+  const publishBranch = run.branch ?? `agentos/${repairId}/run-${runNumber}`;
   const runnerId = `repair-runner-${run.id}`;
   const fencingToken = `repair:${run.id}:1`;
   await db.run.update({ where: { id: run.id }, data: {
@@ -296,7 +297,7 @@ const completeRepair = async (
       headers: { Authorization: "Bearer merge-tail-repair-token", "Content-Type": "application/json" },
       body: JSON.stringify({
         runnerId, fencingToken, exitCode: 0, outcome: { case: "succeeded" },
-        cleanupStatus: "SUCCEEDED", branch: BRANCH, pushedBranch: BRANCH,
+        cleanupStatus: "SUCCEEDED", branch: publishBranch, pushedBranch: publishBranch,
         pushStatus: "SUCCEEDED", headSha,
       }),
     });
