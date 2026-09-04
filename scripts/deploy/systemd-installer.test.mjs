@@ -383,7 +383,7 @@ test("rendered unit syntax is verified by systemd-analyze when available", (t) =
     for (const path of files) {
       const verified = spawnSync("systemd-analyze", ["verify", path], {
         encoding: "utf8",
-        env: { ...process.env, SYSTEMD_UNIT_PATH: root },
+        env: { ...process.env, SYSTEMD_UNIT_PATH: `${root}:` },
       });
       const output = `${verified.stdout ?? ""}${verified.stderr ?? ""}`;
       assert.equal(verified.status, 0, output);
