@@ -17,7 +17,7 @@ import {
 import {
   DEPENDENCY_PROVISIONING_MANIFEST_MISSING, DependencyCacheInputMissError,
   DependencyProvisioningManifestMissingError, deriveDependencyCacheKey,
-  materializeWorkspaceDependencies,
+  materializeWorkspaceDependencies, restoreCopyArguments,
   type DependencyCacheProgress,
 } from "./dependency-cache.js";
 import { bindCommandRunner, CommandTimeoutError, runCommand, type CommandRunner } from "./exec.js";
@@ -207,6 +207,28 @@ const supportsCopyOnWriteRestore = async (root: string): Promise<boolean> => {
     await rm(destination, { force: true });
   }
 };
+
+test("restore copy arguments preserve the Darwin clone and allow Linux filesystem fallback", () => {
+  assert.deepEqual(restoreCopyArguments("source", "destination", "darwin"), ["-c", "-R", "source", "destination"]);
+  assert.deepEqual(
+    restoreCopyArguments("source", "destination", "linux"),
+    ["-a", "--reflink=auto", "source", "destination"],
+  );
+});
+
+test("the production restore copy arguments succeed on the host filesystem without a capability probe", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-dependency-cache-copy-"));
+  try {
+    const source = join(root, "source");
+    const destination = join(root, "destination");
+    await mkdir(source);
+    await writeFile(join(source, "fixture.txt"), "restored\n");
+    await runCommand([], "/bin/cp", restoreCopyArguments(source, destination), root, process.env);
+    assert.equal(await readFile(join(destination, "fixture.txt"), "utf8"), "restored\n");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 const chownTree = async (path: string, uid: number, gid: number): Promise<void> => {
   const info = await lstat(path);
