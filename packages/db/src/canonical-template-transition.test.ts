@@ -73,7 +73,7 @@ const persistedGeneration = (
   assigneeType: step.assigneeType,
   layer: step.layer,
   approvalGate: step.approvalGate,
-  optional: false,
+  optional: step.optional ?? false,
   outputKind: step.outputKind,
   attachmentsFromPrevious: step.attachmentsFromPrevious,
   priorOutputKinds: [],
@@ -111,6 +111,37 @@ test("registered generations require an explicit true dependency-provisioning va
       `historical field ${String(value)} must not match`,
     );
   }
+});
+
+test("legacy generation shapes match each step's optional flag", () => {
+  const baseGeneration = generationOf("direct-engineer-workflow", "pre-adjudication");
+  const optionalStepIndex = baseGeneration.shape.findIndex((step) => step.outputKind === "blind-findings");
+  assert.notEqual(optionalStepIndex, -1);
+  const withOptional = (steps: PersistedTransitionStep[], optional: boolean) =>
+    steps.map((step, index) => (index === optionalStepIndex ? { ...step, optional } : step));
+  const optionalGeneration = {
+    marker: "synthetic-optional",
+    shape: baseGeneration.shape.map((step, index) => (
+      index === optionalStepIndex ? { ...step, optional: true } : step
+    )),
+  };
+  const optionalRows = persistedGeneration(optionalGeneration, true);
+
+  assert.equal(legacyGenerationMatches(optionalGeneration, optionalRows), true);
+  assert.equal(
+    legacyGenerationMatches(
+      optionalGeneration,
+      withOptional(optionalRows, false),
+    ),
+    false,
+  );
+  assert.equal(
+    legacyGenerationMatches(
+      baseGeneration,
+      withOptional(persistedGeneration(baseGeneration, true), true),
+    ),
+    false,
+  );
 });
 
 test("every registered compound generation derives its repair Step ordinals", () => {
