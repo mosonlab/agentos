@@ -1,10 +1,14 @@
-const DEFAULT_RUNNER_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+export const defaultRunnerPath = (platform: NodeJS.Platform = process.platform): string => {
+  if (platform === "darwin") return "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+  if (platform === "linux") return "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+  throw new Error(`unsupported runner platform: ${platform}`);
+};
 
 /** Environment deliberately allowed to cross from the API into a runner-owned git process. */
 export const controlledGitEnvironment = (
   home: string = process.env.RUNNER_HOME ?? process.env.HOME ?? "/var/empty",
 ): NodeJS.ProcessEnv => ({
-  PATH: process.env.RUNNER_PATH ?? DEFAULT_RUNNER_PATH,
+  PATH: process.env.RUNNER_PATH ?? defaultRunnerPath(),
   HOME: home,
   LANG: "C.UTF-8",
   GIT_TERMINAL_PROMPT: "0",

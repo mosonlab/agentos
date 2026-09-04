@@ -229,7 +229,8 @@ prompt, or refused write leaves the database untouched. Anneal sets
 `SSH_AUTH_SOCK` is not passed into its controlled Git environment.
 
 The runner's default `PATH` is
-`/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`. If
+`/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin` on macOS and
+`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin` on Linux. If
 `command -v codex` is outside it, set `CODEX_BINARY` to the absolute executable
 path or set `RUNNER_PATH` in `.env`.
 

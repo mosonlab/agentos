@@ -46,6 +46,32 @@ host_proof_slot_invalid() {
   return 64
 }
 
+host_proof_slot_set_platform() {
+  HOST_PROOF_SLOT_PLATFORM="${OSTYPE:-unknown}"
+}
+
+host_proof_slot_select_lock_tool() {
+  host_proof_slot_set_platform || return $?
+  case "$HOST_PROOF_SLOT_PLATFORM" in
+    darwin*)
+      HOST_PROOF_SLOT_LOCK_TOOL=/usr/bin/lockf
+      HOST_PROOF_SLOT_LOCK_ARGS=(-s -t 0 9)
+      ;;
+    linux*)
+      HOST_PROOF_SLOT_LOCK_TOOL=/usr/bin/flock
+      HOST_PROOF_SLOT_LOCK_ARGS=(-x -n -E 75 9)
+      ;;
+    *)
+      host_proof_slot_invalid "platform $HOST_PROOF_SLOT_PLATFORM is not supported"
+      return $?
+      ;;
+  esac
+}
+
+host_proof_slot_lock_tool_is_executable() {
+  [[ -x "$HOST_PROOF_SLOT_LOCK_TOOL" ]]
+}
+
 host_proof_slot_try() {
   local slot_file="$1"
   shift
@@ -53,14 +79,14 @@ host_proof_slot_try() {
 
   # Read-only opening is intentional: it cannot create a missing file.  The
   # daemon creates all persistent files before any Run can reach this code.
-  # The descriptor remains open in this shell after lockf exits, which keeps
+  # The descriptor remains open in this shell after the lock tool exits, which keeps
   # the kernel lock held while the complete child command runs. It is closed in
   # the child so a descendant cannot outlive the wrapper and pin the slot.
   if ! exec 9<"$slot_file"; then
     return 74
   fi
 
-  /usr/bin/lockf -s -t 0 9
+  "$HOST_PROOF_SLOT_LOCK_TOOL" "${HOST_PROOF_SLOT_LOCK_ARGS[@]}"
   local lock_status=$?
   if (( lock_status != 0 )); then
     exec 9<&-
@@ -166,8 +192,9 @@ host_proof_slot_main() {
     host_proof_slot_invalid "slot directory $slot_directory is not a non-symlink directory"
     return $?
   fi
-  if [[ ! -x /usr/bin/lockf ]]; then
-    host_proof_slot_invalid "/usr/bin/lockf is not executable"
+  host_proof_slot_select_lock_tool || return $?
+  if ! host_proof_slot_lock_tool_is_executable; then
+    host_proof_slot_invalid "$HOST_PROOF_SLOT_LOCK_TOOL is not executable"
     return $?
   fi
   if [[ ! -x /bin/sleep ]]; then
@@ -212,7 +239,7 @@ host_proof_slot_main() {
       if (( HOST_PROOF_SLOT_ACQUIRED != 0 )); then
         return "$command_status"
       fi
-      # lockf's EX_TEMPFAIL (75) means this candidate is held.  Any other
+      # The selected tool's contention status (75) means this candidate is held. Any other
       # status is a setup/lock failure and must not be mistaken for contention.
       if (( command_status != 75 )); then
         return "$command_status"
