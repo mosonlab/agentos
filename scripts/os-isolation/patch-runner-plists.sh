@@ -104,7 +104,7 @@ run() {
 
 buddy_get()    { "$PLIST_BUDDY" -c "Print :EnvironmentVariables:$2" "$1" 2>/dev/null || true; }
 buddy_has()    { "$PLIST_BUDDY" -c "Print :EnvironmentVariables:$2" "$1" >/dev/null 2>&1; }
-label_for()    { if [ "$1" = 1 ]; then printf 'com.agentos.runner'; else printf 'com.agentos.runner-%s' "$1"; fi; }
+label_for()    { if [ "$1" = 1 ]; then printf 'com.agentos.runner\n'; else printf 'com.agentos.runner-%s\n' "$1"; fi; }
 account_index_for() { printf '%s' "$(( ( $1 - 1 ) % ACCOUNT_COUNT + 1 ))"; }
 account_for()  { printf '%s%s' "$ACCOUNT_PREFIX" "$(account_index_for "$1")"; }
 manifest_for() { printf '%s/%s.manifest' "$MANIFEST_DIR" "$1"; }
