@@ -414,6 +414,16 @@ test("optional review omission is a registered prompt-only rollover in both temp
     // The retired generation is the one runner-provided tooling rolled to.
     assert.equal(generationOf(templateName, "pre-runner-provided-regression-tooling").successorPromptDigest, generation.successorPromptDigest);
     assert.equal(matchedLegacyGeneration(templateName, asPersisted(current)), null);
+    // The deployed rows carry the outgoing prompts on the current shape: no
+    // optional steps, and the review steps opting out of dependency
+    // provisioning as the source does.
+    assert.equal(
+      legacyGenerationMatches(
+        { marker: generation.marker, shape: generation.shape },
+        asPersisted(current).map((step) => ({ ...step, optional: false })),
+      ),
+      true,
+    );
   }
 });
 
