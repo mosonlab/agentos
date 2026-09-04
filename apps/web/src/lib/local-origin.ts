@@ -8,10 +8,10 @@
  * it send one (the Origin/Host guard). Both answers are pure functions here, so
  * both are testable without a server, and neither performs I/O.
  *
- * `packages/runner/src/local-origin.ts` holds the second implementation of the
- * destination half, for `RUNNER_API_URL`. The two workspaces cannot import each
- * other, so `scripts/fixtures/local-api-origin-cases.json` is the shared table
- * both suites drive; drift is a failing test, not two policies.
+ * `packages/runner/src/local-origin.ts` and the runner-only deployment target
+ * hold the other implementations. The workspaces and deploy script cannot all
+ * import one runtime module, so `scripts/fixtures/local-api-origin-cases.json`
+ * is their shared contract; drift is a failing test, not three policies.
  */
 
 /** The whole accept decision for a destination. */

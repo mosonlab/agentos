@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { SERVICE_LABELS, DeployFailure } from "./quiet-window-lib.mjs";
+import { deployPhasesForRole } from "./deploy-phases.mjs";
 
 const seconds = (value) => value * 1_000;
 const minutes = (value) => seconds(value * 60);
@@ -11,6 +12,7 @@ const minutes = (value) => seconds(value * 60);
  * real migration plus backfill was observed at 75 seconds. */
 export const DEPLOY_STEP_TIMEOUT_MS = Object.freeze({
   remoteMainRead: seconds(30),
+  sourceCommitProbe: seconds(30),
   serviceInspection: seconds(15),
   releaseArtifactBuild: minutes(15),
   migrationPreflight: minutes(2),
@@ -36,6 +38,7 @@ export const DEPLOY_BARRIER_PHASE_TIMEOUT_MS = Object.freeze({
   "canonical-prompt-sync": DEPLOY_STEP_TIMEOUT_MS.canonicalPromptSync,
   "verify-runtime-prisma-client": 0,
   "assert-quiet-before-restart": 0,
+  "verify-control-plane-target": 0,
   "publish-build": 0,
   "restart-services": serviceRestartBudget,
   "verify-services": serviceSweepBudget,
@@ -48,6 +51,22 @@ export const DEPLOY_BARRIER_WATCHDOG_MARGIN_MS = minutes(5);
 export const DEPLOY_BARRIER_TIMEOUT_MS = DEPLOY_BARRIER_BUDGETED_WORK_MS
   + DEPLOY_BARRIER_RECOVERY_BUDGET_MS
   + DEPLOY_BARRIER_WATCHDOG_MARGIN_MS;
+
+export const deployBarrierTimeoutMsForRole = (role, serviceCount = SERVICE_LABELS.length) => {
+  if (!Number.isSafeInteger(serviceCount) || serviceCount < 1) throw new TypeError("deploy-service-count-invalid");
+  const phaseTimeouts = {
+    ...DEPLOY_BARRIER_PHASE_TIMEOUT_MS,
+    "verify-stable-service-paths": serviceCount * DEPLOY_STEP_TIMEOUT_MS.serviceInspection,
+    "restart-services": serviceCount * DEPLOY_STEP_TIMEOUT_MS.serviceRestart,
+    "verify-services": serviceCount * DEPLOY_STEP_TIMEOUT_MS.serviceInspection,
+  };
+  const budgetedWork = deployPhasesForRole(role)
+    .filter(({ scope }) => scope === "upgrade")
+    .reduce((total, { name }) => total + (phaseTimeouts[name] ?? 0), 0);
+  return budgetedWork
+    + serviceCount * DEPLOY_STEP_TIMEOUT_MS.previousServiceRestore
+    + DEPLOY_BARRIER_WATCHDOG_MARGIN_MS;
+};
 export const MIGRATION_DEPLOY_TIMEOUT_REASON = "migration-deploy-timeout";
 export const BARRIER_TIMEOUT_REASON = "deploy-barrier-timeout";
 

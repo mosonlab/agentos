@@ -1067,6 +1067,56 @@ test("runner prefix is rendered, recorded, and checked before privileged install
   });
 });
 
+test("runner role stages only runner units and stage two enforces the recorded role", async () => {
+  await withLinux(() => {
+    const root = mkdtempSync(join(tmpdir(), "agentos-systemd-runner-role-"));
+    const unitDirectory = join(root, "etc/systemd/system");
+    const sudoersPath = join(root, "etc/sudoers.d/anneal-service-control");
+    const environment = {
+      AGENTOS_DEPLOY_ROLE: "runner",
+      AGENTOS_RUNNER_COUNT: "3",
+      AGENTOS_RUNNER_ID_PREFIX: "mac-",
+    };
+    try {
+      const staged = installLaunchdServices({
+        repositoryRoot: root,
+        serviceUser: "anneal-test",
+        userLookup: accountLookup,
+        nodeBinary: process.execPath,
+        gitBinary: process.execPath,
+        unitDirectory,
+        sudoersPath,
+        visudoPath: "/usr/bin/true",
+        environment,
+        effectiveUid: 501,
+        apply: true,
+      });
+      const labels = staged.manifest.entries.filter(({ kind }) => kind === "service").map(({ label }) => label);
+      assert.deepEqual(labels, ["com.agentos.runner", "com.agentos.runner-2", "com.agentos.runner-3"]);
+      assert.equal(staged.manifest.renderInputs.deployRole, "runner");
+      assert.equal(labels.some((label) => ["com.agentos.api", "com.agentos.inbox", "com.agentos.web"].includes(label)), false);
+      assert.match(readFileSync(staged.manifest.auxiliaryEntries.find(({ kind }) => kind === "sudoers").stagedPath, "utf8"), /com\.agentos\.runner\.service/u);
+
+      const calls = [];
+      assert.throws(() => installStagedSystemdServices({
+        repositoryRoot: root,
+        unitDirectory,
+        sudoersPath,
+        systemctlPath: "/usr/bin/true",
+        visudoPath: "/usr/bin/true",
+        effectiveUid: 0,
+        serviceUser: "anneal-test",
+        userLookup: accountLookup,
+        environment: { ...environment, AGENTOS_DEPLOY_ROLE: "control-plane" },
+        execute: (_command, args) => { calls.push(args); return ""; },
+      }), /systemd-deploy-role-manifest-mismatch/u);
+      assert.deepEqual(calls, []);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 test("invalid runner prefix fails before installer files are written", async () => {
   await withLinux(() => {
     const root = mkdtempSync(join(tmpdir(), "agentos-systemd-prefix-invalid-"));
@@ -1859,6 +1909,104 @@ test("auto-deploy systemd stage renders a oneshot and timer, enabling only the t
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+test("runner role is recorded and rendered into both auto-deploy service formats", async () => {
+  await withLinux(() => {
+    const root = mkdtempSync(join(tmpdir(), "agentos-auto-runner-role-"));
+    const unitDirectory = join(root, "etc/systemd/system");
+    const options = {
+      repositoryRoot: root,
+      nodeBinary: "/usr/bin/node",
+      gitBinary: "/usr/bin/git",
+      npmBinary: "/usr/bin/npm",
+      path: "/usr/bin:/bin",
+      sourceRemote: "configured-remote",
+      backup: null,
+      serviceUser: "anneal-test",
+      userLookup: accountLookup,
+      unitDirectory,
+      sudoersPath: join(root, "etc/sudoers.d/anneal-service-control"),
+      deployRole: "runner",
+      runnerCount: 3,
+      runnerIdPrefix: "mac-",
+      apply: true,
+      effectiveUid: 501,
+    };
+    try {
+      const staged = planSystemdAutoDeploy(options);
+      assert.equal(staged.manifest.renderInputs.deployRole, "runner");
+      assert.match(staged.manifest.entries[0].stagedPath, /com\.agentos\.auto-deploy\.service$/u);
+      assert.match(readFileSync(staged.manifest.entries[0].stagedPath, "utf8"), /^Environment=AGENTOS_DEPLOY_ROLE="runner"$/mu);
+      const plist = renderLaunchdPlist(
+        readFileSync(new URL("./com.agentos.auto-deploy.plist.in", import.meta.url), "utf8"),
+        { ...staged.manifest.renderInputs, repositoryRoot: root, deployScript: "/deploy", stdoutPath: "/out", stderrPath: "/err" },
+      );
+      assert.match(plist, /<key>AGENTOS_DEPLOY_ROLE<\/key>\s*<string>runner<\/string>/u);
+      assert.match(plist, /<key>AGENTOS_RUNNER_COUNT<\/key>\s*<string>3<\/string>/u);
+      assert.match(plist, /<key>AGENTOS_RUNNER_ID_PREFIX<\/key>\s*<string>mac-<\/string>/u);
+
+      const calls = [];
+      assert.throws(() => installStagedSystemdAutoDeploy({
+        ...options,
+        deployRole: undefined,
+        manifestPath: staged.manifestPath,
+        effectiveUid: 0,
+        environment: { AGENTOS_DEPLOY_ROLE: "control-plane" },
+        execute: (_command, args) => { calls.push(args); return ""; },
+      }), /systemd-auto-deploy-deploy-role-manifest-mismatch/u);
+      assert.deepEqual(calls, []);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+test("runner auto-deploy stage one prints a stage-two command carrying the role", async () => {
+  await withLinux(() => {
+    const root = mkdtempSync(join(tmpdir(), "agentos-auto-runner-next-"));
+    const unitDirectory = join(root, "etc/systemd/system");
+    const environment = {
+      AGENTOS_SERVICE_PLATFORM: "linux",
+      AGENTOS_DEPLOY_ROLE: "runner",
+      AGENTOS_RUNNER_COUNT: "3",
+      AGENTOS_RUNNER_ID_PREFIX: "mac-",
+    };
+    const options = {
+      repositoryRoot: root,
+      nodeBinary: process.execPath,
+      gitBinary: process.execPath,
+      npmBinary: process.execPath,
+      path: "/usr/bin:/bin",
+      sourceRemote: "configured-remote",
+      serviceUser: "anneal-test",
+      userLookup: accountLookup,
+      unitDirectory,
+      sudoersPath: join(root, "etc/sudoers.d/anneal-service-control"),
+      environment,
+      effectiveUid: 501,
+      execute: () => "",
+    };
+    const output = [];
+    const write = process.stdout.write;
+    process.stdout.write = (chunk) => { output.push(String(chunk)); return true; };
+    try {
+      assert.equal(installLaunchd(["--apply", "--service-user", "anneal-test"], options), 0);
+    } finally {
+      process.stdout.write = write;
+    }
+    assert.match(output.join(""), /NEXT sudo AGENTOS_DEPLOY_ROLE=runner node .* --install-units/u);
+
+    const stageTwoCalls = [];
+    assert.equal(installLaunchd(["--install-units", "--service-user", "anneal-test"], {
+      ...options,
+      effectiveUid: 0,
+      execute: (_command, args) => { stageTwoCalls.push(args); return ""; },
+      chown: () => {},
+    }), 0);
+    assert.deepEqual(stageTwoCalls, [["daemon-reload"], ["enable", "--now", "com.agentos.auto-deploy.timer"]]);
+    rmSync(root, { recursive: true, force: true });
   });
 });
 

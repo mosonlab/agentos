@@ -1,4 +1,7 @@
-import { DEPLOY_PHASES, UPGRADE_DEPLOY_PHASES } from "./deploy-phases.mjs";
+import { deployPhasesForRole, upgradeDeployPhasesForRole } from "./deploy-phases.mjs";
+import { DEFAULT_DEPLOY_ROLE, DEPLOY_ROLES, resolveDeployRole } from "./deploy-role.mjs";
+
+export { DEFAULT_DEPLOY_ROLE, DEPLOY_ROLES, resolveDeployRole };
 
 export const BLOCKING_RUN_STATUSES = Object.freeze(["claimed", "provisioning", "running"]);
 
@@ -41,17 +44,20 @@ const runnerLabelForIndex = (index) => index === 1
 export const generateServiceInventory = (
   runnerCount = resolveRunnerCount(),
   runnerIdPrefix = resolveRunnerIdPrefix(),
+  deployRole = resolveDeployRole(),
 ) => {
   const count = validatedRunnerCount(runnerCount);
   const prefix = resolveRunnerIdPrefix({ AGENTOS_RUNNER_ID_PREFIX: runnerIdPrefix });
+  if (!DEPLOY_ROLES.includes(deployRole)) throw new Error(`deploy-role-invalid:${String(deployRole)}`);
   const entries = [
-    { label: "com.agentos.api", runnerId: null },
-    { label: "com.agentos.inbox", runnerId: null },
+    ...(deployRole === DEFAULT_DEPLOY_ROLE
+      ? [{ label: "com.agentos.api", runnerId: null }, { label: "com.agentos.inbox", runnerId: null }]
+      : []),
     ...Array.from({ length: count }, (_unused, offset) => {
       const index = offset + 1;
       return { label: runnerLabelForIndex(index), runnerId: `${prefix}runner-${index}` };
     }),
-    { label: "com.agentos.web", runnerId: null },
+    ...(deployRole === DEFAULT_DEPLOY_ROLE ? [{ label: "com.agentos.web", runnerId: null }] : []),
   ];
   return Object.freeze(entries.map((entry) => Object.freeze({
     ...entry,
@@ -181,7 +187,7 @@ export const decideInvocation = async (startup, mode) => {
 
 /** Execute the full deployment attempt through the host seam. Every phase
  * receives the attempt and establishes facts for the phases that follow. */
-export const executeUpgrade = async (host, attempt) => {
+export const executeUpgrade = async (host, attempt, deployRole = DEFAULT_DEPLOY_ROLE) => {
   let schemaAdvanced = false;
   let activationAttempted = false;
   let activationOutcomeProven = false;
@@ -247,7 +253,7 @@ export const executeUpgrade = async (host, attempt) => {
   try {
     let publicationReady = false;
     try {
-      for (const phase of DEPLOY_PHASES) {
+      for (const phase of deployPhasesForRole(deployRole)) {
         if (phase.scope === "upgrade") upgradeStarted = true;
         if (phase.hostMethod === "publishBuild") activationAttempted = true;
         let facts;
@@ -312,13 +318,16 @@ export const executeUpgrade = async (host, attempt) => {
 
 /** Dry-run reads the deployment host every upgrade uses, calling only the
  * methods that establish no facts and mutate nothing. */
-export const dryRunDecision = async (host, attempt) => {
+export const dryRunDecision = async (host, attempt, deployRole = DEFAULT_DEPLOY_ROLE) => {
+  const backupPromise = deployRole === DEFAULT_DEPLOY_ROLE
+    ? host.backupState()
+    : Promise.resolve({ ok: true, mode: "skipped" });
   const [{ revisions }, runs, artifact, services, backup] = await Promise.all([
     host.readRevisions(attempt),
     host.blockingRuns(),
     host.artifactState(attempt),
     host.serviceState(),
-    host.backupState(),
+    backupPromise,
   ]);
   const quiet = quietWindowIsOpen(runs);
   const lines = [
@@ -328,6 +337,6 @@ export const dryRunDecision = async (host, attempt) => {
     `DRY-RUN services=${services.ok ? "ready" : "not-ready"}`,
     `DRY-RUN backup=${backup.ok ? "ready" : "not-ready"} mode=${backup.mode}${backup.reason ? ` reason=${backup.reason}` : ""}`,
   ];
-  for (const phase of UPGRADE_DEPLOY_PHASES) lines.push(`DRY-RUN plan step=${phase.name} mutation=skipped`);
+  for (const phase of upgradeDeployPhasesForRole(deployRole)) lines.push(`DRY-RUN plan step=${phase.name} mutation=skipped`);
   return { quiet, revisions, runs, artifact, services, backup, lines };
 };

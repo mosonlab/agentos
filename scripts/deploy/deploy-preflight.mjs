@@ -87,11 +87,17 @@ export const pruneDeployHistory = ({
   });
 };
 
-export const blockingRunsStatement = (statuses = BLOCKING_RUN_STATUSES) => {
+export const blockingRunsStatement = (statuses = BLOCKING_RUN_STATUSES, runnerIds = null) => {
+  if (runnerIds !== null && (!Array.isArray(runnerIds) || runnerIds.length === 0)) {
+    throw new DeployFailure("quiet-window-runner-inventory-invalid", "runner-ids-empty");
+  }
   const placeholders = statuses.map((_, index) => `$${index + 1}`).join(",");
+  const runnerPredicate = runnerIds === null
+    ? ""
+    : ` AND "runnerId" IN (${runnerIds.map((_, index) => `$${statuses.length + index + 1}`).join(",")})`;
   return {
-    sql: `SELECT "id", "status"::text AS "status" FROM "Run" WHERE "status"::text IN (${placeholders}) ORDER BY "id"`,
-    parameters: [...statuses],
+    sql: `SELECT "id", "status"::text AS "status" FROM "Run" WHERE "status"::text IN (${placeholders})${runnerPredicate} ORDER BY "id"`,
+    parameters: [...statuses, ...(runnerIds ?? [])],
   };
 };
 

@@ -19,7 +19,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import { RUNTIME_TOOL_FILES } from "../../packages/runner/scripts/build-runtime-tools.mjs";
-import { DEPLOY_PHASES, UPGRADE_DEPLOY_PHASES } from "./deploy-phases.mjs";
+import { deployPhasesForRole } from "./deploy-phases.mjs";
 import { openDeploymentAttempt, parseReleaseArtifactReceipt } from "./deployment-attempt.mjs";
 import {
   DeployFailure,
@@ -28,6 +28,7 @@ import {
   deployedBuildStampRefusal,
   dryRunDecision,
   executeUpgrade,
+  generateServiceInventory,
   parseDeployArguments,
   quietWindowIsOpen,
 } from "./quiet-window-lib.mjs";
@@ -36,7 +37,7 @@ import {
   deployReleaseArtifactPaths,
   workspaceDependencyPaths,
 } from "./release-artifacts.mjs";
-import { pruneDeployHistory } from "./deploy-preflight.mjs";
+import { blockingRunsStatement, pruneDeployHistory } from "./deploy-preflight.mjs";
 import { createDeploymentLedger, DEPLOYMENT_LEDGER_STATES } from "./deployment-ledger.mjs";
 import { createProductionHost } from "./quiet-window-host.mjs";
 import {
@@ -58,8 +59,17 @@ import {
   canonicalSyncRefusedLines,
   createDeployHost,
   deployRootFromEnvironment,
+  loadDeployBinaries,
+  probeSourceRemoteCommit,
   verifyStableServicePaths,
 } from "./quiet-window-deploy.mjs";
+import {
+  controlPlaneApiBaseUrl,
+  readRunnerTargetRevision,
+  requireRunnerDeployPreflight,
+  resolveDeployRoleOrFail,
+} from "./runner-role-target.mjs";
+import { runnerRegistrationRefusal } from "./runner-role-verification.mjs";
 
 const revisions = { from: "a".repeat(40), to: "b".repeat(40) };
 const REPOSITORY_ROOT = fileURLToPath(new URL("../..", import.meta.url));
@@ -92,6 +102,15 @@ const EXPECTED_PHASES = [
   "restart-services",
   "verify-services",
 ];
+const RUNNER_PHASES = EXPECTED_PHASES.filter((name) => ![
+  "backup",
+  "guarded-migration",
+  "generate-prisma-client",
+  "canonical-prompt-sync",
+  "verify-runtime-prisma-client",
+].includes(name)).flatMap((name) => name === "publish-build"
+  ? ["verify-control-plane-target", name]
+  : [name]);
 
 const RETRY_ESCALATION = Object.freeze({ reason: "remote-main-unreadable", attempts: 2 });
 
@@ -182,6 +201,7 @@ const fixture = ({ failure = null, builderOutput = null } = {}) => {
     assertQuietBeforeRestart: step("assert-quiet-before-restart", async (attempt) => {
       assert.equal(await attempt.requireFact("barrier").verify(), true);
     }),
+    verifyControlPlaneTarget: step("verify-control-plane-target"),
     publishBuild: step("publish-build", async (attempt) => {
       assert.equal(attempt.requireFact("verifiedRelease"), release);
       state.serving = "candidate";
@@ -293,6 +313,189 @@ test("argv names exactly one mode", () => {
   assert.throws(
     () => parseDeployArguments(["--dry-run", "--prune-history"]),
     (error) => error.reason === "usage" && error.detail === "modes-are-mutually-exclusive",
+  );
+});
+
+test("deploy role defaults to control-plane and rejects unknown values", () => {
+  assert.equal(resolveDeployRoleOrFail({}), "control-plane");
+  assert.equal(resolveDeployRoleOrFail({ AGENTOS_DEPLOY_ROLE: "runner" }), "runner");
+  assert.throws(
+    () => resolveDeployRoleOrFail({ AGENTOS_DEPLOY_ROLE: "database" }),
+    (error) => error instanceof DeployFailure && error.reason === "deploy-role-invalid",
+  );
+});
+
+test("runner deploy accepts only the shared numeric-loopback API origin policy before fetch", async () => {
+  const fixtures = JSON.parse(readFileSync(new URL("../fixtures/local-api-origin-cases.json", import.meta.url), "utf8"));
+  let fetchCalls = 0;
+  for (const fixtureCase of fixtures.accepted) {
+    const environment = { RUNNER_API_URL: fixtureCase.value };
+    assert.equal(controlPlaneApiBaseUrl(environment), fixtureCase.value.trim(), fixtureCase.description);
+  }
+  for (const fixtureCase of fixtures.rejected) {
+    const environment = { RUNNER_API_URL: fixtureCase.value };
+    assert.throws(
+      () => controlPlaneApiBaseUrl(environment),
+      (error) => error instanceof DeployFailure
+        && error.reason === "control-plane-api-url-invalid"
+        && error.detail === fixtureCase.reason,
+      fixtureCase.description,
+    );
+  }
+  for (const value of [
+    "http://control-plane.example.test:3000",
+    "http://user@127.0.0.1:3000",
+    "http://127.0.0.1:3000/path",
+    "http://127.0.0.1:3000?query=1",
+    "http://127.0.0.1:3000#fragment",
+  ]) {
+    assert.throws(() => controlPlaneApiBaseUrl({ RUNNER_API_URL: value }), /control-plane-api-url-invalid/u);
+  }
+  await assert.rejects(async () => readRunnerTargetRevision({
+    apiBaseUrl: controlPlaneApiBaseUrl({ RUNNER_API_URL: "http://attacker.example:3000" }),
+    fetchImpl: async () => { fetchCalls += 1; },
+    sourceContainsCommit: async () => true,
+  }), /control-plane-api-url-invalid/u);
+  assert.equal(fetchCalls, 0);
+});
+
+test("runner deploy preflight requires a host-specific prefix and operator credential", () => {
+  const configured = {
+    AGENTOS_DEPLOY_ROLE: "runner",
+    AGENTOS_RUNNER_ID_PREFIX: "mac-",
+    RUNNER_API_URL: "http://127.0.0.1:3000",
+    OPERATOR_TOKEN: "operator-token",
+  };
+  assert.deepEqual(requireRunnerDeployPreflight(configured), {
+    apiBaseUrl: "http://127.0.0.1:3000",
+    operatorToken: "operator-token",
+    runnerIdPrefix: "mac-",
+  });
+  assert.throws(
+    () => requireRunnerDeployPreflight({ ...configured, AGENTOS_RUNNER_ID_PREFIX: "" }),
+    (error) => error.reason === "runner-id-prefix-required",
+  );
+  assert.throws(
+    () => requireRunnerDeployPreflight({ ...configured, OPERATOR_TOKEN: "" }),
+    (error) => error.reason === "runner-registration-verification-unavailable"
+      && error.detail === "OPERATOR_TOKEN-missing",
+  );
+});
+
+test("runner target is the clean control-plane commit only when the source contains it", async () => {
+  const commit = "c".repeat(40);
+  const calls = [];
+  const target = await readRunnerTargetRevision({
+    apiBaseUrl: "http://127.0.0.1:3000",
+    fetchImpl: async (url) => {
+      calls.push(url);
+      return { ok: true, json: async () => ({ service: "@anneal/api", stamped: true, commit, dirty: false }) };
+    },
+    sourceContainsCommit: async (candidate) => { calls.push(candidate); return true; },
+  });
+  assert.equal(target, commit);
+  assert.deepEqual(calls, ["http://127.0.0.1:3000/version", commit]);
+});
+
+test("runner target uses the canonical build-info version parser and exact API package", async () => {
+  const commit = "c".repeat(40);
+  await assert.rejects(
+    readRunnerTargetRevision({
+      apiBaseUrl: "http://127.0.0.1:3000",
+      fetchImpl: async () => ({ ok: true, json: async () => ({ service: "@agentos/api", stamped: true, commit, dirty: false }) }),
+      sourceContainsCommit: async () => true,
+    }),
+    (error) => error.reason === "control-plane-version-invalid",
+  );
+});
+
+test("runner target preflight names dirty, unreachable, and missing-source failures", async () => {
+  const commit = "d".repeat(40);
+  await assert.rejects(
+    readRunnerTargetRevision({
+      apiBaseUrl: "http://127.0.0.1:3000",
+      fetchImpl: async () => ({ ok: true, json: async () => ({ service: "@anneal/api", stamped: true, commit, dirty: true }) }),
+      sourceContainsCommit: async () => assert.fail("dirty target must stop before the source check"),
+    }),
+    (error) => error.reason === "control-plane-build-dirty",
+  );
+  await assert.rejects(
+    readRunnerTargetRevision({
+      apiBaseUrl: "http://127.0.0.1:3000",
+      fetchImpl: async () => { throw new Error("offline"); },
+      sourceContainsCommit: async () => assert.fail("unreachable target must stop before the source check"),
+    }),
+    (error) => error.reason === "control-plane-version-unreachable",
+  );
+  await assert.rejects(
+    readRunnerTargetRevision({
+      apiBaseUrl: "http://127.0.0.1:3000",
+      fetchImpl: async () => ({ ok: true, json: async () => ({ service: "@anneal/api", stamped: true, commit, dirty: false }) }),
+      sourceContainsCommit: async () => false,
+    }),
+    (error) => error.reason === "control-plane-commit-unavailable",
+  );
+});
+
+test("runner source probe fetches only the target commit and distinguishes transport from absence", async () => {
+  const commit = "d".repeat(40);
+  const calls = [];
+  assert.equal(await probeSourceRemoteCommit({
+    revision: commit,
+    sourceRemote: "origin",
+    gitBinary: "/git",
+    probeDirectory: "/probe",
+    run: async (_program, args, options) => {
+      calls.push({ args, timeoutMs: options.timeoutMs, timeoutReason: options.timeoutReason });
+      return { code: 0, stdout: args.includes("cat-file") ? "" : `${commit}\trefs/heads/main\n`, stderr: "" };
+    },
+  }), true);
+  assert.deepEqual(calls.map(({ args }) => args), [
+    ["ls-remote", "origin"],
+    ["init", "--bare", "/probe"],
+    ["-C", "/probe", "fetch", "--no-tags", "--depth=1", "origin", commit],
+    ["-C", "/probe", "cat-file", "-e", `${commit}^{commit}`],
+  ]);
+  assert.ok(calls.every(({ timeoutReason }) => timeoutReason === "source-remote-read-timeout"));
+
+  await assert.rejects(probeSourceRemoteCommit({
+    revision: commit,
+    sourceRemote: "origin",
+    gitBinary: "/git",
+    probeDirectory: "/probe",
+    run: async () => ({ code: 1, stdout: "", stderr: "network is unreachable" }),
+  }), (error) => error.reason === "source-remote-unreadable");
+
+  await assert.rejects(probeSourceRemoteCommit({
+    revision: commit,
+    sourceRemote: "origin",
+    gitBinary: "/git",
+    probeDirectory: "/probe",
+    run: async (_program, args) => args[0] === "ls-remote" || args[0] === "init"
+      ? { code: 0, stdout: `${commit}\trefs/heads/main\n`, stderr: "" }
+      : { code: 128, stdout: "", stderr: "fatal: remote error: upload-pack: not our ref" },
+  }), (error) => error.reason === "control-plane-commit-unavailable");
+});
+
+test("already deployed runner target skips the source-remote containment probe", async () => {
+  const commit = "e".repeat(40);
+  assert.equal(await readRunnerTargetRevision({
+    apiBaseUrl: "http://127.0.0.1:3000",
+    fetchImpl: async () => ({ ok: true, json: async () => ({ service: "@anneal/api", stamped: true, commit, dirty: false }) }),
+    deployedCommit: commit,
+    sourceContainsCommit: async () => assert.fail("already deployed target must not probe the source remote"),
+  }), commit);
+});
+
+test("control-plane binary failures keep the pre-role environment-unreadable wrapping", () => {
+  assert.throws(
+    () => loadDeployBinaries({
+      deployRole: "control-plane",
+      resolveExecutableImpl: (variable) => { throw new DeployFailure(`${variable}-missing`); },
+      backupConfigurationImpl: () => ({ mode: "host" }),
+    }),
+    (error) => error.reason === "environment-unreadable"
+      && error.detail === "DEPLOY_GIT_BINARY-missing",
   );
 });
 
@@ -689,6 +892,49 @@ test("service inventory covers the thirteen production labels", () => {
   assert.equal(SERVICE_LABELS.at(-1), "com.agentos.web");
 });
 
+test("runner role inventory contains only the configured local runners", () => {
+  assert.deepEqual(generateServiceInventory(2, "mac-", "runner"), [
+    { label: "com.agentos.runner", runnerId: "mac-runner-1", unitName: "com.agentos.runner.service" },
+    { label: "com.agentos.runner-2", runnerId: "mac-runner-2", unitName: "com.agentos.runner-2.service" },
+  ]);
+});
+
+test("runner quiet-window SQL admits only exact local runner ids", () => {
+  const defaults = blockingRunsStatement();
+  assert.equal(defaults.sql.includes('"runnerId"'), false);
+  const scoped = blockingRunsStatement(undefined, ["mac-runner-1", "mac-runner-2"]);
+  assert.equal(scoped.sql, 'SELECT "id", "status"::text AS "status" FROM "Run" WHERE "status"::text IN ($1,$2,$3) AND "runnerId" IN ($4,$5) ORDER BY "id"');
+  assert.deepEqual(scoped.parameters, ["claimed", "provisioning", "running", "mac-runner-1", "mac-runner-2"]);
+});
+
+test("runner verification requires every local daemon to re-register on the target build", () => {
+  const targetCommit = "e".repeat(40);
+  const before = { "mac-runner-1": "2026-09-04T12:00:00.000Z", "mac-runner-2": "2026-09-04T12:00:01.000Z" };
+  const payload = { daemons: [
+    { runnerId: "mac-runner-1", online: true, daemonVersion: targetCommit, lastSeenAt: "2026-09-04T12:01:00.000Z" },
+    { runnerId: "mac-runner-2", online: true, daemonVersion: targetCommit, lastSeenAt: "2026-09-04T12:01:01.000Z" },
+    { runnerId: "vm-runner-1", online: true, daemonVersion: "old", lastSeenAt: "2026-09-04T12:01:02.000Z" },
+  ] };
+  const options = { payload, runnerIds: ["mac-runner-1", "mac-runner-2"], before, targetCommit };
+  assert.equal(runnerRegistrationRefusal(options), null);
+  assert.equal(runnerRegistrationRefusal({
+    ...options,
+    payload: { daemons: payload.daemons.slice(0, 1) },
+  }), "runner-missing-mac-runner-2");
+  assert.equal(runnerRegistrationRefusal({
+    ...options,
+    payload: { daemons: payload.daemons.map((daemon) => daemon.runnerId === "mac-runner-2"
+      ? { ...daemon, lastSeenAt: before["mac-runner-2"] }
+      : daemon) },
+  }), "runner-registration-stale-mac-runner-2");
+  assert.equal(runnerRegistrationRefusal({
+    ...options,
+    payload: { daemons: payload.daemons.map((daemon) => daemon.runnerId === "mac-runner-2"
+      ? { ...daemon, daemonVersion: "f".repeat(40) }
+      : daemon) },
+  }), "runner-build-mismatch-mac-runner-2");
+});
+
 test("the deploy host restarts and restores every Linux unit in inventory order", async () => {
   const calls = [];
   const serviceControl = {
@@ -715,6 +961,158 @@ test("the deploy host restarts and restores every Linux unit in inventory order"
   assert.deepEqual(calls.map(({ label }) => label), SERVICE_LABELS);
   assert.deepEqual(calls.map(({ options }) => options.reason), SERVICE_LABELS.map(() => "previous-service-restore-failed"));
   assert.equal(recoveryVerified, true);
+});
+
+test("runner deploy host restarts only local runners and verifies a newer target-build registration", async () => {
+  const targetCommit = "b".repeat(40);
+  const restarts = [];
+  const requests = [];
+  let snapshot = 0;
+  const environment = {
+    AGENTOS_DEPLOY_ROLE: "runner",
+    AGENTOS_RUNNER_COUNT: "2",
+    AGENTOS_RUNNER_ID_PREFIX: "mac-",
+    RUNNER_API_URL: "http://127.0.0.1:3000",
+    OPERATOR_TOKEN: "operator-test-token",
+  };
+  const response = (lastSeenAt) => ({
+    ok: true,
+    json: async () => ({ daemons: [
+      { runnerId: "mac-runner-1", online: true, daemonVersion: targetCommit, lastSeenAt },
+      { runnerId: "mac-runner-2", online: true, daemonVersion: targetCommit, lastSeenAt },
+      { runnerId: "vm-runner-1", online: true, daemonVersion: "old", lastSeenAt },
+    ] }),
+  });
+  const host = createDeployHost({
+    environment,
+    serviceControl: {
+      platform: "darwin",
+      restart: async (label) => { restarts.push(label); },
+      isRunning: async () => true,
+      describe: async () => "state = running",
+    },
+    fetchImpl: async (url, options) => {
+      requests.push({ url, authorization: options.headers.authorization });
+      snapshot += 1;
+      return response(snapshot === 1 ? "2026-09-04T12:00:00.000Z" : "2026-09-04T12:01:00.000Z");
+    },
+  });
+  const attempt = openDeploymentAttempt({ deployRoot: "/fixture", targetCommit, transactionId: "runner-verification" });
+  attempt.establish({ revisions: { from: "a".repeat(40), to: targetCommit } });
+  attempt.establish(await host.restartServices(attempt));
+  const verified = await host.verifyServices(attempt);
+  assert.deepEqual(restarts, ["com.agentos.runner", "com.agentos.runner-2"]);
+  assert.deepEqual(verified.serviceVerification, {
+    runnerIds: ["mac-runner-1", "mac-runner-2"],
+    activatedBuildCommit: targetCommit,
+  });
+  assert.deepEqual(requests, [
+    { url: "http://127.0.0.1:3000/runners", authorization: "Bearer operator-test-token" },
+    { url: "http://127.0.0.1:3000/runners", authorization: "Bearer operator-test-token" },
+  ]);
+});
+
+test("runner target is re-read after the barrier and a changed control plane stops before publish", async () => {
+  const original = "b".repeat(40);
+  const advanced = "c".repeat(40);
+  const environment = {
+    AGENTOS_DEPLOY_ROLE: "runner",
+    AGENTOS_RUNNER_COUNT: "1",
+    AGENTOS_RUNNER_ID_PREFIX: "mac-",
+    RUNNER_API_URL: "http://127.0.0.1:3000",
+    OPERATOR_TOKEN: "operator-token",
+  };
+  const host = createDeployHost({
+    environment,
+    serviceControl: {
+      platform: "darwin",
+      restart: async () => {},
+      isRunning: async () => true,
+      describe: async () => "state = running",
+    },
+    fetchImpl: async (url) => {
+      assert.equal(url, "http://127.0.0.1:3000/version");
+      return { ok: true, json: async () => ({ service: "@anneal/api", stamped: true, commit: advanced, dirty: false }) };
+    },
+  });
+  const attempt = openDeploymentAttempt({ deployRoot: "/fixture", targetCommit: original, transactionId: "target-recheck" });
+  await assert.rejects(
+    host.verifyControlPlaneTarget(attempt),
+    (error) => error.reason === "control-plane-version-changed"
+      && error.detail === `${original}->${advanced}`,
+  );
+
+  const state = fixture({ failure: "verify-control-plane-target" });
+  const result = await executeUpgrade(state.host, state.attempt, "runner");
+  assert.equal(result.failure.reason, "verify-control-plane-target-failed");
+  assert.equal(state.calls.includes("publish-build"), false);
+});
+
+test("runner rollback proves every previous-build runner registered after its restart", async () => {
+  const previous = "a".repeat(40);
+  const candidate = "b".repeat(40);
+  const environment = {
+    AGENTOS_DEPLOY_ROLE: "runner",
+    AGENTOS_RUNNER_COUNT: "2",
+    AGENTOS_RUNNER_ID_PREFIX: "mac-",
+    RUNNER_API_URL: "http://127.0.0.1:3000",
+    OPERATOR_TOKEN: "operator-token",
+  };
+  const daemon = (runnerId, overrides = {}) => ({
+    runnerId,
+    online: true,
+    daemonVersion: previous,
+    lastSeenAt: "2026-09-04T12:01:00.000Z",
+    ...overrides,
+  });
+  const beforePayload = { daemons: [
+    daemon("mac-runner-1", { daemonVersion: candidate, lastSeenAt: "2026-09-04T12:00:00.000Z" }),
+    daemon("mac-runner-2", { daemonVersion: candidate, lastSeenAt: "2026-09-04T12:00:00.000Z" }),
+  ] };
+  const attempt = openDeploymentAttempt({ deployRoot: "/fixture", targetCommit: candidate, transactionId: "runner-rollback" });
+  attempt.establish({ revisions: { from: previous, to: candidate } });
+
+  for (const [name, payload, refusal] of [
+    ["missing", { daemons: [daemon("mac-runner-1")] }, "runner-missing-mac-runner-2"],
+    ["stale", { daemons: [daemon("mac-runner-1", { lastSeenAt: "2026-09-04T12:00:00.000Z" }), daemon("mac-runner-2")] }, "runner-registration-stale-mac-runner-1"],
+    ["offline", { daemons: [daemon("mac-runner-1", { online: false }), daemon("mac-runner-2")] }, "runner-offline-mac-runner-1"],
+    ["wrong-build", { daemons: [daemon("mac-runner-1", { daemonVersion: candidate }), daemon("mac-runner-2")] }, "runner-build-mismatch-mac-runner-1"],
+  ]) {
+    let reads = 0;
+    const host = createDeployHost({
+      environment,
+      serviceControl: { platform: "darwin", restart: async () => {}, isRunning: async () => true, describe: async () => "state = running" },
+      verifyRecoveredServices: async () => {},
+      fetchImpl: async () => ({ ok: true, json: async () => reads++ === 0 ? beforePayload : payload }),
+      serviceVerificationTimeoutMs: 5,
+      serviceVerificationWait: () => new Promise((resolveWait) => setTimeout(resolveWait, 1)),
+    });
+    await assert.rejects(
+      host.restorePreviousServices(attempt),
+      (error) => error.reason === "previous-service-verification-failed"
+        && error.detail === refusal,
+      name,
+    );
+  }
+
+  const restarts = [];
+  let reads = 0;
+  const host = createDeployHost({
+    environment,
+    serviceControl: {
+      platform: "darwin",
+      restart: async (label) => { restarts.push(label); },
+      isRunning: async () => true,
+      describe: async () => "state = running",
+    },
+    verifyRecoveredServices: async () => {},
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => reads++ === 0 ? beforePayload : { daemons: [daemon("mac-runner-1"), daemon("mac-runner-2")] },
+    }),
+  });
+  await host.restorePreviousServices(attempt);
+  assert.deepEqual(restarts, ["com.agentos.runner", "com.agentos.runner-2"]);
 });
 
 test("rollback re-proves liveness, wrapper binding, and prior API identity on both platforms", async (t) => {
@@ -847,7 +1245,7 @@ test("canonical sync refusal output reaches the successful deploy Inbox notice",
 test("production host requires every deploy phase and every read-only method", () => {
   assert.throws(() => createProductionHost({}), /production-host-adapter-missing:readRevisions/u);
   const required = [
-    ...DEPLOY_PHASES.map(({ hostMethod }) => hostMethod),
+    ...deployPhasesForRole("control-plane").map(({ hostMethod }) => hostMethod),
     "blockingRuns",
     "artifactState",
     "serviceState",
@@ -864,6 +1262,12 @@ test("production host requires every deploy phase and every read-only method", (
       new RegExp(`production-host-adapter-missing:${hostMethod}`, "u"),
     );
   }
+  const { host: runnerHost } = fixture();
+  delete runnerHost.verifyControlPlaneTarget;
+  assert.throws(
+    () => createProductionHost(runnerHost, "runner"),
+    /production-host-adapter-missing:verifyControlPlaneTarget/u,
+  );
 });
 
 test("release artifact inventory copies and verifies deploy runtime and workspace dependencies", () => {
@@ -926,6 +1330,13 @@ test("fixture executes the whole deploy sequence with explicit attempt facts", a
   assert.deepEqual(records.map(({ state }) => state), [
     "STARTED", "ARTIFACT_PREPARED", "ARTIFACT_VERIFIED", "BACKED_UP", "SCHEMA_ADVANCED", "ACTIVATED", "VERIFIED", "SUCCEEDED",
   ]);
+});
+
+test("runner role selects its phase sequence from the role column and never calls database phases", async () => {
+  assert.deepEqual(deployPhasesForRole("runner").map(({ name }) => name), RUNNER_PHASES);
+  const { host, attempt, phaseCalls } = fixture();
+  assert.deepEqual(await executeUpgrade(host, attempt, "runner"), { ok: true });
+  assert.deepEqual(phaseCalls, RUNNER_PHASES);
 });
 
 test("a successful attempt invokes self-clear before releasing its resources", async () => {
@@ -993,6 +1404,21 @@ test("service verification failure rolls back before restoring services", async 
   assert.equal(result.ok, false);
   assert.equal(state.serving, "previous");
   assert.ok(calls.indexOf("rollback-build") < calls.indexOf("restore-services"));
+});
+
+test("runner registration verification failure uses the same rollback and restart recovery", async () => {
+  const { host, attempt, calls, phaseCalls, state } = fixture({ failure: "verify-services" });
+  const result = await executeUpgrade(host, attempt, "runner");
+  assert.equal(result.ok, false);
+  assert.equal(state.serving, "previous");
+  assert.deepEqual(phaseCalls, RUNNER_PHASES);
+  assert.ok(calls.indexOf("rollback-build") < calls.indexOf("restore-services"));
+});
+
+test("runner phase table rechecks the control-plane target immediately before publication", () => {
+  const names = deployPhasesForRole("runner").map(({ name }) => name);
+  assert.equal(names.indexOf("verify-control-plane-target") + 1, names.indexOf("publish-build"));
+  assert.equal(deployPhasesForRole("control-plane").some(({ name }) => name === "verify-control-plane-target"), false);
 });
 
 test("standalone builder creates a verified exact-commit release", () => {

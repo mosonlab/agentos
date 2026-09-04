@@ -8,6 +8,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
   realpathSync,
@@ -20,13 +21,15 @@ import { fileURLToPath } from "node:url";
 
 import {
   DeployFailure,
-  SERVICE_LABELS,
   decideInvocation,
   deployedBuildStampRefusal,
   dryRunDecision,
   executeUpgrade,
   failureOf,
+  generateServiceInventory,
   parseDeployArguments,
+  resolveRunnerCount,
+  resolveRunnerIdPrefix,
   shouldPersistFailure,
 } from "./quiet-window-lib.mjs";
 import {
@@ -55,8 +58,8 @@ import { runDeployCommand } from "./quiet-window-command.mjs";
 import {
   BARRIER_TIMEOUT_REASON,
   createBarrierWatchdog,
-  DEPLOY_BARRIER_TIMEOUT_MS,
   DEPLOY_STEP_TIMEOUT_MS,
+  deployBarrierTimeoutMsForRole,
   MIGRATION_DEPLOY_TIMEOUT_REASON,
   waitForEscalationClear,
   waitForQuietWithWatchdog,
@@ -71,6 +74,18 @@ import { verifyServiceInventory } from "./launchd-service-wrapper.mjs";
 import { serviceWrapperPath } from "./install-launchd.mjs";
 import { createServiceControl, describesStableWrapper } from "./service-control.mjs";
 import { resolveServicePlatform } from "./service-platform.mjs";
+import {
+  readRunnerControlPlaneRevision,
+  readRunnerTargetRevision,
+  requireRunnerDeployPreflight,
+  resolveDeployRoleOrFail,
+} from "./runner-role-target.mjs";
+import {
+  localRegistrationSnapshot,
+  readRunnerRegistry,
+  runnerIdsFromInventory,
+  runnerRegistrationRefusal,
+} from "./runner-role-verification.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -96,6 +111,10 @@ const DEPLOY_BARRIER_KEY = 1;
 const RETRYABLE_ESCALATION_REASONS = new Set([
   "remote-main-unreadable",
   "remote-main-read-timeout",
+  "control-plane-version-unreachable",
+  "control-plane-commit-unavailable",
+  "source-remote-unreadable",
+  "source-remote-read-timeout",
   "quiet-window-query-failed",
   "deploy-barrier-unavailable",
 ]);
@@ -237,6 +256,69 @@ const remoteMainRevision = async () => {
   return revision;
 };
 
+const sourceRemoteContainsCommit = async (revision) => {
+  const sourceRemote = process.env.DEPLOY_SOURCE_REMOTE;
+  if (!sourceRemote) fail("environment-unreadable", "DEPLOY_SOURCE_REMOTE-missing");
+  mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
+  const probe = mkdtempSync(join(STATE_DIR, "source-commit-probe-"));
+  try {
+    return await probeSourceRemoteCommit({
+      revision,
+      sourceRemote,
+      gitBinary: loadBinaries().git,
+      probeDirectory: probe,
+      run: command,
+    });
+  } finally {
+    rmSync(probe, { recursive: true, force: true });
+  }
+};
+
+export const probeSourceRemoteCommit = async ({
+  revision,
+  sourceRemote,
+  gitBinary,
+  probeDirectory,
+  run,
+  timeoutMs = DEPLOY_STEP_TIMEOUT_MS.sourceCommitProbe,
+}) => {
+  const options = {
+    capture: true,
+    timeoutMs,
+    timeoutReason: "source-remote-read-timeout",
+  };
+  const accessible = await run(gitBinary, ["ls-remote", sourceRemote], options);
+  if (accessible.code !== 0) fail("source-remote-unreadable", `exit-${accessible.code}`);
+  const initialized = await run(gitBinary, ["init", "--bare", probeDirectory], options);
+  if (initialized.code !== 0) fail("source-commit-probe-failed", `init-exit-${initialized.code}`);
+  const fetched = await run(gitBinary, [
+    "-C", probeDirectory, "fetch", "--no-tags", "--depth=1", sourceRemote, revision,
+  ], options);
+  if (fetched.code !== 0) {
+    const diagnosis = `${fetched.stderr ?? ""}\n${fetched.stdout ?? ""}`;
+    if (/(?:not our ref|couldn't find remote ref|unadvertised object|not a valid object|does not allow request)/iu.test(diagnosis)) {
+      fail("control-plane-commit-unavailable", revision);
+    }
+    fail("source-remote-unreadable", `fetch-exit-${fetched.code}`);
+  }
+  const resolved = await run(gitBinary, [
+    "-C", probeDirectory, "cat-file", "-e", `${revision}^{commit}`,
+  ], options);
+  return resolved.code === 0;
+};
+
+const targetRevision = async () => {
+  if (resolveDeployRoleOrFail() === "control-plane") return remoteMainRevision();
+  const runnerConfig = requireRunnerDeployPreflight(process.env);
+  const revision = await readRunnerTargetRevision({
+    apiBaseUrl: runnerConfig.apiBaseUrl,
+    sourceContainsCommit: sourceRemoteContainsCommit,
+    deployedCommit: readDeployedRevision(),
+  });
+  log(`PASS control-plane-version-read revision=${revision}`);
+  return revision;
+};
+
 const loadEnvironment = async () => {
   const envPath = environmentFilePath();
   if (!existsSync(envPath) || !statSync(envPath).isFile()) fail("environment-unreadable", ".env-missing-or-not-a-file");
@@ -261,18 +343,27 @@ const resolveExecutable = (variable, fallback) => {
 };
 
 let binaries = null;
+export const loadDeployBinaries = ({
+  deployRole,
+  resolveExecutableImpl = resolveExecutable,
+  backupConfigurationImpl = backupConfigurationFromEnvironment,
+}) => {
+  try {
+    return Object.freeze({
+      git: resolveExecutableImpl("DEPLOY_GIT_BINARY", "git"),
+      node: resolveExecutableImpl("DEPLOY_NODE_BINARY", "node"),
+      npm: resolveExecutableImpl("DEPLOY_NPM_BINARY", "npm"),
+      backup: deployRole === "control-plane" ? backupConfigurationImpl() : null,
+    });
+  } catch (error) {
+    fail("environment-unreadable", error instanceof Error ? error.message : String(error));
+  }
+};
+
 const loadBinaries = () => {
   if (binaries === null) {
-    try {
-      binaries = Object.freeze({
-        git: resolveExecutable("DEPLOY_GIT_BINARY", "git"),
-        node: resolveExecutable("DEPLOY_NODE_BINARY", "node"),
-        npm: resolveExecutable("DEPLOY_NPM_BINARY", "npm"),
-        backup: backupConfigurationFromEnvironment(),
-      });
-    } catch (error) {
-      fail("environment-unreadable", error instanceof Error ? error.message : String(error));
-    }
+    const deployRole = resolveDeployRoleOrFail();
+    binaries = loadDeployBinaries({ deployRole });
   }
   return binaries;
 };
@@ -300,11 +391,11 @@ const migrationTail = async () => {
   }
 };
 
-const blockingRuns = async () => {
+const blockingRuns = async (runnerIds = null) => {
   throwIfInterrupted();
   const db = await database();
   try {
-    const statement = blockingRunsStatement();
+    const statement = blockingRunsStatement(undefined, runnerIds);
     const runs = await db.$queryRawUnsafe(statement.sql, ...statement.parameters);
     throwIfInterrupted();
     return runs;
@@ -430,8 +521,8 @@ const acquireDeployBarrier = async () => {
   }
 };
 
-const waitForQuiet = (startWatchdog) => waitForQuietWithWatchdog({
-  blockingRuns,
+const waitForQuiet = (startWatchdog, blockingRunsForHost = () => blockingRuns()) => waitForQuietWithWatchdog({
+  blockingRuns: blockingRunsForHost,
   acquireBarrier: acquireDeployBarrier,
   startWatchdog,
   wait: () => sleep(POLL_MS),
@@ -498,7 +589,7 @@ const createDeployStartup = () => ({
     retryableReasons: RETRYABLE_ESCALATION_REASONS,
     retryCap: ESCALATION_RETRY_CAP,
   }),
-  readRemoteMain: remoteMainRevision,
+  readRemoteMain: targetRevision,
   persistFailure: (failure) => persistAndNotifyFailure(failure, "unknown", "unknown"),
 });
 
@@ -522,9 +613,9 @@ export const createDefaultServiceControl = () => createServiceControl({
   },
 });
 
-const serviceState = async (serviceControl) => {
+const serviceState = async (serviceControl, labels) => {
   const unavailable = [];
-  for (const label of SERVICE_LABELS) {
+  for (const label of labels) {
     if (!await serviceControl.isRunning(label)) unavailable.push(label);
   }
   return { ok: unavailable.length === 0, unavailable };
@@ -538,11 +629,17 @@ export const verifyStableServicePaths = async (serviceControl, {
   repositoryRoot = REPOSITORY_ROOT,
   environment = process.env,
   fetchImpl = fetch,
+  labels = generateServiceInventory(
+    resolveRunnerCount(environment),
+    resolveRunnerIdPrefix(environment),
+    resolveDeployRoleOrFail(environment),
+  ).map(({ label }) => label),
 } = {}) => {
   const wrapper = serviceWrapperPath(repositoryRoot);
   try {
     return await verifyServiceInventory({
       repositoryRoot,
+      labels,
       environment,
       start: async (invocation) => {
         let description;
@@ -593,7 +690,25 @@ const makeWritable = (root) => {
 export const createDeployHost = ({
   serviceControl = createDefaultServiceControl(),
   verifyRecoveredServices = verifyStableServicePaths,
+  environment = process.env,
+  deployRole = resolveDeployRoleOrFail(environment),
+  fetchImpl = fetch,
+  blockingRunsAdapter = null,
+  serviceVerificationTimeoutMs = 30_000,
+  serviceVerificationWait = sleep,
 } = {}) => {
+  const runnerConfig = deployRole === "runner" ? requireRunnerDeployPreflight(environment) : null;
+  const serviceInventory = generateServiceInventory(
+    resolveRunnerCount(environment),
+    resolveRunnerIdPrefix(environment),
+    deployRole,
+  );
+  const serviceLabels = serviceInventory.map(({ label }) => label);
+  const localRunnerIds = runnerIdsFromInventory(serviceInventory);
+  const scopedBlockingRuns = blockingRunsAdapter
+    ?? (() => blockingRuns(deployRole === "runner" ? localRunnerIds : null));
+  const apiBaseUrl = runnerConfig?.apiBaseUrl ?? null;
+  const operatorToken = runnerConfig?.operatorToken ?? null;
   let canonicalSyncRefusals = [];
   const notifyDeployOutcome = async (record) => notify(canonicalSyncNoticeRecord(record, canonicalSyncRefusals));
   return createProductionHost({
@@ -607,7 +722,7 @@ export const createDeployHost = ({
         log,
       });
     },
-    blockingRuns,
+    blockingRuns: scopedBlockingRuns,
     artifactState: async (attempt) => {
       try {
         const artifact = findReleaseArtifact({
@@ -620,7 +735,7 @@ export const createDeployHost = ({
         return { ok: false, reason: failure.reason };
       }
     },
-    serviceState: () => serviceState(serviceControl),
+    serviceState: () => serviceState(serviceControl, serviceLabels),
     backupState: async () => {
       const requested = loadBinaries().backup;
       try {
@@ -684,20 +799,21 @@ export const createDeployHost = ({
     },
     waitForQuiet: async (attempt) => {
       const revisions = attempt.requireFact("revisions");
+      const barrierTimeoutMs = deployBarrierTimeoutMsForRole(deployRole, serviceLabels.length);
       const { barrier, watchdog } = await waitForQuiet(() => createBarrierWatchdog({
-        timeoutMs: DEPLOY_BARRIER_TIMEOUT_MS,
+        timeoutMs: barrierTimeoutMs,
         escalationPath: ESCALATION_PATH,
         escalationRecord: {
           outcome: "failure",
           reason: BARRIER_TIMEOUT_REASON,
-          detail: `budget-${DEPLOY_BARRIER_TIMEOUT_MS}ms`,
+          detail: `budget-${barrierTimeoutMs}ms`,
           from: revisions.from,
           to: revisions.to,
         },
         onTimeout: async () => {
           const failure = new DeployFailure(
             BARRIER_TIMEOUT_REASON,
-            `budget-${DEPLOY_BARRIER_TIMEOUT_MS}ms`,
+            `budget-${barrierTimeoutMs}ms`,
           );
           if (!interruption.interruptWithFailure(failure)) return;
           log(`STOP ${failure.reason} detail=${failure.detail}`);
@@ -709,7 +825,7 @@ export const createDeployHost = ({
           log(`STOP ${failure.reason} detail=${failure.detail}`);
           interruption.interruptWithFailure(failure);
         },
-      }));
+      }), scopedBlockingRuns);
       log("PASS quiet-window deploy-barrier-held blockers=0");
       return { barrier, resources: [barrier, watchdog] };
     },
@@ -738,7 +854,7 @@ export const createDeployHost = ({
       };
     },
     verifyStableServicePaths: async () => {
-      await verifyStableServicePaths(serviceControl);
+      await verifyStableServicePaths(serviceControl, { environment, fetchImpl, labels: serviceLabels });
     },
     backup: async (attempt) => {
       const revisions = attempt.requireFact("revisions");
@@ -822,8 +938,14 @@ export const createDeployHost = ({
     },
     assertQuietBeforeRestart: async (attempt) => {
       if (!await attempt.requireFact("barrier").verify()) fail("deploy-barrier-lost", "exclusive-session-lock-not-held");
-      const blockers = await blockingRuns();
+      const blockers = await scopedBlockingRuns();
       if (blockers.length > 0) fail("quiet-window-lost", `blockers-${blockers.length}`);
+    },
+    verifyControlPlaneTarget: async (attempt) => {
+      const currentCommit = await readRunnerControlPlaneRevision({ apiBaseUrl, fetchImpl });
+      if (currentCommit !== attempt.targetCommit) {
+        fail("control-plane-version-changed", `${attempt.targetCommit}->${currentCommit}`);
+      }
     },
     publishBuild: async (attempt) => {
       const release = attempt.requireFact("verifiedRelease");
@@ -856,25 +978,62 @@ export const createDeployHost = ({
       };
     },
     restartServices: async () => {
-      for (const label of SERVICE_LABELS) {
+      const runnerRegistrationsBeforeRestart = deployRole === "runner"
+        ? localRegistrationSnapshot(await readRunnerRegistry({
+            apiBaseUrl,
+            operatorToken,
+            fetchImpl,
+          }), localRunnerIds)
+        : null;
+      for (const label of serviceLabels) {
         await serviceControl.restart(label, { reason: "service-restart-failed" });
       }
+      return runnerRegistrationsBeforeRestart === null ? undefined : { runnerRegistrationsBeforeRestart };
     },
     verifyServices: async (attempt) => {
       const revisions = attempt.requireFact("revisions");
-      const deadline = Date.now() + 30_000;
+      const deadline = Date.now() + serviceVerificationTimeoutMs;
       let lastReason = "not-ready";
       while (Date.now() < deadline) {
-        const state = await serviceState(serviceControl);
+        const state = await serviceState(serviceControl, serviceLabels);
         if (!state.ok) {
           const manager = serviceControl.platform === "linux" ? "systemd" : "launchd";
           lastReason = `${manager}-unavailable-${state.unavailable.join(",")}`;
         }
-        else {
+        else if (deployRole === "runner") {
+          try {
+            const payload = await readRunnerRegistry({
+              apiBaseUrl,
+              operatorToken,
+              fetchImpl,
+            });
+            const refusal = runnerRegistrationRefusal({
+              payload,
+              runnerIds: localRunnerIds,
+              before: attempt.requireFact("runnerRegistrationsBeforeRestart"),
+              targetCommit: revisions.to,
+            });
+            if (refusal === null) {
+              throwIfInterrupted();
+              return {
+                serviceVerification: {
+                  runnerIds: localRunnerIds,
+                  activatedBuildCommit: revisions.to,
+                },
+              };
+            }
+            lastReason = refusal;
+          } catch (error) {
+            if (error instanceof DeployFailure && error.reason !== "runner-registration-verification-unavailable") throw error;
+            lastReason = error instanceof DeployFailure
+              ? `${error.reason}-${error.detail}`
+              : error instanceof Error ? error.name : "probe-failed";
+          }
+        } else {
           try {
             const port = process.env.API_PORT ?? "3000";
-            const health = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2_000) });
-            const version = await fetch(`http://127.0.0.1:${port}/version`, { signal: AbortSignal.timeout(2_000) });
+            const health = await fetchImpl(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2_000) });
+            const version = await fetchImpl(`http://127.0.0.1:${port}/version`, { signal: AbortSignal.timeout(2_000) });
             const payload = version.ok ? await version.json() : {};
             if (health.ok && version.ok && payload.commit === revisions.to && payload.dirty === false) {
               throwIfInterrupted();
@@ -894,12 +1053,24 @@ export const createDeployHost = ({
             lastReason = error instanceof Error ? error.name : "probe-failed";
           }
         }
-        await sleep(1_000);
+        await serviceVerificationWait(1_000);
       }
       fail("service-verification-failed", lastReason);
     },
-    restorePreviousServices: async () => {
-      for (const label of SERVICE_LABELS) {
+    restorePreviousServices: async (attempt) => {
+      let runnerRegistrationsBeforeRestore = null;
+      let runnerRegistrationSnapshotFailure = null;
+      if (deployRole === "runner") {
+        try {
+          runnerRegistrationsBeforeRestore = localRegistrationSnapshot(
+            await readRunnerRegistry({ apiBaseUrl, operatorToken, fetchImpl }),
+            localRunnerIds,
+          );
+        } catch (error) {
+          runnerRegistrationSnapshotFailure = error;
+        }
+      }
+      for (const label of serviceLabels) {
         await serviceControl.restart(label, {
           reason: "previous-service-restore-failed",
           allowAfterInterrupt: true,
@@ -910,13 +1081,42 @@ export const createDeployHost = ({
       // The pointer has already been restored by the transaction coordinator.
       // Re-run the complete loaded-definition and readiness proof before the
       // rollback is allowed to become a proven recovery outcome.
-      await verifyRecoveredServices(serviceControl);
+      await verifyRecoveredServices(serviceControl, { environment, fetchImpl, labels: serviceLabels });
+      if (runnerRegistrationSnapshotFailure !== null) {
+        const failure = failureOf(runnerRegistrationSnapshotFailure);
+        fail("previous-service-verification-failed", `${failure.reason}-${failure.detail}`);
+      }
+      if (runnerRegistrationsBeforeRestore !== null) {
+        const deadline = Date.now() + serviceVerificationTimeoutMs;
+        const previousCommit = attempt.requireFact("revisions").from;
+        let lastReason = "not-ready";
+        do {
+          try {
+            const payload = await readRunnerRegistry({ apiBaseUrl, operatorToken, fetchImpl });
+            const refusal = runnerRegistrationRefusal({
+              payload,
+              runnerIds: localRunnerIds,
+              before: runnerRegistrationsBeforeRestore,
+              targetCommit: previousCommit,
+            });
+            if (refusal === null) return;
+            lastReason = refusal;
+          } catch (error) {
+            if (error instanceof DeployFailure && error.reason !== "runner-registration-verification-unavailable") throw error;
+            lastReason = error instanceof DeployFailure
+              ? `${error.reason}-${error.detail}`
+              : error instanceof Error ? error.name : "probe-failed";
+          }
+          await serviceVerificationWait(1_000);
+        } while (Date.now() < deadline);
+        fail("previous-service-verification-failed", lastReason);
+      }
     },
     escalate: writeEscalation,
     markEscalationNotified: async () => markEscalationNotified({ path: ESCALATION_PATH }),
     notify: notifyDeployOutcome,
     log,
-  });
+  }, deployRole);
 };
 
 // The failure path outside the deployment attempt has to know whether this
@@ -935,6 +1135,7 @@ const main = async () => {
     }
     return 0;
   }
+  const deployRole = resolveDeployRoleOrFail();
   const attempt = openDeploymentAttempt({
     deployRoot: REPOSITORY_ROOT,
     targetCommit: invocation.targetCommit,
@@ -944,13 +1145,13 @@ const main = async () => {
     retryEscalation: invocation.retryEscalation,
     ...(invocation.lock === null ? {} : { resources: [invocation.lock] }),
   });
-  const host = createDeployHost();
+  const host = createDeployHost({ deployRole });
   if (invocation.mode === "dry-run") {
-    const decision = await dryRunDecision(host, attempt);
+    const decision = await dryRunDecision(host, attempt, deployRole);
     for (const line of decision.lines) log(line);
     return !decision.artifact.ok || !decision.services.ok || !decision.backup.ok ? 1 : 0;
   }
-  const result = await executeUpgrade(host, attempt);
+  const result = await executeUpgrade(host, attempt, deployRole);
   if (result.ok && !result.skipped) pruneHistory();
   return result.ok ? 0 : 1;
 };

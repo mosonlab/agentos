@@ -14,6 +14,47 @@ same generated inventory. The release artifact also carries the resident
 merge-executor runtime, but that process is outside this activation set. The
 job never deploys an Anneal run workspace.
 
+## Runner-only host
+
+When runners live on a second host, set `AGENTOS_DEPLOY_ROLE=runner` while
+rendering that host's service and auto-deploy definitions. The unset value (or
+explicit `control-plane`) remains the role for the host that owns the API,
+Inbox, web, database, and canonical prompts. The install manifest records the
+role, and stage two refuses to install a manifest whose recorded role does not
+match the configured role.
+
+The runner role's service inventory contains only the configured
+`com.agentos.runner` labels, using `AGENTOS_RUNNER_COUNT` and
+`AGENTOS_RUNNER_ID_PREFIX`. The prefix is required for this role and must be
+host-specific and disjoint from the control-plane host's runner IDs; an empty
+prefix stops deployment preflight. It never installs, restarts, or verifies
+`com.agentos.api`, `com.agentos.inbox`, or `com.agentos.web`. Its phase table
+also omits `backup`, `guarded-migration`, `generate-prisma-client`,
+`canonical-prompt-sync`, and `verify-runtime-prisma-client`; a runner-only host
+does not back up or change the control-plane database or canonical prompts.
+
+Each runner deployment reads the control plane's `GET /version` from the
+configured `RUNNER_API_URL`, which must be the numeric-loopback HTTP origin
+`http://127.0.0.1:<port>` (normally a tunnel to the control-plane host). The
+runner host also needs `OPERATOR_TOKEN` because registration verification reads
+the operator-only `GET /runners` endpoint. These values and the required prefix
+are checked before an artifact is built. The deployment targets the reported
+clean `commit`, which must be present in the source remote before the runner
+builds its local artifact. This keeps the runner host on exactly the build the
+control plane is running. After building and acquiring the deploy barrier, it
+reads `/version` again and refuses to publish if the control plane advanced in
+the meantime. An unreachable or dirty control-plane build, an unreadable source
+remote, or a commit absent from the source remote stops preflight.
+
+Quiet-window blocking is scoped to active Runs whose `runnerId` belongs to this
+host's inventory. After restart, verification requires every local runner to
+register with the control plane again and for `GET /runners` to report each
+runner's `daemonVersion` as the deployed build commit. A missing registration
+or mismatched build fails verification, rolls `current` back to `previous`,
+and restarts the runners from the previous release. Recovery is complete only
+after every local runner registers again after that restart and reports the
+previous release's commit.
+
 ## Runtime layout
 
 ```text

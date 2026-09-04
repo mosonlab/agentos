@@ -11,11 +11,10 @@
  * origin. Reason codes exist only to say why a value was refused, and the
  * classification order is fixed so one value always yields one reason.
  *
- * `apps/web/src/lib/local-origin.ts` holds the second implementation, for the
- * Vite proxy. The two cannot import each other (different workspaces, different
- * toolchains), so `scripts/fixtures/local-api-origin-cases.json` is the shared
- * table both suites drive, and drift shows up as a failing test rather than as
- * two policies.
+ * `apps/web/src/lib/local-origin.ts` and the runner-only deployment target hold
+ * the other implementations. They cannot all share a runtime module (different
+ * workspaces and toolchains), so `scripts/fixtures/local-api-origin-cases.json`
+ * is the shared table their suites drive, and drift shows up as a failing test.
  */
 
 /** The whole accept decision. Anything this does not match is refused. */
