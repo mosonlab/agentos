@@ -3,6 +3,7 @@ stepIndex: 6
 layer: 5
 agent: regression-verifier
 approvalGate: false
+optional: false
 outputKind: regression-verification-v2
 priorOutputKinds: [implementation, sol-findings, blind-findings, fixed-implementation]
 attachmentsFromPrevious: true
@@ -19,9 +20,11 @@ task output. Do not perform or restate those mechanical operations yourself.
 Run `"${AGENTOS_TOOLS:?AGENTOS_TOOLS is required}/regression-verification.sh" prepare`. If it reports
 `refresh-conflict`, the final output is already persisted: record the outcome
 in the activity log and finish. Otherwise read the implementation summary,
-both review reports, and the fixed implementation with its dispositions from
-Anneal. Review the entire refreshed fix diff as one unit, account for every
-finding id, rerun focused regressions, and verify that the approved
+every present review report (`sol-findings` and, when instantiated,
+`blind-findings`), and the fixed implementation with its dispositions from
+Anneal. The blind review report may be absent when its optional step was
+omitted. Review the entire refreshed fix diff as one unit, account for every
+finding id in every present report, rerun focused regressions, and verify that the approved
 specification is preserved without a new defect. Do not modify code or repair
 a failure.
 

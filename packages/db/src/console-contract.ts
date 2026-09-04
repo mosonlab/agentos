@@ -58,6 +58,7 @@ export type TaskTemplateStep<DateTime = string> = {
   assigneeType: PrismaAssigneeType;
   prompt: string;
   approvalGate: boolean;
+  optional: boolean;
   outputKind: string;
   priorOutputKinds: string[];
   baseFromStepIndex: number | null;

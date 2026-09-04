@@ -83,6 +83,7 @@ test("canonical sources expose the exact layered Direct and Full graphs", async 
 
   assert.equal(direct.length, 8);
   assert.deepEqual(direct.map(({ layer }) => layer), [1, 2, 3, 3, 4, 5, 6, 7]);
+  assert.deepEqual(direct.map(({ optional }) => optional), [false, false, false, true, false, false, false, false]);
   assert.deepEqual(
     direct.slice(0, 2).map(({ stepIndex, name, agentName, outputKind, opensPullRequest }) => ({
       stepIndex, name, agentName, outputKind, opensPullRequest,
@@ -109,6 +110,7 @@ test("canonical sources expose the exact layered Direct and Full graphs", async 
   assert.match(direct[0]!.prompt, /inbox_ask/u);
   assert.equal(full.length, 12);
   assert.deepEqual(full.map(({ layer }) => layer), [1, 2, 3, 4, 5, 6, 6, 7, 8, 9, 10, 11]);
+  assert.deepEqual(full.map(({ optional }) => optional), [false, false, false, false, false, false, true, false, false, false, false, false]);
   for (const templateName of [DIRECT_TEMPLATE_NAME, INTEGRATOR_TEMPLATE_NAME]) {
     assert.equal(
       (await readdir(join(templatesRoot, templateName))).some((filename) => filename.includes("code-review-and-adjudication")),
@@ -131,7 +133,10 @@ test("canonical sources expose the exact layered Direct and Full graphs", async 
     if (librarian) assert.deepEqual(librarian.priorOutputKinds, ["implementation", "fixed-implementation"]);
     // The contract the removed adjudication node used to carry, now on the step that replaced it.
     const fix = steps.find(({ outputKind }) => outputKind === "fixed-implementation")!;
-    assert.match(fix.prompt, /`sol-findings` and `blind-findings`/u);
+    assert.match(fix.prompt, /`sol-findings`/u);
+    assert.match(fix.prompt, /`blind-findings`/u);
+    assert.match(fix.prompt, /blind review may be absent/u);
+    assert.match(fix.prompt, /every present report/u);
     assert.match(fix.prompt, /No adjudication step stands between the reviews and this one/u);
     assert.match(fix.prompt, /exactly one disposition per finding id/u);
     assert.match(fix.prompt, /ADOPTED.*REJECTED.*MERGED/u);
@@ -196,6 +201,7 @@ test("the pull-request workflow source exposes its exact four-step graph and pro
       layer: step.layer,
       agent: step.agentName,
       approvalGate: step.approvalGate,
+      optional: step.optional,
       outputKind: step.outputKind,
       priorOutputKinds: step.priorOutputKinds,
       attachmentsFromPrevious: step.attachmentsFromPrevious,
@@ -212,6 +218,7 @@ test("the pull-request workflow source exposes its exact four-step graph and pro
         layer: 1,
         agent: "senior-dev-luna",
         approvalGate: false,
+        optional: false,
         outputKind: "implementation",
         priorOutputKinds: [],
         attachmentsFromPrevious: false,
@@ -227,6 +234,7 @@ test("the pull-request workflow source exposes its exact four-step graph and pro
         layer: 2,
         agent: "review-coordinator-sol",
         approvalGate: false,
+        optional: false,
         outputKind: "sol-findings",
         priorOutputKinds: ["implementation"],
         attachmentsFromPrevious: true,
@@ -242,6 +250,7 @@ test("the pull-request workflow source exposes its exact four-step graph and pro
         layer: 2,
         agent: "review-coordinator-opus",
         approvalGate: false,
+        optional: false,
         outputKind: "blind-findings",
         priorOutputKinds: [],
         attachmentsFromPrevious: false,
@@ -257,6 +266,7 @@ test("the pull-request workflow source exposes its exact four-step graph and pro
         layer: 3,
         agent: "senior-dev",
         approvalGate: false,
+        optional: false,
         outputKind: "fixed-implementation",
         priorOutputKinds: ["sol-findings", "blind-findings"],
         attachmentsFromPrevious: true,
@@ -267,6 +277,11 @@ test("the pull-request workflow source exposes its exact four-step graph and pro
         spawnPolicy: null,
       },
     ],
+  );
+
+  assert.deepEqual(
+    (await loadTemplateStepSources(PR_TEMPLATE_NAME)).map(({ optional }) => optional),
+    [false, false, false, false],
   );
 
   const direct = await loadTemplateStepSources(DIRECT_TEMPLATE_NAME);
@@ -361,6 +376,32 @@ test("missing layer frontmatter is refused by the source loader", async () => {
       loadTemplateStepSources(DIRECT_TEMPLATE_NAME, root),
       /frontmatter must contain exactly .*layer/u,
     ),
+  );
+});
+
+test("optional is a required boolean frontmatter field in every canonical template", async () => {
+  for (const templateName of [INTEGRATOR_TEMPLATE_NAME, DIRECT_TEMPLATE_NAME, PR_TEMPLATE_NAME] as const) {
+    const firstStepFilename = templateName === PR_TEMPLATE_NAME
+      ? "01-implementation.md"
+      : templateName === DIRECT_TEMPLATE_NAME
+        ? "01-revalidate.md"
+        : "01-write-a-spec.md";
+    await withTemplateCopy(
+      templateName,
+      (root) => updateFrontmatter(root, templateName, firstStepFilename, (source) => source.replace(/^optional: .*\n/mu, "")),
+      (root) => assert.rejects(
+        loadTemplateStepSources(templateName, root),
+        /frontmatter must contain exactly .*optional/u,
+      ),
+    );
+  }
+});
+
+test("optional frontmatter must contain a strict boolean", async () => {
+  await withTemplateCopy(
+    DIRECT_TEMPLATE_NAME,
+    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "04-code-review-opus-blind.md", (source) => source.replace("optional: true\n", "optional: yes\n")),
+    (root) => assert.rejects(loadTemplateStepSources(DIRECT_TEMPLATE_NAME, root), /optional must be true or false/u),
   );
 });
 
@@ -473,6 +514,29 @@ test("source layers must be non-decreasing and bases must cross to a lower layer
   );
 });
 
+test("optional canonical steps obey entry, base, gate, and merge-tail invariants", async () => {
+  await withTemplateCopy(
+    DIRECT_TEMPLATE_NAME,
+    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "01-revalidate.md", (source) => source.replace("optional: false\n", "optional: true\n")),
+    (root) => assert.rejects(loadTemplateStepSources(DIRECT_TEMPLATE_NAME, root), /step 1 first_step_optional/u),
+  );
+  await withTemplateCopy(
+    DIRECT_TEMPLATE_NAME,
+    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "02-implementation.md", (source) => source.replace("optional: false\n", "optional: true\n")),
+    (root) => assert.rejects(loadTemplateStepSources(DIRECT_TEMPLATE_NAME, root), /step 3 base_step_optional 2/u),
+  );
+  await withTemplateCopy(
+    DIRECT_TEMPLATE_NAME,
+    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "07-merge-readiness.md", (source) => source.replace("optional: false\n", "optional: true\n")),
+    (root) => assert.rejects(loadTemplateStepSources(DIRECT_TEMPLATE_NAME, root), /step 7 gate_slot_step_optional/u),
+  );
+  await withTemplateCopy(
+    DIRECT_TEMPLATE_NAME,
+    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "06-regression-verification.md", (source) => source.replace("optional: false\n", "optional: true\n")),
+    (root) => assert.rejects(loadTemplateStepSources(DIRECT_TEMPLATE_NAME, root), /step 6 optional_step_precedes_merge_tail/u),
+  );
+});
+
 test("only the exact canonical graphs may contain a multi-node layer", async () => {
   await withTemplateCopy(
     DIRECT_TEMPLATE_NAME,
@@ -514,6 +578,7 @@ test("layer, requiresCommit, and dependency provisioning are structural fields i
     assigneeType: "AGENT",
     layer: expected.layer,
     approvalGate: expected.approvalGate,
+    optional: expected.optional,
     outputKind: expected.outputKind,
     attachmentsFromPrevious: expected.attachmentsFromPrevious,
     priorOutputKinds: expected.priorOutputKinds,
@@ -525,6 +590,7 @@ test("layer, requiresCommit, and dependency provisioning are structural fields i
   };
   assert.deepEqual(templateStepStructureDifferences(persisted, expected), []);
   assert.deepEqual(templateStepStructureDifferences({ ...persisted, layer: expected.layer + 1 }, expected), ["layer"]);
+  assert.deepEqual(templateStepStructureDifferences({ ...persisted, optional: !expected.optional }, expected), ["optional"]);
   assert.deepEqual(
     templateStepStructureDifferences({ ...persisted, requiresCommit: !expected.requiresCommit }, expected),
     ["requiresCommit"],

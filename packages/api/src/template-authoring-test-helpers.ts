@@ -129,6 +129,7 @@ export type ReplaceStepPayload = {
   assigneeAgentId: string | null;
   prompt: string;
   approvalGate: boolean;
+  optional: boolean;
   attachmentsFromPrevious: boolean;
   priorOutputKinds: string[];
   spawnPolicy: Record<string, unknown> | null;
@@ -150,6 +151,7 @@ export const stepPayload = (
   assigneeAgentId: seed.agents[0]!.id,
   prompt: `Do step ${index}`,
   approvalGate: false,
+  optional: false,
   attachmentsFromPrevious: false,
   priorOutputKinds: [],
   spawnPolicy: null,
@@ -190,6 +192,7 @@ export const stepSnapshot = (step: any) => ({
   assigneeAgentId: step.assigneeAgentId,
   prompt: step.prompt,
   approvalGate: step.approvalGate,
+  optional: step.optional,
   attachmentsFromPrevious: step.attachmentsFromPrevious,
   priorOutputKinds: step.priorOutputKinds,
   spawnPolicy: step.spawnPolicy,

@@ -44,14 +44,22 @@ export type InstantiateTemplateInput = {
   gates?: { spec?: boolean | undefined; merge?: boolean | undefined } | undefined;
 };
 
-type GateDefaults = { specGateDefault: boolean; mergeGateDefault: boolean };
+type ProjectInstantiationDefaults = {
+  specGateDefault: boolean;
+  mergeGateDefault: boolean;
+  skipOptionalSteps: boolean;
+};
 
-const DEFAULT_GATE_DEFAULTS: GateDefaults = { specGateDefault: false, mergeGateDefault: false };
+const DEFAULT_PROJECT_INSTANTIATION_DEFAULTS: ProjectInstantiationDefaults = {
+  specGateDefault: false,
+  mergeGateDefault: false,
+  skipOptionalSteps: false,
+};
 
 const resolvedApprovalGate = (
   step: { outputKind: string; approvalGate: boolean },
   gates: InstantiateTemplateInput["gates"],
-  defaults: GateDefaults,
+  defaults: ProjectInstantiationDefaults,
 ): boolean => {
   const slot = gateSlotOf(step);
   if (slot === "spec") return gates?.spec ?? defaults.specGateDefault ?? step.approvalGate;
@@ -174,12 +182,12 @@ export const triggerInstantiationName = (templateName: string, fireId: string): 
  * project defaults useful; every real Prisma transaction has this delegate
  * and therefore takes the lock before any Task can be written.
  */
-const readProjectGateDefaults = async (
+const readProjectInstantiationDefaults = async (
   tx: Prisma.TransactionClient,
   projectId: string,
-): Promise<GateDefaults> => {
+): Promise<ProjectInstantiationDefaults> => {
   const projectDelegate = (tx as unknown as { project?: unknown }).project;
-  if (projectDelegate === undefined) return DEFAULT_GATE_DEFAULTS;
+  if (projectDelegate === undefined) return DEFAULT_PROJECT_INSTANTIATION_DEFAULTS;
   const project = await lockProjectGateDefaults(tx, projectId);
   if (!project) throw templateRefusal("template_not_found", "Project not found");
   return project;
@@ -314,7 +322,7 @@ export const instantiateTemplate = async (
       });
       if (!template) throw templateRefusal("template_not_found", "Template not found in project");
       if (template.steps.length === 0) throw templateRefusal("template_has_no_steps", "Template has no steps");
-      const projectGateDefaults = await readProjectGateDefaults(tx, projectId);
+      const projectInstantiationDefaults = await readProjectInstantiationDefaults(tx, projectId);
       const slots = new Set(template.steps.map((step) => gateSlotOf(step)).filter((slot) => slot !== null));
       // Check the slots in a fixed order. In particular, a request that names
       // both absent slots must report the specification slot first and must
@@ -367,8 +375,11 @@ export const instantiateTemplate = async (
         ? template.steps.find((step) => step.outputKind === "revalidation") ?? null
         : null;
       const omitRevalidation = conditionalRevalidation !== null && !input.afterTaskId;
-      const instantiatedTemplateSteps = omitRevalidation
-        ? template.steps.filter((step) => step.id !== conditionalRevalidation.id)
+      const instantiatedTemplateSteps = omitRevalidation || projectInstantiationDefaults.skipOptionalSteps
+        ? template.steps.filter((step) => (
+          (!omitRevalidation || step.id !== conditionalRevalidation?.id)
+          && (!projectInstantiationDefaults.skipOptionalSteps || !step.optional)
+        ))
         : template.steps;
       if (instantiatedTemplateSteps.length === 0) {
         throw templateRefusal("template_has_no_instantiable_steps", "Template has no instantiable steps");
@@ -433,7 +444,7 @@ export const instantiateTemplate = async (
           // assignment decisions. It is replaced with the Agent-row-locked
           // value below before any Task is written.
           assigneeAgent: null,
-          approvalGate: resolvedApprovalGate(step, input.gates, projectGateDefaults),
+          approvalGate: resolvedApprovalGate(step, input.gates, projectInstantiationDefaults),
         };
       });
       const chainId = randomUUID();

@@ -3,6 +3,7 @@ stepIndex: 6
 layer: 6
 agent: review-coordinator-sol
 approvalGate: false
+optional: false
 outputKind: sol-findings
 priorOutputKinds: [implementation]
 attachmentsFromPrevious: true

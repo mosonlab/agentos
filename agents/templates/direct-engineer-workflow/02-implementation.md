@@ -3,6 +3,7 @@ stepIndex: 2
 layer: 2
 agent: senior-dev-luna
 approvalGate: false
+optional: false
 outputKind: implementation
 priorOutputKinds: []
 attachmentsFromPrevious: false

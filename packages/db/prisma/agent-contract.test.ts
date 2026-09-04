@@ -230,14 +230,16 @@ test("the canonical twelve-step layered template sources split review and preser
       { stepIndex: 12, layer: 11, agentName: "merge-integrator", outputKind: "merge-result" },
     ],
   );
+  assert.deepEqual(templateSteps.map(({ optional }) => optional), [false, false, false, false, false, false, true, false, false, false, false, false]);
   assert.equal(templateSteps.some((step) => step.agentName === "code-reviewer"), false);
   assert.equal(templateSteps.find((step) => step.stepIndex === 6)?.baseFromStepIndex, 5);
   assert.equal(templateSteps.find((step) => step.stepIndex === 7)?.attachmentsFromPrevious, false);
   assert.equal(templateSteps.find((step) => step.stepIndex === 8)?.attachmentsFromPrevious, true);
   assert.equal(templateSteps.find((step) => step.stepIndex === 10)?.attachmentsFromPrevious, true);
   const compoundFix = templateSteps.find((step) => step.stepIndex === 8)!.prompt;
-  assert.match(compoundFix, /Read both immutable review outputs from the preceding layer/u);
+  assert.match(compoundFix, /Read the immutable `sol-findings` review output/u);
   assert.match(compoundFix, /`sol-findings`[\s\S]*`blind-findings`/u);
+  assert.match(compoundFix, /blind review may be absent/u);
   assert.match(compoundFix, /No adjudication step stands between the reviews and this one/u);
   assert.match(compoundFix, /ADOPTED[\s\S]*REJECTED[\s\S]*MERGED/u);
   const compoundRegression = templateSteps.find((step) => step.stepIndex === 10)!.prompt;
@@ -246,7 +248,8 @@ test("the canonical twelve-step layered template sources split review and preser
   assert.match(compoundRegression, /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" review-fail/u);
   assert.match(compoundRegression, /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" finalize/u);
   assert.match(compoundRegression, /finalize exit 77[\s\S]*Repeat the full semantic verification/u);
-  assert.match(compoundRegression, /implementation summary,\s+both review reports/u);
+  assert.match(compoundRegression, /implementation summary,\s+every present review report/u);
+  assert.match(compoundRegression, /blind review report may be absent/u);
   assert.match(compoundRegression, /fixed implementation with its dispositions/u);
   assert.doesNotMatch(compoundRegression, /all\s+preceding Step outputs/u);
   assert.doesNotMatch(compoundRegression, /merge-lease\.sh|gate-dispatch\.sh|gateProof/u);
@@ -317,6 +320,7 @@ test("the direct template sources expose the layered review spine and mechanical
       { stepIndex: 8, layer: 7, agentName: "merge-integrator", outputKind: "merge-result" },
     ],
   );
+  assert.deepEqual(directTemplateSteps.map(({ optional }) => optional), [false, false, false, true, false, false, false, false]);
   // Only implementation opens the chain's pull request; the blind review
   // starts blind; regression verification reads the fix diff.
   assert.deepEqual(directTemplateSteps.filter((step) => step.requiresCommit).map((step) => step.stepIndex), [2]);
@@ -326,7 +330,8 @@ test("the direct template sources expose the layered review spine and mechanical
   assert.equal(directTemplateSteps.find((step) => step.stepIndex === 5)?.attachmentsFromPrevious, true);
   assert.equal(directTemplateSteps.find((step) => step.stepIndex === 6)?.attachmentsFromPrevious, true);
   const directFix = directTemplateSteps.find((step) => step.stepIndex === 5)!.prompt;
-  assert.match(directFix, /Read both immutable review outputs from the preceding layer/u);
+  assert.match(directFix, /Read the immutable `sol-findings` review output/u);
+  assert.match(directFix, /blind review may be absent/u);
   assert.match(directFix, /No adjudication step stands between the reviews and this one/u);
   const directRegression = directTemplateSteps.find((step) => step.stepIndex === 6)!.prompt;
   assert.match(directRegression, /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" prepare/u);
@@ -407,6 +412,7 @@ test("canonical prompt sync can detect every Markdown-owned structural field", a
     assigneeType: "AGENT",
     layer: expected.layer,
     approvalGate: expected.approvalGate,
+    optional: expected.optional,
     outputKind: expected.outputKind,
     attachmentsFromPrevious: expected.attachmentsFromPrevious,
     priorOutputKinds: expected.priorOutputKinds,
@@ -423,6 +429,7 @@ test("canonical prompt sync can detect every Markdown-owned structural field", a
     ["assigneeType", { ...persisted, assigneeType: "HUMAN" }],
     ["layer", { ...persisted, layer: expected.layer + 1 }],
     ["approvalGate", { ...persisted, approvalGate: !persisted.approvalGate }],
+    ["optional", { ...persisted, optional: !persisted.optional }],
     ["outputKind", { ...persisted, outputKind: "different-output" }],
     ["attachmentsFromPrevious", { ...persisted, attachmentsFromPrevious: !persisted.attachmentsFromPrevious }],
     ["priorOutputKinds", { ...persisted, priorOutputKinds: ["different-output"] }],

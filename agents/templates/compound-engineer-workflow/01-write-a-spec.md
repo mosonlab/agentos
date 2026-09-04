@@ -3,6 +3,7 @@ stepIndex: 1
 layer: 1
 agent: spec
 approvalGate: false
+optional: false
 outputKind: spec
 priorOutputKinds: []
 attachmentsFromPrevious: false

@@ -145,8 +145,8 @@ const closedReviewRunRefusal = (
 
 /**
  * With the adjudication node gone the fix step owns the dispositions: it reads
- * both immutable reports and decides each finding itself, so its output is the
- * only place that record can live.
+ * the immutable reports available in its review layer and decides each finding
+ * itself, so its output is the only place that record can live.
  */
 type FixedImplementationArtifact = CanonicalFixedImplementationArtifact;
 
@@ -176,10 +176,10 @@ type FixStepTask = {
 
 /**
  * The fix step's self-consistency is not enough: nothing inside its own body
- * proves it looked at both reviews. This is the adjudicator's old cross-check,
- * re-pointed at the step that took over its authority — the two immutable
- * sibling reports must exist, must be bound to the same range the fix started
- * from, and every finding id in them must carry exactly one disposition.
+ * proves it looked at the reviews. This is the adjudicator's old cross-check,
+ * re-pointed at the step that took over its authority — every present immutable
+ * sibling report must be bound to the same range the fix started from, and
+ * every finding id in them must carry exactly one disposition.
  */
 const fixedImplementationPersistenceRefusal = async (
   tx: DbTx,
@@ -248,6 +248,7 @@ const fixedImplementationPersistenceRefusal = async (
         ? isCanonicalSolFindingsStep(candidate.templateStep)
         : isCanonicalBlindFindingsStep(candidate.templateStep)
     ));
+    if (matches.length === 0) continue;
     if (matches.length !== 1 || !matches[0]!.stepOutput || matches[0]!.stepOutput!.kind !== kind) {
       return `fixed-implementation requires exactly one immutable ${kind} sibling output`;
     }
@@ -273,7 +274,11 @@ const fixedImplementationPersistenceRefusal = async (
     }
     reports.push(report.data);
   }
-  if (reports[0]!.reviewedBase !== reports[1]!.reviewedBase) {
+  if (reports.length === 0) {
+    return "fixed-implementation requires at least one immutable review sibling output";
+  }
+  const reviewedBase = reports[0]!.reviewedBase;
+  if (reports.some((report) => report.reviewedBase !== reviewedBase)) {
     return "fixed-implementation sibling reviews disagree on the reviewed base";
   }
   const sourceIds = new Set(reports.flatMap((report) => report.findings).map((finding) => finding.id));

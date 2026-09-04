@@ -841,8 +841,8 @@ test("canonical unbound direct instantiation retains the seven-task prompt snaps
     { name: "snapshot chain: Implementation", descriptionSha256: "45327aeb86fc7e98a76ef4052278cee29ceb38a601aeb65225024b87708225d0" },
     { name: "snapshot chain: Code review (Sol)", descriptionSha256: "cea58637cbbf2616a41db1864a7d22fa9c20472b61e673a2d8b1312fb1691d2a" },
     { name: "snapshot chain: Code review (Opus blind)", descriptionSha256: "af02f099a6e2b6b10f3ea2b31b8bcfd06a057cd91b134c16a3df552690fc979b" },
-    { name: "snapshot chain: Apply review fixes", descriptionSha256: "ba850c7de0ee4d19abe6e6f32d22ffa8e1731abe52cbb61d0ea00996c037e5ad" },
-    { name: "snapshot chain: Regression verification", descriptionSha256: "29e3eb38fc11883aa8405110745ece9a3811cbe3796ff60824dad3e1939638e8" },
+    { name: "snapshot chain: Apply review fixes", descriptionSha256: "48acd5d056751e4c5c84cb5e49baa42660d8ae6f84ada36b0c34c2554c4d3389" },
+    { name: "snapshot chain: Regression verification", descriptionSha256: "612c53d486907ad20010bd979b1f4d3524244233e2df0ac9b7ba1ab411ab1a62" },
     { name: "snapshot chain: Merge authorization", descriptionSha256: "6cc850c691d3334a0ba8e4b26b24acdc3c7ab70c4b8cbac1fccb65ee708a7da7" },
     { name: "snapshot chain: Merge execution", descriptionSha256: "6f3ee10eef0967fec9bfdb09a73ab8b9f5e07aa3e4548e48d1174e2a90602a53" },
   ]);
@@ -865,23 +865,29 @@ test("instantiation resolves only the two gate slots from overrides then project
       id: "step-spec", stepIndex: 1, name: "Specification", prompt: "spec", outputKind: "spec",
       attachmentsFromPrevious: false, priorOutputKinds: [], assigneeType: AssigneeType.AGENT,
       assigneeAgentId: "agent-spec", assigneeAgent: agents[0], approvalGate: false,
-      opensPullRequest: false, layer: 1, baseFromStepIndex: null, runner: null,
+      opensPullRequest: false, layer: 1, baseFromStepIndex: null, runner: null, optional: false,
     },
     {
       id: "step-work", stepIndex: 2, name: "Work", prompt: "work", outputKind: "review",
       attachmentsFromPrevious: true, priorOutputKinds: ["spec"], assigneeType: AssigneeType.AGENT,
       assigneeAgentId: "agent-work", assigneeAgent: agents[1], approvalGate: true,
-      opensPullRequest: false, layer: 2, baseFromStepIndex: null, runner: null,
+      opensPullRequest: false, layer: 2, baseFromStepIndex: null, runner: null, optional: true,
     },
     {
-      id: "step-merge", stepIndex: 3, name: "Readiness", prompt: "merge", outputKind: "merge-authorization",
-      attachmentsFromPrevious: true, priorOutputKinds: ["review"], assigneeType: AssigneeType.AGENT,
+      id: "step-retained", stepIndex: 3, name: "Retained work", prompt: "retained", outputKind: "revised-plan",
+      attachmentsFromPrevious: true, priorOutputKinds: ["spec"], assigneeType: AssigneeType.AGENT,
+      assigneeAgentId: "agent-work", assigneeAgent: agents[1], approvalGate: true,
+      opensPullRequest: false, layer: 3, baseFromStepIndex: null, runner: null, optional: false,
+    },
+    {
+      id: "step-merge", stepIndex: 4, name: "Readiness", prompt: "merge", outputKind: "merge-authorization",
+      attachmentsFromPrevious: true, priorOutputKinds: ["revised-plan"], assigneeType: AssigneeType.AGENT,
       assigneeAgentId: "agent-merge", assigneeAgent: agents[2], approvalGate: false,
-      opensPullRequest: false, layer: 3, baseFromStepIndex: null, runner: null,
+      opensPullRequest: false, layer: 4, baseFromStepIndex: null, runner: null, optional: false,
     },
   ];
   const template = { id: "template-gates", name: "compound-fixture", variables: [], steps };
-  const projectDefaults = { specGateDefault: false, mergeGateDefault: false };
+  const projectDefaults = { specGateDefault: false, mergeGateDefault: false, skipOptionalSteps: false };
   const created: Array<Record<string, unknown>> = [];
   const tx = {
     $queryRaw: async (query: TemplateStringsArray | Prisma.Sql) => {
@@ -910,11 +916,12 @@ test("instantiation resolves only the two gate slots from overrides then project
   } as unknown as PrismaClient;
 
   const instantiate = async (
-    defaults: { specGateDefault: boolean; mergeGateDefault: boolean },
+    defaults: { specGateDefault: boolean; mergeGateDefault: boolean; skipOptionalSteps?: boolean },
     gates?: { spec?: boolean; merge?: boolean },
   ) => {
     projectDefaults.specGateDefault = defaults.specGateDefault;
     projectDefaults.mergeGateDefault = defaults.mergeGateDefault;
+    projectDefaults.skipOptionalSteps = defaults.skipOptionalSteps ?? false;
     created.length = 0;
     return instantiateTemplate(db, "project-1", template.id, {
       repoId: "repo-1", variables: {}, autoStart: false, name: "gate matrix", gates,
@@ -940,8 +947,21 @@ test("instantiation resolves only the two gate slots from overrides then project
   ];
   for (const [defaults, gates, specGate, mergeGate] of matrix) {
     const result = await instantiate(defaults, gates);
-    assert.deepEqual(result.tasks.map((task) => task.approvalGate), [specGate, true, mergeGate]);
+    assert.deepEqual(result.tasks.map((task) => task.approvalGate), [specGate, true, true, mergeGate]);
   }
+
+  const sparse = await instantiate({
+    specGateDefault: false,
+    mergeGateDefault: false,
+    skipOptionalSteps: true,
+  });
+  assert.deepEqual(sparse.tasks.map((task) => task.chainIndex), [1, 3, 4]);
+  assert.deepEqual(sparse.tasks.map((task) => task.chainLayer), [1, 3, 4]);
+  assert.deepEqual(sparse.tasks.map((task) => task.name), [
+    "gate matrix: Specification",
+    "gate matrix: Retained work",
+    "gate matrix: Readiness",
+  ]);
 });
 
 test("instantiate refuses absent gate slots before creating any task and checks spec first", async () => {

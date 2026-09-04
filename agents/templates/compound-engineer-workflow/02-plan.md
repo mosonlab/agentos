@@ -3,6 +3,7 @@ stepIndex: 2
 layer: 2
 agent: plan
 approvalGate: false
+optional: false
 outputKind: plan
 priorOutputKinds: [spec]
 attachmentsFromPrevious: true

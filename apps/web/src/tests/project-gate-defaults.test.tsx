@@ -17,6 +17,7 @@ const project = (overrides: Partial<Project> = {}): Project => ({
   maxSessionsPerTask: 3,
   specGateDefault: false,
   mergeGateDefault: false,
+  skipOptionalSteps: false,
   spendCap: null,
   createdAt: "2026-09-01T00:00:00.000Z",
   updatedAt: "2026-09-01T00:00:00.000Z",
@@ -52,10 +53,12 @@ test("project detail renders independent gate defaults and sends one field per i
   );
   try {
     const switches = [...page.container.querySelectorAll('[role="switch"]')];
-    assert.equal(switches.length, 2);
+    assert.equal(switches.length, 3);
     assert.equal(switches[0]?.getAttribute("aria-label"), "Require approval after specification");
     assert.equal(switches[0]?.getAttribute("data-state"), "checked");
     assert.equal(switches[1]?.getAttribute("data-state"), "unchecked");
+    assert.equal(switches[2]?.getAttribute("aria-label"), "Skip optional template steps");
+    assert.equal(switches[2]?.getAttribute("data-state"), "unchecked");
 
     await page.press("Require approval before merge");
     const patches = requests.filter(({ method, path }) => method === "PATCH" && path === "/projects/project-1");

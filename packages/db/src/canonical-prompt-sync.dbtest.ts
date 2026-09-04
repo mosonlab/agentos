@@ -114,6 +114,25 @@ const ADJUDICATION_STEPS = {
   "compound-engineer-workflow": { stepIndex: 8, layer: 7, baseFromStepIndex: 5 },
 } as const;
 
+/**
+ * Prompt-only rollover fixtures must restore every prompt byte from before
+ * optional review omission, not just the older Regression script path. The
+ * generation digest authenticates the whole template.
+ */
+const restorePreOptionalReviewPrompt = (prompt: string): string => prompt
+  .replace(
+    "Read the immutable `sol-findings` review output and, when present, the immutable `blind-findings` output through their Anneal step outputs. The blind review may be absent when its optional step was omitted; when it is absent, the Sol report is the sole report. Verify that every present report's reviewed head is the HEAD you are about to fix. When both reports are present, also verify that they report the same reviewed base and the same reviewed head.",
+    "Read both immutable review outputs from the preceding layer — `sol-findings` and `blind-findings` — through their Anneal step outputs, and verify both report the same reviewed base and the same reviewed head, and that the head they reviewed is the HEAD you are about to fix.",
+  )
+  .replace(
+    "Record exactly one disposition per finding id across every present report",
+    "Record exactly one disposition per finding id across both reports",
+  )
+  .replace(
+    "Otherwise read the implementation summary,\nevery present review report (`sol-findings` and, when instantiated,\n`blind-findings`), and the fixed implementation with its dispositions from\nAnneal. The blind review report may be absent when its optional step was\nomitted. Review the entire refreshed fix diff as one unit, account for every\nfinding id in every present report, rerun focused regressions, and verify that the approved",
+    "Otherwise read the implementation summary,\nboth review reports, and the fixed implementation with its dispositions from\nAnneal. Review the entire refreshed fix diff as one unit, account for every\nfinding id, rerun focused regressions, and verify that the approved",
+  );
+
 const downgradeDirectTemplateToHistoricalSevenStep = async (projectId: string): Promise<void> => {
   const template = await prisma.taskTemplate.findUniqueOrThrow({
     where: { projectId_name: { projectId, name: "direct-engineer-workflow" } },
@@ -130,6 +149,7 @@ const downgradeDirectTemplateToHistoricalSevenStep = async (projectId: string): 
         layer: step.layer - 1,
         baseFromStepIndex: step.baseFromStepIndex === null ? null : step.baseFromStepIndex - 1,
         provisionDependencies: true,
+        optional: false,
       },
     });
   }
@@ -233,6 +253,7 @@ test("sync creates the canonical-project PR template when a same-name row exists
       assigneeType: step.assigneeType,
       runner: step.runner,
       approvalGate: step.approvalGate,
+      optional: step.optional,
       outputKind: step.outputKind,
       prompt: step.prompt,
       opensPullRequest: step.opensPullRequest,
@@ -289,12 +310,19 @@ test("sync rolls the checkout Regression prompt generation once and preserves ch
   for (const template of templates) {
     await prisma.taskTemplateStep.updateMany({
       where: { taskTemplateId: template.id },
-      data: { provisionDependencies: true },
+      data: { provisionDependencies: true, optional: false },
     });
     const regression = template.steps.find(({ outputKind }) => outputKind === "regression-verification-v2");
     assert.ok(regression);
     assert.equal(regression.prompt.split(runnerResolver).length - 1, 3);
-    const outgoingPrompt = regression.prompt.replaceAll(runnerResolver, retiredResolver);
+    const fix = template.steps.find(({ outputKind }) => outputKind === "fixed-implementation");
+    assert.ok(fix);
+    await prisma.taskTemplateStep.update({
+      where: { id: fix.id },
+      data: { prompt: restorePreOptionalReviewPrompt(fix.prompt) },
+    });
+    const outgoingPrompt = restorePreOptionalReviewPrompt(regression.prompt)
+      .replaceAll(runnerResolver, retiredResolver);
     assert.doesNotMatch(outgoingPrompt, /AGENTOS_TOOLS/u);
     await prisma.taskTemplateStep.update({ where: { id: regression.id }, data: { prompt: outgoingPrompt } });
 
@@ -395,7 +423,7 @@ test("sync rolls parked and not-yet-started v1 chains forward without changing t
   for (const template of templates) {
     await prisma.taskTemplateStep.updateMany({
       where: { taskTemplateId: template.id },
-      data: { provisionDependencies: true },
+      data: { provisionDependencies: true, optional: false },
     });
     await prisma.taskTemplateStep.updateMany({
       where: { taskTemplateId: template.id, outputKind: "regression-verification-v2" },
@@ -522,7 +550,7 @@ test("sync rolls the exact adjudication-era graphs forward without touching inst
     const adjudication = ADJUDICATION_STEPS[template.name as keyof typeof ADJUDICATION_STEPS];
     await prisma.taskTemplateStep.updateMany({
       where: { taskTemplateId: template.id },
-      data: { provisionDependencies: true },
+      data: { provisionDependencies: true, optional: false },
     });
     // Walk down so the (template, stepIndex) unique never collides while the
     // hole opens; every step the adjudication node preceded also sat one layer
@@ -662,7 +690,7 @@ test("sync rolls the pre-zero-gate compound graph forward and leaves the direct 
   // zero-gate transition, and nothing else about it moved.
   await prisma.taskTemplateStep.updateMany({
     where: { taskTemplateId: full.id },
-    data: { provisionDependencies: true },
+    data: { provisionDependencies: true, optional: false },
   });
   await prisma.taskTemplateStep.updateMany({
     where: { taskTemplateId: full.id, stepIndex: { in: [1, 4] } },

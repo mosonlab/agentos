@@ -1,0 +1,5 @@
+ALTER TABLE "TaskTemplateStep"
+ADD COLUMN "optional" BOOLEAN NOT NULL DEFAULT false;
+
+ALTER TABLE "Project"
+ADD COLUMN "skipOptionalSteps" BOOLEAN NOT NULL DEFAULT false;
