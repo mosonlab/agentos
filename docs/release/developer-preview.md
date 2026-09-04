@@ -229,7 +229,8 @@ prompt, or refused write leaves the database untouched. Anneal sets
 `SSH_AUTH_SOCK` is not passed into its controlled Git environment.
 
 The runner's default `PATH` is
-`/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`. If
+`/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin` on macOS and
+`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin` on Linux. If
 `command -v codex` is outside it, set `CODEX_BINARY` to the absolute executable
 path or set `RUNNER_PATH` in `.env`.
 
@@ -347,7 +348,7 @@ telling you something specific.
 | --- | --- |
 | The console shows one blocking screen saying local configuration was refused | The API answered 401 or 403. `.env` and the running API disagree about the operator token. Regenerating configuration is a recovery, not a retry — see §3. |
 | The console says the control plane did not answer | `npm run dev:api` is not running, or not on `127.0.0.1:3000`. |
-| The wizard's Install button is inactive and the Codex step says the CLI was not found | The runner reported that `codex --version` did not answer. Check the fixed default `RUNNER_PATH` described in step 7, then set `CODEX_BINARY` or `RUNNER_PATH` and restart the runner. |
+| The wizard's Install button is inactive and the Codex step says the CLI was not found | The runner reported that `codex --version` did not answer. Check the platform default `PATH` described in step 7, then set `CODEX_BINARY` or `RUNNER_PATH` and restart the runner. |
 | The wizard says Codex is not signed in | Run `codex login` yourself, in a terminal, then restart the runner. Nothing in Anneal runs it for you or stores what it produces. |
 | The wizard says it is waiting for the local runner | Nothing has reported yet, or the last report is more than a minute old. Start `npm run dev:runner`; the screen updates on its own. This is not a failure and does not mean anything is missing. |
 | `STOP release-migrate …` or `STOP preflight …` | See [`migration-and-recovery.md`](migration-and-recovery.md), which lists every condition. |
