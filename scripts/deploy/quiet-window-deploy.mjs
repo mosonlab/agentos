@@ -58,8 +58,8 @@ import { runDeployCommand } from "./quiet-window-command.mjs";
 import {
   BARRIER_TIMEOUT_REASON,
   createBarrierWatchdog,
-  DEPLOY_BARRIER_TIMEOUT_MS,
   DEPLOY_STEP_TIMEOUT_MS,
+  deployBarrierTimeoutMsForRole,
   MIGRATION_DEPLOY_TIMEOUT_REASON,
   waitForEscalationClear,
   waitForQuietWithWatchdog,
@@ -766,20 +766,21 @@ export const createDeployHost = ({
     },
     waitForQuiet: async (attempt) => {
       const revisions = attempt.requireFact("revisions");
+      const barrierTimeoutMs = deployBarrierTimeoutMsForRole(deployRole, serviceLabels.length);
       const { barrier, watchdog } = await waitForQuiet(() => createBarrierWatchdog({
-        timeoutMs: DEPLOY_BARRIER_TIMEOUT_MS,
+        timeoutMs: barrierTimeoutMs,
         escalationPath: ESCALATION_PATH,
         escalationRecord: {
           outcome: "failure",
           reason: BARRIER_TIMEOUT_REASON,
-          detail: `budget-${DEPLOY_BARRIER_TIMEOUT_MS}ms`,
+          detail: `budget-${barrierTimeoutMs}ms`,
           from: revisions.from,
           to: revisions.to,
         },
         onTimeout: async () => {
           const failure = new DeployFailure(
             BARRIER_TIMEOUT_REASON,
-            `budget-${DEPLOY_BARRIER_TIMEOUT_MS}ms`,
+            `budget-${barrierTimeoutMs}ms`,
           );
           if (!interruption.interruptWithFailure(failure)) return;
           log(`STOP ${failure.reason} detail=${failure.detail}`);

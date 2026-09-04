@@ -18,6 +18,7 @@ import {
   DEPLOY_BARRIER_TIMEOUT_MS,
   DEPLOY_BARRIER_WATCHDOG_MARGIN_MS,
   DEPLOY_STEP_TIMEOUT_MS,
+  deployBarrierTimeoutMsForRole,
   waitForQuietWithWatchdog,
   waitForEscalationClear,
 } from "./quiet-window-deadlines.mjs";
@@ -87,6 +88,8 @@ test("deploy deadlines are step-specific and preserve the observed build margin"
       + DEPLOY_BARRIER_WATCHDOG_MARGIN_MS,
   );
   assert.ok(DEPLOY_BARRIER_TIMEOUT_MS > DEPLOY_BARRIER_BUDGETED_WORK_MS);
+  assert.equal(deployBarrierTimeoutMsForRole("control-plane"), DEPLOY_BARRIER_TIMEOUT_MS);
+  assert.ok(deployBarrierTimeoutMsForRole("runner", 6) < DEPLOY_BARRIER_TIMEOUT_MS);
   assert.equal(new Set(Object.values(DEPLOY_STEP_TIMEOUT_MS)).size > 1, true);
 });
 
