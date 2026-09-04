@@ -244,7 +244,7 @@ const reportMirrorMiss = (mirrorPath: string): void => {
  * verdict (and no bytes are accepted).
  */
 export const createMirrorBackedSpecificationReader = (
-  githubReader: SpecificationReader | null,
+  githubReader: SpecificationReader,
   options: MirrorSpecificationReaderOptions = {},
 ): SpecificationReader => {
   const root = resolve(repoMirrorRoot(options));
@@ -268,9 +268,6 @@ export const createMirrorBackedSpecificationReader = (
       }
       if (local !== null) return local;
       reportMirrorMiss(mirrorPath);
-      if (!githubReader) {
-        throw new MirrorSpecificationReadError(mirrorPath, "mirror-miss-and-github-reader-unavailable");
-      }
       // Preserve the supplied reader's error type (notably GitHubReadError's
       // timeout/transport/permission classification) so claim-side retry
       // policy can make the same decision it would have made without a mirror.

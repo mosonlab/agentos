@@ -492,7 +492,7 @@ const addTickDelta = (result: BaseDriftRecoveryTickResult, delta: RecoveryTickDe
 
 export const baseDriftRecoveryTick = async (
   db: PrismaClient,
-  reader: PullRequestReader | null = createGitHubReader(),
+  reader: PullRequestReader = createGitHubReader(process.env.GITHUB_READ_TOKEN ?? ""),
   now = new Date(),
   limit = 5,
 ): Promise<BaseDriftRecoveryTickResult> => {
@@ -541,11 +541,6 @@ export const baseDriftRecoveryTick = async (
         return attempt.status === MergeRecoveryStatus.VALIDATING;
       });
       if (!validation) continue;
-      if (!reader) {
-        const decision = classifyFresh({ kind: "reader-unavailable" });
-        addTickDelta(result, await settleRecovery(db, settlementTask, candidate.stopId, decision));
-        continue;
-      }
       let snapshot: PullRequestSnapshot;
       let authorizedAdvance: { status: string; behindBy: number } | null = null;
       let observedAdvance: { status: string; behindBy: number } | null = null;
@@ -602,7 +597,7 @@ export const baseDriftRecoveryTick = async (
 
 export const startBaseDriftRecoveryWorker = (
   db: PrismaClient,
-  reader: PullRequestReader | null = createGitHubReader(),
+  reader: PullRequestReader = createGitHubReader(process.env.GITHUB_READ_TOKEN ?? ""),
 ): ReturnType<typeof setInterval> => {
   let inFlight = false;
   const run = (): void => {

@@ -313,7 +313,9 @@ test("an ordinary base-drift activity cannot expose a RUNNING source Run to reco
   assert.equal(activity.status, 201, JSON.stringify(activity.body));
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.integratorTask!.id } })).status, "DOING");
 
-  assert.deepEqual(await baseDriftRecoveryTick(db, null), {
+  assert.deepEqual(await baseDriftRecoveryTick(db, {
+    readPullRequest: async () => { throw new Error("unexpected GitHub read"); },
+  }), {
     examined: 0,
     recovered: 0,
     exhausted: 0,

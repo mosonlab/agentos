@@ -116,7 +116,7 @@ export type EvidenceTickResult = { claimed: number; filled: number; unavailable:
  */
 export const evidenceTick = async (
   db: PrismaClient,
-  reader: PullRequestReader | null,
+  reader: PullRequestReader,
   now = new Date(),
   limit = 5,
 ): Promise<EvidenceTickResult> => {
@@ -152,43 +152,39 @@ export const evidenceTick = async (
     // targetBranch — the same durable value the claim route carries as
     // `pullRequestBase` — not the shared chain head every later run targets.
     const baseRef = await chainBaseRefFor(db, request);
-    if (!reader) {
-      lastError = "GITHUB_READ_TOKEN is not configured";
-    } else {
-      const attempts = evidenceAttempts();
-      const deadline = evidenceReadTimeoutMs();
-      for (let attempt = 1; attempt <= attempts && !filled; attempt += 1) {
-        const controller = new AbortController();
-        let deadlinePassed: () => void = () => {};
-        const timer = setTimeout(() => { controller.abort(); deadlinePassed(); }, deadline);
-        try {
-          // No transaction is open for the duration of this call. That is the
-          // property SF-2 asks for and the tests assert.
-          //
-          // The deadline is enforced here rather than delegated to the reader.
-          // Aborting the signal only asks a cooperative reader to stop; racing
-          // it is what makes the bound hold against one that does not, and the
-          // bound is the point — a stalled read must never become a card the
-          // human waits on indefinitely.
-          const snapshot = await Promise.race([
-            reader.readPullRequest(request.repository, request.prNumber, baseRef, controller.signal),
-            new Promise<never>((_resolve, reject) => {
-              deadlinePassed = () => { reject(new GitHubReadError(`merge evidence read exceeded ${deadline}ms`, "timeout")); };
-            }),
-          ]);
-          const evidence = evidenceFromSnapshot(snapshot, request.nonce);
-          if ("error" in evidence) { lastError = evidence.error; continue; }
-          const written = await db.inboxMessage.updateMany({
-            where: { id: request.cardId, status: InboxStatus.OPEN, body: EVIDENCE_PLACEHOLDER_BODY },
-            data: { body: humanReadable(evidence, snapshot), nextDeliveryAt: now },
-          });
-          if (written.count === 1) { filled = true; result.filled += 1; }
-          else { filled = true; }
-        } catch (error: unknown) {
-          lastError = error instanceof Error ? error.message : "unknown read failure";
-        } finally {
-          clearTimeout(timer);
-        }
+    const attempts = evidenceAttempts();
+    const deadline = evidenceReadTimeoutMs();
+    for (let attempt = 1; attempt <= attempts && !filled; attempt += 1) {
+      const controller = new AbortController();
+      let deadlinePassed: () => void = () => {};
+      const timer = setTimeout(() => { controller.abort(); deadlinePassed(); }, deadline);
+      try {
+        // No transaction is open for the duration of this call. That is the
+        // property SF-2 asks for and the tests assert.
+        //
+        // The deadline is enforced here rather than delegated to the reader.
+        // Aborting the signal only asks a cooperative reader to stop; racing
+        // it is what makes the bound hold against one that does not, and the
+        // bound is the point — a stalled read must never become a card the
+        // human waits on indefinitely.
+        const snapshot = await Promise.race([
+          reader.readPullRequest(request.repository, request.prNumber, baseRef, controller.signal),
+          new Promise<never>((_resolve, reject) => {
+            deadlinePassed = () => { reject(new GitHubReadError(`merge evidence read exceeded ${deadline}ms`, "timeout")); };
+          }),
+        ]);
+        const evidence = evidenceFromSnapshot(snapshot, request.nonce);
+        if ("error" in evidence) { lastError = evidence.error; continue; }
+        const written = await db.inboxMessage.updateMany({
+          where: { id: request.cardId, status: InboxStatus.OPEN, body: EVIDENCE_PLACEHOLDER_BODY },
+          data: { body: humanReadable(evidence, snapshot), nextDeliveryAt: now },
+        });
+        if (written.count === 1) { filled = true; result.filled += 1; }
+        else { filled = true; }
+      } catch (error: unknown) {
+        lastError = error instanceof Error ? error.message : "unknown read failure";
+      } finally {
+        clearTimeout(timer);
       }
     }
 
@@ -226,7 +222,7 @@ const chainBaseRefFor = async (db: PrismaClient, request: PendingEvidenceRequest
 
 export const startEvidenceWorker = (
   db: PrismaClient,
-  reader: PullRequestReader | null = createGitHubReader(),
+  reader: PullRequestReader = createGitHubReader(process.env.GITHUB_READ_TOKEN ?? ""),
 ): ReturnType<typeof setInterval> | null => {
   const interval = evidencePollIntervalMs();
   const timer = setInterval(() => {

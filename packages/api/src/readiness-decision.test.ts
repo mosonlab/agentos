@@ -177,7 +177,7 @@ test("deterministic GitHub response failures stop", async () => {
 });
 
 test("an unclaimed candidate skips", async () => {
-  assert.deepEqual(await evaluateReadiness(null, { ...context, stage: "claim-lost" }), { kind: "skip" });
+  assert.deepEqual(await evaluateReadiness(reader(), { ...context, stage: "claim-lost" }), { kind: "skip" });
 });
 
 test("an incomplete comparison is a named stop", async () => {
