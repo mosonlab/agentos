@@ -1068,8 +1068,8 @@ test("sync recreates a missing spec revalidator with read-only repository covera
   const revalidator = await prisma.agent.findUniqueOrThrow({
     where: { projectId_name: { projectId: project.id, name: "spec-revalidator" } },
   });
-  assert.equal(revalidator.model, "openai-codex/gpt-5.6-luna:xhigh");
-  assert.equal(revalidator.runnerPreference, RunnerPreference.PI);
+  assert.equal(revalidator.model, "gpt-5.6-luna:xhigh");
+  assert.equal(revalidator.runnerPreference, RunnerPreference.CODEX);
   assert.equal(revalidator.inboxAccess, true);
   assert.equal(await prisma.taskTemplateStep.count({
     where: { id: { in: revalidationSteps.map(({ id }) => id) }, assigneeAgentId: revalidator.id },

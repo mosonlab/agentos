@@ -59,7 +59,29 @@ test("canonical role frontmatter matches the Prisma seed contract", async () => 
     };
   }));
 
+  for (const { name, model, runnerPreference } of roles) {
+    assert.equal(model.startsWith("openai-codex/"), false, name);
+    assert.notEqual(runnerPreference, RunnerPreference.PI, name);
+  }
   assert.doesNotThrow(() => assertCanonicalAgentSources(roles));
+});
+
+test("canonical OpenAI roles pin their Codex model and runner", async () => {
+  const [reviewCoordinator, reviewCoordinatorSol, librarian, specRevalidator] = await Promise.all([
+    roleSource("review-coordinator"),
+    roleSource("review-coordinator-sol"),
+    roleSource("librarian"),
+    roleSource("spec-revalidator"),
+  ]);
+
+  assert.equal(frontmatterValue(reviewCoordinator, "model"), "gpt-5.6-sol:xhigh");
+  assert.equal(frontmatterValue(reviewCoordinator, "runner"), "codex");
+  assert.equal(frontmatterValue(reviewCoordinatorSol, "model"), "gpt-5.6-sol:xhigh");
+  assert.equal(frontmatterValue(reviewCoordinatorSol, "runner"), "codex");
+  assert.equal(frontmatterValue(librarian, "model"), "gpt-5.6-luna:xhigh");
+  assert.equal(frontmatterValue(librarian, "runner"), "codex");
+  assert.equal(frontmatterValue(specRevalidator, "model"), "gpt-5.6-luna:xhigh");
+  assert.equal(frontmatterValue(specRevalidator, "runner"), "codex");
 });
 
 test("canonical profiles start at Default and native child capability replaces Agent subprocess profiles", async () => {
