@@ -132,6 +132,7 @@ export const claimRequestBody = async (config: RunnerConfig, readStats: StatFs =
   runnerId: config.runnerId,
   leaseSeconds: config.leaseSeconds,
   ...await runnerTelemetryBody(config, readStats),
+  ...(config.servedKinds === null ? {} : { servedKinds: config.servedKinds }),
 });
 
 const claimTask = async (config: RunnerConfig): Promise<ClaimedTask | null> => {

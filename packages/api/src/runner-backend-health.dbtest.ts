@@ -214,6 +214,40 @@ test("CLI availability shares the alert lifecycle and its transition is visible 
   });
 });
 
+test("availability reported by a CODEX-only runner does not affect CLAUDE health or tasks", async () => {
+  const codexTask = await seedQueuedTask(RunnerPreference.CODEX);
+  const claudeTask = await seedQueuedTask(RunnerPreference.CLAUDE);
+
+  const response = await createApp(db).request("/runner/availability", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      runnerId: "codex-only-runner",
+      runner: RunnerKind.CODEX,
+      binary: "codex",
+      available: false,
+      resolvedPath: null,
+    }),
+  });
+  assert.equal(response.status, 200, await response.text());
+
+  const codexState = await db.runnerBackendState.findUniqueOrThrow({ where: { runner: RunnerKind.CODEX } });
+  assert.equal(runnerBackendAllowsClaim(codexState), false);
+  const codexProjection = projectRunnerBackend(RunnerKind.CODEX, codexState);
+  assert.equal(codexProjection.cliAvailable, false);
+  assert.match(codexProjection.cliAvailabilityReason ?? "", /codex CLI "codex" was not found/u);
+  const claudeState = await db.runnerBackendState.findUnique({ where: { runner: RunnerKind.CLAUDE } });
+  assert.equal(claudeState, null);
+  assert.equal(runnerBackendAllowsClaim(claudeState), true);
+
+  const [storedCodexTask, storedClaudeTask] = await Promise.all([
+    db.task.findUniqueOrThrow({ where: { id: codexTask.id } }),
+    db.task.findUniqueOrThrow({ where: { id: claudeTask.id } }),
+  ]);
+  assert.match(storedCodexTask.failureReason ?? "", /codex CLI "codex" was not found/u);
+  assert.equal(storedClaudeTask.failureReason, null);
+});
+
 test("claims stay queued while CLI availability or preflight health denies the backend, then recover", async () => {
   const task = await seedQueuedTask(RunnerPreference.CODEX);
   const run = await db.run.findFirstOrThrow({ where: { taskId: task.id } });

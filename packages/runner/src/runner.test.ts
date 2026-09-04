@@ -9,7 +9,9 @@ import { test } from "node:test";
 
 import type { RunOutcome, RunOutputEvidence } from "@anneal/db";
 
-import { adapters, buildPrompt, type AdapterEvent, type CliAdapter, type ExitEvidence, type RuntimeHandle } from "./adapters.js";
+import {
+  adapters, buildPrompt, RUNNER_KINDS, type AdapterEvent, type CliAdapter, type ExitEvidence, type RuntimeHandle,
+} from "./adapters.js";
 import type { ClaimedTask, ControlPlane } from "./api.js";
 import type { RunnerConfig } from "./config.js";
 import {
@@ -22,6 +24,7 @@ import {
   providerDisconnectResumeInput,
   reportCliAvailabilityHeartbeat as reportCliAvailabilityHeartbeatProduction,
   runStartupPreflight as runStartupPreflightProduction,
+  startupPreflightLog,
 } from "./runner.js";
 import {
   createControlPlaneDouble, createRoutedControlPlaneDouble, envelopeOf, failureReasonOf,
@@ -36,6 +39,7 @@ const config = (workspaceRoot: string): RunnerConfig => ({
   apiUrl: "http://api.invalid",
   runnerToken: "runner-token",
   runnerId: "runner-1",
+  servedKinds: null,
   daemonVersion: "0.0.0-test",
   pollIntervalMs: 5_000,
   claimMaxLoadAverage: 1.5,
@@ -1291,6 +1295,64 @@ const codexOnly = (workspaceRoot: string, root: string, codexBinary: string): Ru
   home: root,
   path: process.env.PATH ?? "/usr/bin:/bin",
   binaries: { CLAUDE: join(root, "no-claude-here"), CODEX: codexBinary, PI: join(root, "no-pi-here") },
+});
+
+test("served kinds scope startup and heartbeat reports and the startup log", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-served-kinds-startup-"));
+  try {
+    const binary = join(root, "codex.sh");
+    await writeFile(binary, codexStub(join(root, "codex-argv.log")));
+    await chmod(binary, 0o755);
+    const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
+    setControlPlane(async (input: string | URL | Request, init?: RequestInit) => {
+      const path = String(input);
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      posts.push({ path, body });
+      return new Response(JSON.stringify({ revalidatePreflight: false }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    const declared = { ...codexOnly(join(root, "workspaces"), root, binary), servedKinds: ["CODEX"] as const };
+    const declaredAvailability: string[] = [];
+    const declaredPreflight = await runStartupPreflight(declared, {
+      onAvailability: ({ runner }) => { declaredAvailability.push(runner); },
+    });
+    assert.deepEqual(Object.keys(declaredPreflight), ["CODEX"]);
+    assert.deepEqual(declaredAvailability, ["CODEX"]);
+    assert.equal(startupPreflightLog(declaredPreflight), "CLI preflight: codex=ok");
+    assert.deepEqual(posts.map(({ path, body }) => [path, body.runner]), [
+      ["http://api.invalid/runner/availability", "CODEX"],
+      ["http://api.invalid/runner/preflight", "CODEX"],
+    ]);
+
+    posts.length = 0;
+    await reportCliAvailabilityHeartbeat(declared);
+    assert.deepEqual(posts.map(({ path, body }) => [path, body.runner]), [
+      ["http://api.invalid/runner/availability", "CODEX"],
+    ]);
+
+    const unrestricted = { ...declared, servedKinds: null };
+    posts.length = 0;
+    const unrestrictedAvailability: string[] = [];
+    const unrestrictedPreflight = await runStartupPreflight(unrestricted, {
+      onAvailability: ({ runner }) => { unrestrictedAvailability.push(runner); },
+    });
+    assert.deepEqual(Object.keys(unrestrictedPreflight), RUNNER_KINDS);
+    assert.deepEqual(unrestrictedAvailability, RUNNER_KINDS);
+    assert.equal(startupPreflightLog(unrestrictedPreflight), "CLI preflight: claude=blocked codex=ok pi=blocked");
+    assert.deepEqual(posts.filter(({ path }) => path.endsWith("/availability")).map(({ body }) => body.runner), RUNNER_KINDS);
+    assert.deepEqual(posts.filter(({ path }) => path.endsWith("/preflight")).map(({ body }) => body.runner), ["CODEX"]);
+
+    posts.length = 0;
+    await reportCliAvailabilityHeartbeat(unrestricted);
+    assert.deepEqual(posts.map(({ path, body }) => [path, body.runner]), RUNNER_KINDS.map((runner) => [
+      "http://api.invalid/runner/availability", runner,
+    ]));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 const codexResumeClaim = (remoteUrl: string, root: string): ClaimedTask => ({

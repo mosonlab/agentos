@@ -1887,6 +1887,12 @@ field is report-only; omitted or empty means no observation and never changes
 the Run outcome. A late cancellation acknowledgement backfills this evidence
 when reconciliation terminalized the Run first.
 
+The machine-only `POST /runner/tasks/claim` request may include the optional
+`servedKinds` array of exact `RunnerKind` names. Omitting `servedKinds` means
+the runner serves every kind; when it is declared, the control plane offers
+that claim agent Runs only for the listed kinds. Mechanical claims are
+unaffected, and an unknown kind is refused with `400 Bad Request`.
+
 The machine-only `POST /runner/tasks/claim` request used by the merge executor
 also carries the required `contractVersion` field. It is the completion
 contract version exported by `@anneal/db`; the mechanical executor and API
