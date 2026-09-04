@@ -15,6 +15,15 @@ const SOURCE_REPOSITORY_ROOT = resolve(SCRIPT_DIR, "../..");
 
 export const DEFAULT_RUNNER_COUNT = 10;
 export const MAX_RUNNER_COUNT = 64;
+export const DEFAULT_DEPLOY_ROLE = "control-plane";
+export const DEPLOY_ROLES = Object.freeze([DEFAULT_DEPLOY_ROLE, "runner"]);
+
+export const resolveDeployRole = (environment = process.env) => {
+  const configured = environment?.AGENTOS_DEPLOY_ROLE;
+  const role = configured === undefined ? DEFAULT_DEPLOY_ROLE : configured;
+  if (!DEPLOY_ROLES.includes(role)) throw new Error(`deploy-role-invalid:${String(role)}`);
+  return role;
+};
 
 export const resolveRunnerIdPrefix = (environment = process.env) => {
   const prefix = environment?.AGENTOS_RUNNER_ID_PREFIX ?? "";
@@ -62,17 +71,20 @@ const runnerIndexForLabel = (label) => {
 export const generateServiceInventory = (
   runnerCount = resolveRunnerCount(),
   runnerIdPrefix = resolveRunnerIdPrefix(),
+  deployRole = resolveDeployRole(),
 ) => {
   const count = validatedRunnerCount(runnerCount);
   const prefix = resolveRunnerIdPrefix({ AGENTOS_RUNNER_ID_PREFIX: runnerIdPrefix });
+  if (!DEPLOY_ROLES.includes(deployRole)) throw new Error(`deploy-role-invalid:${String(deployRole)}`);
   const entries = [
-    { label: "com.agentos.api", runnerId: null },
-    { label: "com.agentos.inbox", runnerId: null },
+    ...(deployRole === DEFAULT_DEPLOY_ROLE
+      ? [{ label: "com.agentos.api", runnerId: null }, { label: "com.agentos.inbox", runnerId: null }]
+      : []),
     ...Array.from({ length: count }, (_unused, offset) => {
       const index = offset + 1;
       return { label: runnerLabelForIndex(index), runnerId: `${prefix}runner-${index}` };
     }),
-    { label: "com.agentos.web", runnerId: null },
+    ...(deployRole === DEFAULT_DEPLOY_ROLE ? [{ label: "com.agentos.web", runnerId: null }] : []),
   ];
   return Object.freeze(entries.map((entry) => Object.freeze({
     ...entry,
@@ -86,6 +98,7 @@ export const generateServiceInventory = (
  * fixture proves that invariant. */
 export const SERVICE_INVENTORY_ENTRIES = generateServiceInventory();
 export const SERVICE_LABELS = Object.freeze(SERVICE_INVENTORY_ENTRIES.map(({ label }) => label));
+const ACTIVE_DEPLOY_ROLE = resolveDeployRole();
 
 export const runnerIdForLabel = (label, runnerIdPrefix = resolveRunnerIdPrefix()) => {
   const index = runnerIndexForLabel(label);
@@ -108,18 +121,20 @@ const definition = (label, entrypoint, workingDirectory = ".", args = []) => Obj
  * current/ spelling in argv and cwd is what makes the activation boundary
  * visible to launchd and to an operator inspecting a running job. */
 export const SERVICE_INVENTORY = Object.freeze(Object.fromEntries([
-  definition("com.agentos.api", "packages/api/dist/index.js"),
-  definition("com.agentos.inbox", "packages/inbox/dist/index.js"),
+  ...(ACTIVE_DEPLOY_ROLE === DEFAULT_DEPLOY_ROLE ? [
+    definition("com.agentos.api", "packages/api/dist/index.js"),
+    definition("com.agentos.inbox", "packages/inbox/dist/index.js"),
+  ] : []),
   ...SERVICE_LABELS
     .filter((label) => label.startsWith("com.agentos.runner"))
     .map((label) => definition(label, "packages/runner/dist/index.js")),
-  definition("com.agentos.web", "node_modules/vite/bin/vite.js", "apps/web", [
+  ...(ACTIVE_DEPLOY_ROLE === DEFAULT_DEPLOY_ROLE ? [definition("com.agentos.web", "node_modules/vite/bin/vite.js", "apps/web", [
     "preview",
     "--host",
     "127.0.0.1",
     "--configLoader",
     "runner",
-  ]),
+  ])] : []),
 ].map((entry) => [entry.label, entry])));
 
 const isInside = (parent, child) => {

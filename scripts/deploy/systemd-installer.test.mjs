@@ -923,6 +923,56 @@ test("runner prefix is rendered, recorded, and checked before privileged install
   });
 });
 
+test("runner role stages only runner units and stage two enforces the recorded role", async () => {
+  await withLinux(() => {
+    const root = mkdtempSync(join(tmpdir(), "agentos-systemd-runner-role-"));
+    const unitDirectory = join(root, "etc/systemd/system");
+    const sudoersPath = join(root, "etc/sudoers.d/anneal-service-control");
+    const environment = {
+      AGENTOS_DEPLOY_ROLE: "runner",
+      AGENTOS_RUNNER_COUNT: "3",
+      AGENTOS_RUNNER_ID_PREFIX: "mac-",
+    };
+    try {
+      const staged = installLaunchdServices({
+        repositoryRoot: root,
+        serviceUser: "anneal-test",
+        userLookup: accountLookup,
+        nodeBinary: process.execPath,
+        gitBinary: process.execPath,
+        unitDirectory,
+        sudoersPath,
+        visudoPath: "/usr/bin/true",
+        environment,
+        effectiveUid: 501,
+        apply: true,
+      });
+      const labels = staged.manifest.entries.filter(({ kind }) => kind === "service").map(({ label }) => label);
+      assert.deepEqual(labels, ["com.agentos.runner", "com.agentos.runner-2", "com.agentos.runner-3"]);
+      assert.equal(staged.manifest.renderInputs.deployRole, "runner");
+      assert.equal(labels.some((label) => ["com.agentos.api", "com.agentos.inbox", "com.agentos.web"].includes(label)), false);
+      assert.match(readFileSync(staged.manifest.auxiliaryEntries.find(({ kind }) => kind === "sudoers").stagedPath, "utf8"), /com\.agentos\.runner\.service/u);
+
+      const calls = [];
+      assert.throws(() => installStagedSystemdServices({
+        repositoryRoot: root,
+        unitDirectory,
+        sudoersPath,
+        systemctlPath: "/usr/bin/true",
+        visudoPath: "/usr/bin/true",
+        effectiveUid: 0,
+        serviceUser: "anneal-test",
+        userLookup: accountLookup,
+        environment: { ...environment, AGENTOS_DEPLOY_ROLE: "control-plane" },
+        execute: (_command, args) => { calls.push(args); return ""; },
+      }), /systemd-deploy-role-manifest-mismatch/u);
+      assert.deepEqual(calls, []);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 test("invalid runner prefix fails before installer files are written", async () => {
   await withLinux(() => {
     const root = mkdtempSync(join(tmpdir(), "agentos-systemd-prefix-invalid-"));

@@ -29,6 +29,25 @@ test("service unit names are derived from labels", () => {
   );
 });
 
+test("runner role service control accepts only the local runner inventory", async () => {
+  const recorder = runRecorder();
+  const control = createServiceControl({
+    platform: "linux",
+    euid: 0,
+    run: recorder.run,
+    environment: {
+      AGENTOS_DEPLOY_ROLE: "runner",
+      AGENTOS_RUNNER_COUNT: "2",
+      AGENTOS_RUNNER_ID_PREFIX: "mac-",
+    },
+  });
+  await control.restart("com.agentos.runner-2");
+  assert.deepEqual(recorder.calls.map(({ program, args }) => [program, args]), [
+    ["systemctl", ["restart", "com.agentos.runner-2.service"]],
+  ]);
+  assert.throws(() => control.restart("com.agentos.api"), /service-control-label-invalid/u);
+});
+
 test("Linux root control uses bare systemctl verbs and the stable ExecStart query", async () => {
   const recorder = runRecorder({
     "systemctl is-active com.agentos.api.service": { code: 0, stdout: "active\n", stderr: "" },
