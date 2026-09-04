@@ -16,14 +16,6 @@ const SOURCE_REPOSITORY_ROOT = resolve(SCRIPT_DIR, "../..");
 export const DEFAULT_RUNNER_COUNT = 10;
 export const MAX_RUNNER_COUNT = 64;
 
-export const resolveRunnerIdPrefix = (environment = process.env) => {
-  const prefix = environment?.AGENTOS_RUNNER_ID_PREFIX ?? "";
-  if (typeof prefix !== "string" || !/^[A-Za-z0-9_.-]*$/u.test(prefix)) {
-    throw new Error(`runner-id-prefix-invalid:${String(prefix)}`);
-  }
-  return prefix;
-};
-
 const validatedRunnerCount = (value) => {
   const count = typeof value === "number"
     ? value
@@ -48,29 +40,17 @@ const runnerLabelForIndex = (index) => index === 1
   ? "com.agentos.runner"
   : `com.agentos.runner-${index}`;
 
-const runnerIndexForLabel = (label) => {
-  if (label === "com.agentos.runner") return 1;
-  const match = /^com\.agentos\.runner-([0-9]+)$/u.exec(label);
-  if (!match) return null;
-  const index = Number(match[1]);
-  return Number.isSafeInteger(index) && index >= 2 && index <= MAX_RUNNER_COUNT ? index : null;
-};
-
 /** Generate the ordered service inventory. This module is copied as a
  * standalone wrapper artifact, so the equivalent generator is deliberately
  * re-derived in quiet-window-lib.mjs rather than imported from this file. */
-export const generateServiceInventory = (
-  runnerCount = resolveRunnerCount(),
-  runnerIdPrefix = resolveRunnerIdPrefix(),
-) => {
+export const generateServiceInventory = (runnerCount = resolveRunnerCount()) => {
   const count = validatedRunnerCount(runnerCount);
-  const prefix = resolveRunnerIdPrefix({ AGENTOS_RUNNER_ID_PREFIX: runnerIdPrefix });
   const entries = [
     { label: "com.agentos.api", runnerId: null },
     { label: "com.agentos.inbox", runnerId: null },
     ...Array.from({ length: count }, (_unused, offset) => {
       const index = offset + 1;
-      return { label: runnerLabelForIndex(index), runnerId: `${prefix}runner-${index}` };
+      return { label: runnerLabelForIndex(index), runnerId: `runner-${index}` };
     }),
     { label: "com.agentos.web", runnerId: null },
   ];
@@ -87,19 +67,18 @@ export const generateServiceInventory = (
 export const SERVICE_INVENTORY_ENTRIES = generateServiceInventory();
 export const SERVICE_LABELS = Object.freeze(SERVICE_INVENTORY_ENTRIES.map(({ label }) => label));
 
-export const runnerIdForLabel = (label, runnerIdPrefix = resolveRunnerIdPrefix()) => {
-  const index = runnerIndexForLabel(label);
-  return index === null
-    ? null
-    : `${resolveRunnerIdPrefix({ AGENTOS_RUNNER_ID_PREFIX: runnerIdPrefix })}runner-${index}`;
-};
+const runnerIdForLabel = (label) => label === "com.agentos.runner"
+  ? "runner-1"
+  : label.startsWith("com.agentos.runner-")
+    ? `runner-${label.slice("com.agentos.runner-".length)}`
+    : null;
 
 const definition = (label, entrypoint, workingDirectory = ".", args = []) => Object.freeze({
   label,
   entrypoint,
   workingDirectory,
   args: Object.freeze([...args]),
-  runnerId: SERVICE_INVENTORY_ENTRIES.find((entry) => entry.label === label)?.runnerId ?? null,
+  runnerId: runnerIdForLabel(label),
   unitName: SERVICE_INVENTORY_ENTRIES.find((entry) => entry.label === label)?.unitName,
 });
 
@@ -332,9 +311,7 @@ export const resolveServiceInvocation = ({
   environment = process.env,
   nodeBinary = environment.DEPLOY_NODE_BINARY ?? process.execPath,
 } = {}) => {
-  const service = SERVICE_INVENTORY[label] ?? (runnerIndexForLabel(label) === null
-    ? null
-    : definition(label, "packages/runner/dist/index.js"));
+  const service = SERVICE_INVENTORY[label];
   if (!service) throw new Error(`service-label-unknown:${String(label)}`);
   const pointer = resolveCurrentRelease({
     repositoryRoot,
@@ -368,9 +345,8 @@ export const resolveServiceInvocation = ({
   childEnvironment.AGENTOS_SERVICE_LABEL = label;
   childEnvironment.NODE_ENV ??= "production";
   childEnvironment.PATH ??= "/usr/local/bin:/usr/bin:/bin";
-  const runnerId = runnerIdForLabel(label, resolveRunnerIdPrefix(environment));
-  if (runnerId) {
-    childEnvironment.RUNNER_ID ??= runnerId;
+  if (service.runnerId) {
+    childEnvironment.RUNNER_ID ??= service.runnerId;
     childEnvironment.RUNNER_PATH ??= childEnvironment.PATH;
   }
   return Object.freeze({
@@ -444,9 +420,7 @@ export const runLaunchdService = async ({
   spawnProcess = spawn,
   output = process.stdout,
 } = {}) => {
-  if (args.length !== 1 || (!SERVICE_INVENTORY[args[0]] && runnerIndexForLabel(args[0]) === null)) {
-    throw new Error("usage: launchd-service-wrapper.mjs <service-label>");
-  }
+  if (args.length !== 1 || !SERVICE_INVENTORY[args[0]]) throw new Error("usage: launchd-service-wrapper.mjs <service-label>");
   const label = args[0];
   const invocation = resolveServiceInvocation({
     repositoryRoot: environment.AGENTOS_REPOSITORY_ROOT ?? environment.DEPLOY_REPOSITORY_ROOT ?? SOURCE_REPOSITORY_ROOT,

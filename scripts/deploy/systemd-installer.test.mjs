@@ -52,6 +52,34 @@ const withLinux = async (work) => {
 
 const accountLookup = () => "anneal-test:x:620:620::/var/lib/anneal-test:/bin/bash";
 const digest = (contents) => createHash("sha256").update(contents).digest("hex");
+const launchdNotFound = () => {
+  const error = new Error("not found");
+  error.status = 113;
+  error.stderr = "Could not find service\n";
+  return error;
+};
+const systemdManifestFingerprint = (manifest) => digest(JSON.stringify({
+  runnerCount: manifest.runnerCount ?? null,
+  serviceUser: manifest.serviceUser,
+  renderInputs: manifest.renderInputs,
+  entries: [...manifest.entries, ...(manifest.auxiliaryEntries ?? [])].map((entry) => ({
+    kind: entry.kind,
+    path: entry.path,
+    stagedPath: entry.stagedPath,
+    installedSha256: entry.installedSha256,
+    existed: entry.existed,
+    parentExisted: entry.parentExisted ?? null,
+  })),
+  ...((manifest.retiredEntries?.length ?? 0) === 0 ? {} : {
+    retiredEntries: manifest.retiredEntries.map((entry) => ({
+      kind: entry.kind,
+      label: entry.label,
+      unit: entry.unit,
+      path: entry.path,
+      installedSha256: entry.installedSha256,
+    })),
+  }),
+}));
 
 const spawnServiceInstallerCli = ({ root, args, context }) => {
   const harnessPath = join(root, "service-installer-cli-harness.mjs");
@@ -194,8 +222,8 @@ test("non-default runner count is persisted in service and auto-deploy definitio
     serviceValues,
   );
   const unit = renderServiceSystemdUnit(undefined, { ...serviceValues, serviceUser: "anneal-test" });
-  assert.match(plist, /<key>AGENTOS_RUNNER_COUNT<\/key>\s*<string>16<\/string>/u);
-  assert.match(unit, /^Environment=AGENTOS_RUNNER_COUNT="16"$/mu);
+  assert.match(plist, /<key>AGENTOS_RUNNER_COUNT<\/key>/u);
+  assert.match(unit, /^Environment=AGENTOS_RUNNER_COUNT=/mu);
   const autoValues = {
     nodeBinary: "/usr/bin/node",
     deployScript: "/fixture/current/scripts/deploy/quiet-window-deploy.mjs",
@@ -249,10 +277,16 @@ test("systemd path directives escape whitespace and percent specifiers", () => {
 test("default Darwin render, manifest entries, and plan stdout match 9a52c6ad bytes", () => {
   const previousPlatform = process.env.AGENTOS_SERVICE_PLATFORM;
   const previousCount = process.env.AGENTOS_RUNNER_COUNT;
+  const previousPrefix = process.env.AGENTOS_RUNNER_ID_PREFIX;
   process.env.AGENTOS_SERVICE_PLATFORM = "darwin";
   delete process.env.AGENTOS_RUNNER_COUNT;
+  delete process.env.AGENTOS_RUNNER_ID_PREFIX;
   try {
     const baseline = JSON.parse(readFileSync(new URL("./fixtures/darwin-9a52c6ad-baseline.json", import.meta.url), "utf8"));
+    assert.equal(
+      digest(readFileSync(new URL("./launchd-service-wrapper.unprefixed.mjs", import.meta.url))),
+      "f7ca733a830d8951a82af060882d0344a169b07c9a157697119f8cf8544415e9",
+    );
     const root = process.cwd();
     const plan = installLaunchdServices({
       repositoryRoot: root,
@@ -348,6 +382,8 @@ process.exit(result.status ?? 1);
     else process.env.AGENTOS_SERVICE_PLATFORM = previousPlatform;
     if (previousCount === undefined) delete process.env.AGENTOS_RUNNER_COUNT;
     else process.env.AGENTOS_RUNNER_COUNT = previousCount;
+    if (previousPrefix === undefined) delete process.env.AGENTOS_RUNNER_ID_PREFIX;
+    else process.env.AGENTOS_RUNNER_ID_PREFIX = previousPrefix;
   }
 });
 
@@ -743,6 +779,51 @@ test("replace-existing restores unit bytes, mode, and enabled/active state", asy
   });
 });
 
+test("systemd upgrade binds an installed wrapper update to the previous manifest digest", async () => {
+  await withLinux(() => {
+    const root = mkdtempSync(join(tmpdir(), "agentos-systemd-wrapper-upgrade-"));
+    const unitDirectory = join(root, "etc/systemd/system");
+    const sudoersPath = join(root, "etc/sudoers.d/anneal-service-control");
+    const common = {
+      repositoryRoot: root,
+      serviceUser: "anneal-test",
+      userLookup: accountLookup,
+      nodeBinary: process.execPath,
+      gitBinary: process.execPath,
+      unitDirectory,
+      sudoersPath,
+      systemctlPath: "/usr/bin/true",
+      visudoPath: "/usr/bin/true",
+      execute: () => "",
+    };
+    try {
+      const initial = installLaunchdServices({ ...common, effectiveUid: 501, apply: true });
+      installStagedSystemdServices({ ...common, effectiveUid: 0 });
+      const manifest = JSON.parse(readFileSync(initial.manifestPath, "utf8"));
+      const wrapperEntry = manifest.entries[0];
+      const oldWrapper = "previous wrapper artifact\n";
+      writeFileSync(wrapperEntry.path, oldWrapper);
+      writeFileSync(wrapperEntry.stagedPath, oldWrapper);
+      wrapperEntry.installedSha256 = digest(oldWrapper);
+      writeFileSync(initial.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+      const transactionPath = join(unitDirectory, ".anneal-service-transaction.json");
+      const transaction = JSON.parse(readFileSync(transactionPath, "utf8"));
+      transaction.fingerprint = systemdManifestFingerprint(manifest);
+      writeFileSync(transactionPath, `${JSON.stringify(transaction, null, 2)}\n`);
+
+      const upgrade = installLaunchdServices({ ...common, effectiveUid: 501, apply: true });
+      assert.equal(upgrade.manifest.entries[0].previousInstalledSha256, digest(oldWrapper));
+      assert.notEqual(readFileSync(wrapperEntry.path, "utf8"), oldWrapper);
+      chmodSync(sudoersPath, 0o600);
+      installStagedSystemdServices({ ...common, effectiveUid: 0 });
+      const completed = JSON.parse(readFileSync(initial.manifestPath, "utf8"));
+      assert.equal(completed.entries[0].previousInstalledSha256, undefined);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 test("a count of sixteen produces twenty-entry service manifests on both platforms", () => {
   const source = String.raw`
     import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -791,6 +872,721 @@ test("a count of sixteen produces twenty-entry service manifests on both platfor
   });
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout), { linux: 20, darwin: 20, linuxResult: 20, darwinResult: 20, installedUnits: 19, countPersisted: true, enabled: 19 });
+});
+
+test("runner prefix is rendered, recorded, and checked before privileged installation", async () => {
+  await withLinux(() => {
+    const root = mkdtempSync(join(tmpdir(), "agentos-systemd-prefix-"));
+    const unitDirectory = join(root, "etc/systemd/system");
+    const sudoersPath = join(root, "etc/sudoers.d/anneal-service-control");
+    try {
+      const environment = { AGENTOS_RUNNER_ID_PREFIX: "vm-" };
+      const staged = installLaunchdServices({
+        repositoryRoot: root,
+        serviceUser: "anneal-test",
+        userLookup: accountLookup,
+        nodeBinary: process.execPath,
+        gitBinary: process.execPath,
+        unitDirectory,
+        sudoersPath,
+        visudoPath: "/usr/bin/true",
+        effectiveUid: 501,
+        environment,
+        apply: true,
+      });
+      assert.equal(staged.manifest.renderInputs.runnerIdPrefix, "vm-");
+      assert.deepEqual(
+        readFileSync(staged.manifest.entries[0].stagedPath),
+        readFileSync(new URL("./launchd-service-wrapper.mjs", import.meta.url)),
+      );
+      for (const entry of staged.manifest.entries.filter(({ label }) => label?.startsWith("com.agentos.runner"))) {
+        assert.match(readFileSync(entry.stagedPath, "utf8"), /^Environment=RUNNER_ID="vm-runner-\d+"$/mu);
+      }
+      const calls = [];
+      assert.throws(() => installStagedSystemdServices({
+        repositoryRoot: root,
+        unitDirectory,
+        sudoersPath,
+        systemctlPath: "/usr/bin/true",
+        visudoPath: "/usr/bin/true",
+        effectiveUid: 0,
+        serviceUser: "anneal-test",
+        userLookup: accountLookup,
+        environment: { AGENTOS_RUNNER_ID_PREFIX: "other-" },
+        execute: (_command, args) => { calls.push(args); return ""; },
+      }), /systemd-runner-id-prefix-manifest-mismatch/u);
+      assert.deepEqual(calls, []);
+      assert.equal(existsSync(join(unitDirectory, "com.agentos.runner.service")), false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+test("invalid runner prefix fails before installer files are written", async () => {
+  await withLinux(() => {
+    const root = mkdtempSync(join(tmpdir(), "agentos-systemd-prefix-invalid-"));
+    try {
+      assert.throws(() => installLaunchdServices({
+        repositoryRoot: root,
+        serviceUser: "anneal-test",
+        userLookup: accountLookup,
+        environment: { AGENTOS_RUNNER_ID_PREFIX: "invalid/prefix" },
+        effectiveUid: 501,
+        apply: true,
+      }), /runner-id-prefix-invalid:invalid\/prefix/u);
+      assert.equal(existsSync(join(root, ".agentos-deploy")), false);
+      assert.equal(existsSync(join(root, "shared")), false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+test("Darwin records and renders the configured runner prefix", () => {
+  const previousPlatform = process.env.AGENTOS_SERVICE_PLATFORM;
+  process.env.AGENTOS_SERVICE_PLATFORM = "darwin";
+  const root = mkdtempSync(join(tmpdir(), "agentos-launchd-prefix-"));
+  try {
+    mkdirSync(join(root, "shared"), { recursive: true });
+    writeFileSync(join(root, "shared/.env"), "DATABASE_URL=configured\n");
+    mkdirSync(join(root, "releases/release-1"), { recursive: true });
+    symlinkSync("releases/release-1", join(root, "current"));
+    installLaunchdServices({
+      repositoryRoot: root,
+      userHome: join(root, "home"),
+      nodeBinary: process.execPath,
+      gitBinary: process.execPath,
+      effectiveUid: 501,
+      environment: { AGENTOS_RUNNER_ID_PREFIX: "vm-" },
+      apply: true,
+    });
+    const manifest = JSON.parse(readFileSync(join(root, ".agentos-deploy/launchd/manifest.json"), "utf8"));
+    assert.equal(manifest.renderInputs.runnerIdPrefix, "vm-");
+    assert.deepEqual(
+      readFileSync(manifest.entries[0].path),
+      readFileSync(new URL("./launchd-service-wrapper.mjs", import.meta.url)),
+    );
+    assert.match(
+      readFileSync(join(root, "home/Library/LaunchAgents/com.agentos.runner.plist"), "utf8"),
+      /<key>RUNNER_ID<\/key>\s*<string>vm-runner-1<\/string>/u,
+    );
+  } finally {
+    if (previousPlatform === undefined) delete process.env.AGENTOS_SERVICE_PLATFORM;
+    else process.env.AGENTOS_SERVICE_PLATFORM = previousPlatform;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Darwin retries pending wrapper upgrades and partial grows", () => {
+  const previousPlatform = process.env.AGENTOS_SERVICE_PLATFORM;
+  process.env.AGENTOS_SERVICE_PLATFORM = "darwin";
+  const root = mkdtempSync(join(tmpdir(), "agentos-launchd-pending-install-"));
+  const home = join(root, "home");
+  const manifestPath = join(root, ".agentos-deploy/launchd/manifest.json");
+  try {
+    mkdirSync(join(root, "shared"), { recursive: true });
+    writeFileSync(join(root, "shared/.env"), "DATABASE_URL=configured\n");
+    mkdirSync(join(root, "releases/release-1"), { recursive: true });
+    symlinkSync("releases/release-1", join(root, "current"));
+    const common = {
+      repositoryRoot: root,
+      userHome: home,
+      nodeBinary: process.execPath,
+      gitBinary: process.execPath,
+      effectiveUid: 501,
+      apply: true,
+    };
+    installLaunchdServices({ ...common, environment: { AGENTOS_RUNNER_COUNT: "12" } });
+    const wrapperSource = readFileSync(new URL("./launchd-service-wrapper.unprefixed.mjs", import.meta.url));
+    const pendingWrapper = JSON.parse(readFileSync(manifestPath, "utf8"));
+    const wrapperEntry = pendingWrapper.entries[0];
+    const oldWrapper = "previous wrapper artifact\n";
+    writeFileSync(wrapperEntry.path, oldWrapper);
+    wrapperEntry.previousInstalledSha256 = digest(oldWrapper);
+    wrapperEntry.pendingInstall = true;
+    writeFileSync(manifestPath, `${JSON.stringify(pendingWrapper, null, 2)}\n`);
+
+    installLaunchdServices({ ...common, environment: { AGENTOS_RUNNER_COUNT: "12" } });
+    assert.deepEqual(readFileSync(wrapperEntry.path), wrapperSource);
+    let completed = JSON.parse(readFileSync(manifestPath, "utf8"));
+    assert.equal(completed.entries[0].previousInstalledSha256, undefined);
+    assert.equal(completed.entries[0].pendingInstall, undefined);
+
+    installLaunchdServices({ ...common, environment: { AGENTOS_RUNNER_COUNT: "16" } });
+    completed = JSON.parse(readFileSync(manifestPath, "utf8"));
+    const runner13 = completed.entries.find(({ path }) => path.endsWith("/com.agentos.runner-13.plist"));
+    rmSync(runner13.path);
+    runner13.pendingInstall = true;
+    writeFileSync(manifestPath, `${JSON.stringify(completed, null, 2)}\n`);
+    installLaunchdServices({ ...common, environment: { AGENTOS_RUNNER_COUNT: "16" } });
+    assert.equal(existsSync(runner13.path), true);
+    completed = JSON.parse(readFileSync(manifestPath, "utf8"));
+    assert.equal(completed.entries.find(({ path }) => path === runner13.path).pendingInstall, undefined);
+  } finally {
+    if (previousPlatform === undefined) delete process.env.AGENTOS_SERVICE_PLATFORM;
+    else process.env.AGENTOS_SERVICE_PLATFORM = previousPlatform;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runner inventory shrinks and grows without touching surviving units on both platforms", async () => {
+  await withLinux(() => {
+    const root = mkdtempSync(join(tmpdir(), "agentos-systemd-resize-"));
+    const unitDirectory = join(root, "etc/systemd/system");
+    const sudoersPath = join(root, "etc/sudoers.d/anneal-service-control");
+    const calls = [];
+    const execute = (_command, args) => {
+      calls.push(args);
+      if (args[0] === "is-enabled") return "enabled\n";
+      if (args[0] === "is-active") return "active\n";
+      if (args[0] === "show") return "not-found\n";
+      return "";
+    };
+    const common = {
+      repositoryRoot: root,
+      serviceUser: "anneal-test",
+      userLookup: accountLookup,
+      nodeBinary: process.execPath,
+      gitBinary: process.execPath,
+      unitDirectory,
+      sudoersPath,
+      systemctlPath: "/usr/bin/true",
+      visudoPath: "/usr/bin/true",
+      execute,
+    };
+    try {
+      installLaunchdServices({ ...common, environment: { AGENTOS_RUNNER_COUNT: "16" }, effectiveUid: 501, apply: true });
+      installStagedSystemdServices({ ...common, environment: { AGENTOS_RUNNER_COUNT: "16" }, effectiveUid: 0 });
+      const survivor = join(unitDirectory, "com.agentos.runner-12.service");
+      const survivorBefore = { contents: readFileSync(survivor), mtimeMs: statSync(survivor).mtimeMs };
+      calls.length = 0;
+      installLaunchdServices({ ...common, environment: { AGENTOS_RUNNER_COUNT: "12" }, effectiveUid: 501, apply: true });
+      chmodSync(sudoersPath, 0o600);
+      installStagedSystemdServices({ ...common, environment: { AGENTOS_RUNNER_COUNT: "12" }, effectiveUid: 0 });
+      assert.deepEqual(calls.filter(([verb]) => verb === "disable"), [13, 14, 15, 16].map((index) => ["disable", "--now", `com.agentos.runner-${index}.service`]));
+      assert.equal(calls.some(([verb]) => verb === "enable"), false);
+      for (const index of [13, 14, 15, 16]) assert.equal(existsSync(join(unitDirectory, `com.agentos.runner-${index}.service`)), false);
+      assert.deepEqual(readFileSync(survivor), survivorBefore.contents);
+      assert.equal(statSync(survivor).mtimeMs, survivorBefore.mtimeMs);
+      const shrunk = JSON.parse(readFileSync(join(root, ".agentos-deploy/launchd/manifest.json"), "utf8"));
+      assert.equal(shrunk.entries.some(({ label }) => label === "com.agentos.runner-13"), false);
+      calls.length = 0;
+      installLaunchdServices({ ...common, environment: { AGENTOS_RUNNER_COUNT: "16" }, effectiveUid: 501, apply: true });
+      chmodSync(sudoersPath, 0o600);
+      installStagedSystemdServices({ ...common, environment: { AGENTOS_RUNNER_COUNT: "16" }, effectiveUid: 0 });
+      assert.deepEqual(calls.filter(([verb]) => verb === "enable"), [13, 14, 15, 16].map((index) => ["enable", "--now", `com.agentos.runner-${index}.service`]));
+      assert.deepEqual(readFileSync(survivor), survivorBefore.contents);
+      assert.equal(statSync(survivor).mtimeMs, survivorBefore.mtimeMs);
+      const grown = JSON.parse(readFileSync(join(root, ".agentos-deploy/launchd/manifest.json"), "utf8"));
+      for (const index of [13, 14, 15, 16]) {
+        const path = join(unitDirectory, `com.agentos.runner-${index}.service`);
+        assert.equal(existsSync(path), true);
+        assert.equal(grown.entries.some((entry) => entry.path === path), true);
+      }
+      installLaunchdServices({ ...common, environment: { AGENTOS_RUNNER_COUNT: "16" }, effectiveUid: 501, revert: true, apply: true });
+      installStagedSystemdServices({ ...common, environment: { AGENTOS_RUNNER_COUNT: "16" }, effectiveUid: 0, revert: true });
+      assert.equal(existsSync(join(root, "shared/bin/agentos-service-wrapper.mjs")), false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  const previousPlatform = process.env.AGENTOS_SERVICE_PLATFORM;
+  process.env.AGENTOS_SERVICE_PLATFORM = "darwin";
+  const root = mkdtempSync(join(tmpdir(), "agentos-launchd-resize-"));
+  const home = join(root, "home");
+  try {
+    mkdirSync(join(root, "shared"), { recursive: true });
+    writeFileSync(join(root, "shared/.env"), "DATABASE_URL=configured\n");
+    mkdirSync(join(root, "releases/release-1"), { recursive: true });
+    symlinkSync("releases/release-1", join(root, "current"));
+    const common = { repositoryRoot: root, userHome: home, nodeBinary: process.execPath, gitBinary: process.execPath, effectiveUid: 501, apply: true };
+    installLaunchdServices({ ...common, environment: { AGENTOS_RUNNER_COUNT: "16" } });
+    const survivor = join(home, "Library/LaunchAgents/com.agentos.runner-12.plist");
+    const survivorBefore = { contents: readFileSync(survivor), mtimeMs: statSync(survivor).mtimeMs };
+    const calls = [];
+    const unloaded = new Set();
+    const execute = (_command, args) => {
+      calls.push(args);
+      if (args[0] === "bootout") unloaded.add(args[1]);
+      if (args[0] === "print" && unloaded.has(args[1])) throw launchdNotFound();
+      return "";
+    };
+    installLaunchdServices({ ...common, environment: { AGENTOS_RUNNER_COUNT: "12" }, execute });
+    assert.deepEqual(calls, [13, 14, 15, 16].flatMap((index) => [
+      ["print", `gui/501/com.agentos.runner-${index}`],
+      ["bootout", `gui/501/com.agentos.runner-${index}`],
+      ["print", `gui/501/com.agentos.runner-${index}`],
+    ]));
+    for (const index of [13, 14, 15, 16]) assert.equal(existsSync(join(home, `Library/LaunchAgents/com.agentos.runner-${index}.plist`)), false);
+    assert.deepEqual(readFileSync(survivor), survivorBefore.contents);
+    assert.equal(statSync(survivor).mtimeMs, survivorBefore.mtimeMs);
+    installLaunchdServices({ ...common, environment: { AGENTOS_RUNNER_COUNT: "16" } });
+    assert.deepEqual(readFileSync(survivor), survivorBefore.contents);
+    assert.equal(statSync(survivor).mtimeMs, survivorBefore.mtimeMs);
+    const grown = JSON.parse(readFileSync(join(root, ".agentos-deploy/launchd/manifest.json"), "utf8"));
+    for (const index of [13, 14, 15, 16]) {
+      const path = join(home, `Library/LaunchAgents/com.agentos.runner-${index}.plist`);
+      assert.equal(existsSync(path), true);
+      assert.equal(grown.entries.some((entry) => entry.path === path), true);
+    }
+    installLaunchdServices({ ...common, environment: { AGENTOS_RUNNER_COUNT: "16" }, revert: true });
+    assert.equal(existsSync(join(root, "shared/bin/agentos-service-wrapper.mjs")), false);
+  } finally {
+    if (previousPlatform === undefined) delete process.env.AGENTOS_SERVICE_PLATFORM;
+    else process.env.AGENTOS_SERVICE_PLATFORM = previousPlatform;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a partial shrink leaves each manifest aligned with the units still present", async () => {
+  await withLinux(() => {
+    const root = mkdtempSync(join(tmpdir(), "agentos-systemd-partial-shrink-"));
+    const unitDirectory = join(root, "etc/systemd/system");
+    const sudoersPath = join(root, "etc/sudoers.d/anneal-service-control");
+    const common = {
+      repositoryRoot: root,
+      serviceUser: "anneal-test",
+      userLookup: accountLookup,
+      nodeBinary: process.execPath,
+      gitBinary: process.execPath,
+      unitDirectory,
+      sudoersPath,
+      systemctlPath: "/usr/bin/true",
+      visudoPath: "/usr/bin/true",
+    };
+    try {
+      installLaunchdServices({ ...common, environment: { AGENTOS_RUNNER_COUNT: "16" }, effectiveUid: 501, apply: true });
+      installStagedSystemdServices({ ...common, environment: { AGENTOS_RUNNER_COUNT: "16" }, effectiveUid: 0, execute: () => "" });
+      installLaunchdServices({ ...common, environment: { AGENTOS_RUNNER_COUNT: "12" }, effectiveUid: 501, apply: true, execute: () => "" });
+      chmodSync(sudoersPath, 0o600);
+      const manifestPath = join(root, ".agentos-deploy/launchd/manifest.json");
+      const manifestStatus = statSync(manifestPath);
+      const ownership = [];
+      assert.throws(() => installStagedSystemdServices({
+        ...common,
+        environment: { AGENTOS_RUNNER_COUNT: "12" },
+        effectiveUid: 0,
+        chown: (path, uid, gid) => ownership.push({ path, uid, gid }),
+        execute: (_command, args) => {
+          if (args[0] === "disable" && args[2] === "com.agentos.runner-15.service") throw new Error("stop failed");
+          return "";
+        },
+      }), /systemd-control-failed:disable:com\.agentos\.runner-15\.service/u);
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+      assert.equal(ownership.some((entry) => entry.path.includes("/.agentos-deploy/launchd/manifest.json.")
+        && entry.uid === manifestStatus.uid && entry.gid === manifestStatus.gid), true, JSON.stringify(ownership));
+      assert.equal(statSync(manifestPath).uid, manifestStatus.uid);
+      assert.equal(statSync(manifestPath).gid, manifestStatus.gid);
+      assert.equal(statSync(manifestPath).mode & 0o777, manifestStatus.mode & 0o777);
+      assert.deepEqual(manifest.retiredEntries.map(({ unit }) => unit), [
+        "com.agentos.runner-15.service",
+        "com.agentos.runner-16.service",
+      ]);
+      for (const index of [13, 14]) assert.equal(existsSync(join(unitDirectory, `com.agentos.runner-${index}.service`)), false);
+      for (const index of [15, 16]) assert.equal(existsSync(join(unitDirectory, `com.agentos.runner-${index}.service`)), true);
+      installLaunchdServices({
+        ...common,
+        environment: { AGENTOS_RUNNER_COUNT: "12" },
+        effectiveUid: 501,
+        apply: true,
+        execute: () => "",
+      });
+      chmodSync(sudoersPath, 0o600);
+      installStagedSystemdServices({
+        ...common,
+        environment: { AGENTOS_RUNNER_COUNT: "12" },
+        effectiveUid: 0,
+        execute: (_command, args) => args[0] === "show" ? "not-found\n" : "",
+      });
+      const completed = JSON.parse(readFileSync(join(root, ".agentos-deploy/launchd/manifest.json"), "utf8"));
+      assert.equal(completed.retiredEntries, undefined);
+      for (const index of [13, 14, 15, 16]) {
+        assert.equal(existsSync(join(unitDirectory, `com.agentos.runner-${index}.service`)), false);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  const previousPlatform = process.env.AGENTOS_SERVICE_PLATFORM;
+  process.env.AGENTOS_SERVICE_PLATFORM = "darwin";
+  const root = mkdtempSync(join(tmpdir(), "agentos-launchd-partial-shrink-"));
+  const home = join(root, "home");
+  try {
+    mkdirSync(join(root, "shared"), { recursive: true });
+    writeFileSync(join(root, "shared/.env"), "DATABASE_URL=configured\n");
+    mkdirSync(join(root, "releases/release-1"), { recursive: true });
+    symlinkSync("releases/release-1", join(root, "current"));
+    const common = { repositoryRoot: root, userHome: home, nodeBinary: process.execPath, gitBinary: process.execPath, effectiveUid: 501, apply: true };
+    installLaunchdServices({ ...common, environment: { AGENTOS_RUNNER_COUNT: "16" } });
+    const unloaded = new Set();
+    let failRunner15 = true;
+    const execute = (_command, args) => {
+      if (args[0] === "print" && unloaded.has(args[1])) throw launchdNotFound();
+      if (args[0] === "bootout" && args[1].endsWith("com.agentos.runner-15") && failRunner15) {
+        failRunner15 = false;
+        throw new Error("stop failed");
+      }
+      if (args[0] === "bootout") unloaded.add(args[1]);
+      return "";
+    };
+    assert.throws(() => installLaunchdServices({
+      ...common,
+      environment: { AGENTOS_RUNNER_COUNT: "12" },
+      execute,
+    }), /launchd-service-removal-failed:com\.agentos\.runner-15/u);
+    const manifest = JSON.parse(readFileSync(join(root, ".agentos-deploy/launchd/manifest.json"), "utf8"));
+    assert.deepEqual(manifest.retiredEntries.map(({ path }) => path.slice(path.lastIndexOf("/") + 1)), [
+      "com.agentos.runner-15.plist",
+      "com.agentos.runner-16.plist",
+    ]);
+    for (const index of [13, 14]) assert.equal(existsSync(join(home, `Library/LaunchAgents/com.agentos.runner-${index}.plist`)), false);
+    for (const index of [15, 16]) assert.equal(existsSync(join(home, `Library/LaunchAgents/com.agentos.runner-${index}.plist`)), true);
+    installLaunchdServices({
+      ...common,
+      environment: { AGENTOS_RUNNER_COUNT: "12" },
+      execute,
+    });
+    const completed = JSON.parse(readFileSync(join(root, ".agentos-deploy/launchd/manifest.json"), "utf8"));
+    assert.equal(completed.retiredEntries, undefined);
+    for (const index of [13, 14, 15, 16]) {
+      assert.equal(existsSync(join(home, `Library/LaunchAgents/com.agentos.runner-${index}.plist`)), false);
+    }
+  } finally {
+    if (previousPlatform === undefined) delete process.env.AGENTOS_SERVICE_PLATFORM;
+    else process.env.AGENTOS_SERVICE_PLATFORM = previousPlatform;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("systemd shrink retries daemon-reload after all retired units were removed", async () => {
+  await withLinux(() => {
+    const root = mkdtempSync(join(tmpdir(), "agentos-systemd-reload-retry-"));
+    const unitDirectory = join(root, "etc/systemd/system");
+    const sudoersPath = join(root, "etc/sudoers.d/anneal-service-control");
+    const common = {
+      repositoryRoot: root,
+      serviceUser: "anneal-test",
+      userLookup: accountLookup,
+      nodeBinary: process.execPath,
+      gitBinary: process.execPath,
+      unitDirectory,
+      sudoersPath,
+      systemctlPath: "/usr/bin/true",
+      visudoPath: "/usr/bin/true",
+    };
+    try {
+      installLaunchdServices({ ...common, environment: { AGENTOS_RUNNER_COUNT: "16" }, effectiveUid: 501, apply: true });
+      installStagedSystemdServices({ ...common, environment: { AGENTOS_RUNNER_COUNT: "16" }, effectiveUid: 0, execute: () => "" });
+      installLaunchdServices({ ...common, environment: { AGENTOS_RUNNER_COUNT: "12" }, effectiveUid: 501, apply: true, execute: () => "" });
+      chmodSync(sudoersPath, 0o600);
+      assert.throws(() => installStagedSystemdServices({
+        ...common,
+        environment: { AGENTOS_RUNNER_COUNT: "12" },
+        effectiveUid: 0,
+        execute: (_command, args) => {
+          if (args[0] === "daemon-reload") throw new Error("reload failed");
+          return "";
+        },
+      }), /systemd-control-failed:daemon-reload/u);
+      const pending = JSON.parse(readFileSync(join(root, ".agentos-deploy/launchd/manifest.json"), "utf8"));
+      assert.equal(pending.reloadPending, true);
+      assert.deepEqual(pending.retiredEntries, []);
+
+      installLaunchdServices({ ...common, environment: { AGENTOS_RUNNER_COUNT: "12" }, effectiveUid: 501, apply: true, execute: () => "" });
+      chmodSync(sudoersPath, 0o600);
+      const retryCalls = [];
+      installStagedSystemdServices({
+        ...common,
+        environment: { AGENTOS_RUNNER_COUNT: "12" },
+        effectiveUid: 0,
+        execute: (_command, args) => {
+          retryCalls.push(args);
+          return args[0] === "show" ? "not-found\n" : "";
+        },
+      });
+      assert.equal(retryCalls.some(([verb]) => verb === "daemon-reload"), true);
+      const completed = JSON.parse(readFileSync(join(root, ".agentos-deploy/launchd/manifest.json"), "utf8"));
+      assert.equal(completed.reloadPending, undefined);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+test("a failed systemd restage leaves the prior manifest and staging revertible", async () => {
+  await withLinux(() => {
+    const root = mkdtempSync(join(tmpdir(), "agentos-systemd-restage-failure-"));
+    const unitDirectory = join(root, "etc/systemd/system");
+    const sudoersPath = join(root, "etc/sudoers.d/anneal-service-control");
+    const common = {
+      repositoryRoot: root,
+      serviceUser: "anneal-test",
+      userLookup: accountLookup,
+      nodeBinary: process.execPath,
+      gitBinary: process.execPath,
+      unitDirectory,
+      sudoersPath,
+      systemctlPath: "/usr/bin/true",
+      visudoPath: "/usr/bin/true",
+    };
+    const environment = { AGENTOS_RUNNER_COUNT: "12" };
+    try {
+      const initial = installLaunchdServices({ ...common, environment, effectiveUid: 501, apply: true });
+      installStagedSystemdServices({ ...common, environment, effectiveUid: 0, execute: () => "" });
+      const originalManifest = readFileSync(initial.manifestPath, "utf8");
+      const originalStagedUnit = readFileSync(initial.manifest.entries[1].stagedPath);
+      assert.throws(() => installLaunchdServices({
+        ...common,
+        environment: { AGENTOS_RUNNER_COUNT: "16" },
+        effectiveUid: 501,
+        apply: true,
+        visudoPath: "/usr/bin/false",
+        execute: (_command, args) => {
+          if (args[0] === "-c") throw new Error("invalid staged sudoers");
+          return "";
+        },
+      }), /systemd-sudoers-invalid/u);
+      assert.equal(readFileSync(initial.manifestPath, "utf8"), originalManifest);
+      assert.deepEqual(readFileSync(initial.manifest.entries[1].stagedPath), originalStagedUnit);
+
+      installLaunchdServices({ ...common, environment, effectiveUid: 501, revert: true, apply: true, execute: () => "" });
+      installStagedSystemdServices({ ...common, environment, effectiveUid: 0, revert: true, execute: () => "" });
+      assert.equal(existsSync(join(root, "shared/bin/agentos-service-wrapper.mjs")), false);
+      assert.equal(existsSync(initial.manifestPath), false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+test("Darwin shrink distinguishes unloaded services from query and bootout failures", () => {
+  const previousPlatform = process.env.AGENTOS_SERVICE_PLATFORM;
+  process.env.AGENTOS_SERVICE_PLATFORM = "darwin";
+  const fixture = () => {
+    const root = mkdtempSync(join(tmpdir(), "agentos-launchd-query-"));
+    const home = join(root, "home");
+    mkdirSync(join(root, "shared"), { recursive: true });
+    writeFileSync(join(root, "shared/.env"), "DATABASE_URL=configured\n");
+    mkdirSync(join(root, "releases/release-1"), { recursive: true });
+    symlinkSync("releases/release-1", join(root, "current"));
+    const common = { repositoryRoot: root, userHome: home, nodeBinary: process.execPath, gitBinary: process.execPath, effectiveUid: 501, apply: true };
+    installLaunchdServices({ ...common, environment: { AGENTOS_RUNNER_COUNT: "16" } });
+    return { root, home, common };
+  };
+  try {
+    const unloaded = fixture();
+    try {
+      const calls = [];
+      installLaunchdServices({
+        ...unloaded.common,
+        environment: { AGENTOS_RUNNER_COUNT: "12" },
+        execute: (_command, args) => { calls.push(args); throw launchdNotFound(); },
+      });
+      assert.equal(calls.every(([verb]) => verb === "print"), true);
+      for (const index of [13, 14, 15, 16]) {
+        assert.equal(existsSync(join(unloaded.home, `Library/LaunchAgents/com.agentos.runner-${index}.plist`)), false);
+      }
+    } finally {
+      rmSync(unloaded.root, { recursive: true, force: true });
+    }
+
+    for (const failure of ["query", "bootout", "post-query"]) {
+      const current = fixture();
+      try {
+        let queryCount = 0;
+        assert.throws(() => installLaunchdServices({
+          ...current.common,
+          environment: { AGENTOS_RUNNER_COUNT: "12" },
+          execute: (_command, args) => {
+            if (args[0] === "print") queryCount += 1;
+            if ((failure === "query" && args[0] === "print")
+                || (failure === "post-query" && args[0] === "print" && queryCount === 2)) {
+              const error = new Error("permission denied");
+              error.status = 1;
+              error.stderr = "permission denied";
+              throw error;
+            }
+            if (failure === "bootout" && args[0] === "bootout") throw new Error("bootout failed");
+            return "";
+          },
+        }), failure === "query" || failure === "post-query"
+          ? /launchd-service-query-failed:com\.agentos\.runner-13/u
+          : /launchd-service-removal-failed:com\.agentos\.runner-13/u);
+        assert.equal(existsSync(join(current.home, "Library/LaunchAgents/com.agentos.runner-13.plist")), true);
+      } finally {
+        rmSync(current.root, { recursive: true, force: true });
+      }
+    }
+  } finally {
+    if (previousPlatform === undefined) delete process.env.AGENTOS_SERVICE_PLATFORM;
+    else process.env.AGENTOS_SERVICE_PLATFORM = previousPlatform;
+  }
+});
+
+test("reinstall rewrites and restarts services when canonical definition inputs change", async () => {
+  await withLinux(() => {
+    const root = mkdtempSync(join(tmpdir(), "agentos-systemd-definition-change-"));
+    const unitDirectory = join(root, "etc/systemd/system");
+    const sudoersPath = join(root, "etc/sudoers.d/anneal-service-control");
+    const common = {
+      repositoryRoot: root,
+      serviceUser: "anneal-test",
+      userLookup: accountLookup,
+      nodeBinary: process.execPath,
+      gitBinary: process.execPath,
+      unitDirectory,
+      sudoersPath,
+      systemctlPath: "/usr/bin/true",
+      visudoPath: "/usr/bin/true",
+    };
+    try {
+      installLaunchdServices({ ...common, path: "/usr/bin:/bin", effectiveUid: 501, apply: true });
+      installStagedSystemdServices({ ...common, effectiveUid: 0, execute: () => "" });
+      const apiUnit = join(unitDirectory, "com.agentos.api.service");
+      const before = readFileSync(apiUnit, "utf8");
+      installLaunchdServices({ ...common, path: "/custom/bin:/usr/bin:/bin", effectiveUid: 501, apply: true, execute: () => "" });
+      chmodSync(sudoersPath, 0o600);
+      const calls = [];
+      installStagedSystemdServices({ ...common, effectiveUid: 0, execute: (_command, args) => { calls.push(args); return ""; } });
+      assert.notEqual(readFileSync(apiUnit, "utf8"), before);
+      assert.match(readFileSync(apiUnit, "utf8"), /Environment=PATH="\/custom\/bin:\/usr\/bin:\/bin"/u);
+      assert.deepEqual(calls.filter(([verb]) => verb === "enable"), SERVICE_LABELS.map((label) => ["enable", "--now", `${label}.service`]));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  const previousPlatform = process.env.AGENTOS_SERVICE_PLATFORM;
+  process.env.AGENTOS_SERVICE_PLATFORM = "darwin";
+  const root = mkdtempSync(join(tmpdir(), "agentos-launchd-definition-change-"));
+  const home = join(root, "home");
+  try {
+    mkdirSync(join(root, "shared"), { recursive: true });
+    writeFileSync(join(root, "shared/.env"), "DATABASE_URL=configured\n");
+    mkdirSync(join(root, "releases/release-1"), { recursive: true });
+    symlinkSync("releases/release-1", join(root, "current"));
+    const common = { repositoryRoot: root, userHome: home, nodeBinary: process.execPath, gitBinary: process.execPath, effectiveUid: 501, apply: true };
+    installLaunchdServices({ ...common, path: "/usr/bin:/bin" });
+    const apiPlist = join(home, "Library/LaunchAgents/com.agentos.api.plist");
+    const before = readFileSync(apiPlist, "utf8");
+    assert.throws(() => installLaunchdServices({
+      ...common,
+      path: "/custom/bin:/usr/bin:/bin",
+      execute: (_command, args) => {
+        if (args[0] === "kickstart") throw new Error("restart failed");
+        return "";
+      },
+    }), /launchd-service-restart-failed:com\.agentos\.api/u);
+    const pendingManifest = JSON.parse(readFileSync(join(root, ".agentos-deploy/launchd/manifest.json"), "utf8"));
+    assert.equal(pendingManifest.entries.find(({ path }) => path === apiPlist).previousInstalledSha256, digest(before));
+    writeFileSync(apiPlist, before);
+    const calls = [];
+    installLaunchdServices({ ...common, path: "/custom/bin:/usr/bin:/bin", execute: (_command, args) => { calls.push(args); return ""; } });
+    assert.notEqual(readFileSync(apiPlist, "utf8"), before);
+    assert.match(readFileSync(apiPlist, "utf8"), /<string>\/custom\/bin:\/usr\/bin:\/bin<\/string>/u);
+    assert.deepEqual(calls.filter(([verb]) => verb === "kickstart"), SERVICE_LABELS.map((label) => ["kickstart", "-k", `gui/501/${label}`]));
+  } finally {
+    if (previousPlatform === undefined) delete process.env.AGENTOS_SERVICE_PLATFORM;
+    else process.env.AGENTOS_SERVICE_PLATFORM = previousPlatform;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("privileged shrink rejects a retired unit not bound to the previous manifest", async () => {
+  await withLinux(() => {
+    const root = mkdtempSync(join(tmpdir(), "agentos-systemd-retired-tamper-"));
+    const unitDirectory = join(root, "etc/systemd/system");
+    const sudoersPath = join(root, "etc/sudoers.d/anneal-service-control");
+    const common = {
+      repositoryRoot: root,
+      serviceUser: "anneal-test",
+      userLookup: accountLookup,
+      nodeBinary: process.execPath,
+      gitBinary: process.execPath,
+      unitDirectory,
+      sudoersPath,
+      systemctlPath: "/usr/bin/true",
+      visudoPath: "/usr/bin/true",
+    };
+    try {
+      installLaunchdServices({ ...common, environment: { AGENTOS_RUNNER_COUNT: "16" }, effectiveUid: 501, apply: true });
+      installStagedSystemdServices({ ...common, environment: { AGENTOS_RUNNER_COUNT: "16" }, effectiveUid: 0, execute: () => "" });
+      const staged = installLaunchdServices({ ...common, environment: { AGENTOS_RUNNER_COUNT: "12" }, effectiveUid: 501, apply: true, execute: () => "" });
+      const cleanManifest = readFileSync(staged.manifestPath, "utf8");
+      const manifest = JSON.parse(readFileSync(staged.manifestPath, "utf8"));
+      const originalRetiredEntries = manifest.retiredEntries;
+      const roguePath = join(unitDirectory, "com.agentos.rogue.service");
+      writeFileSync(roguePath, "operator unit\n");
+      manifest.retiredEntries[0] = {
+        ...manifest.retiredEntries[0],
+        label: "com.agentos.rogue",
+        unit: "com.agentos.rogue.service",
+        path: roguePath,
+        installedSha256: digest("operator unit\n"),
+      };
+      writeFileSync(staged.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+      const calls = [];
+      assert.throws(() => installStagedSystemdServices({
+        ...common,
+        environment: { AGENTOS_RUNNER_COUNT: "12" },
+        effectiveUid: 0,
+        execute: (_command, args) => { calls.push(args); return ""; },
+      }), /systemd-service-manifest-invalid/u);
+      assert.equal(readFileSync(roguePath, "utf8"), "operator unit\n");
+      assert.deepEqual(calls, []);
+
+      manifest.retiredEntries = originalRetiredEntries.slice(1);
+      writeFileSync(staged.manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+      assert.throws(() => installStagedSystemdServices({
+        ...common,
+        environment: { AGENTOS_RUNNER_COUNT: "12" },
+        effectiveUid: 0,
+        execute: (_command, args) => { calls.push(args); return ""; },
+      }), /systemd-service-manifest-invalid/u);
+      assert.deepEqual(calls, []);
+
+      const nestedRetiredTamper = JSON.parse(cleanManifest);
+      const rogueEntry = {
+        kind: "service",
+        label: "com.agentos.rogue",
+        unit: "com.agentos.rogue.service",
+        path: roguePath,
+        existed: false,
+        installedSha256: digest("operator unit\n"),
+      };
+      nestedRetiredTamper.previousManifest.retiredEntries = [rogueEntry];
+      nestedRetiredTamper.retiredEntries = [...originalRetiredEntries, rogueEntry];
+      writeFileSync(staged.manifestPath, `${JSON.stringify(nestedRetiredTamper, null, 2)}\n`);
+      assert.throws(() => installStagedSystemdServices({
+        ...common,
+        environment: { AGENTOS_RUNNER_COUNT: "12" },
+        effectiveUid: 0,
+        execute: (_command, args) => { calls.push(args); return ""; },
+      }), /systemd-service-manifest-invalid/u);
+      assert.equal(readFileSync(roguePath, "utf8"), "operator unit\n");
+      assert.deepEqual(calls, []);
+
+      const provenanceTamper = JSON.parse(cleanManifest);
+      const survivorEntry = provenanceTamper.entries.find(({ label }) => label === "com.agentos.runner-12");
+      writeFileSync(survivorEntry.path, "unprivileged replacement\n");
+      survivorEntry.preserved = false;
+      survivorEntry.previousInstalledSha256 = digest("unprivileged replacement\n");
+      writeFileSync(staged.manifestPath, `${JSON.stringify(provenanceTamper, null, 2)}\n`);
+      assert.throws(() => installStagedSystemdServices({
+        ...common,
+        environment: { AGENTOS_RUNNER_COUNT: "12" },
+        effectiveUid: 0,
+        execute: (_command, args) => { calls.push(args); return ""; },
+      }), /systemd-service-manifest-invalid/u);
+      assert.equal(readFileSync(survivorEntry.path, "utf8"), "unprivileged replacement\n");
+      assert.deepEqual(calls, []);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 test("auto-deploy systemd stage renders a oneshot and timer, enabling only the timer", async () => {

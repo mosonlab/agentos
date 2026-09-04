@@ -57,6 +57,9 @@ export const runServiceInstaller = (args, context = {}) => {
         serviceUser: options.serviceUser,
       });
       if (result.platform === "linux") {
+        const prefix = result.runnerIdPrefix
+          ? `AGENTOS_RUNNER_ID_PREFIX=${shellQuote(result.runnerIdPrefix)} `
+          : "";
         const phase = options.revert ? "REVERT" : options.apply || options.installUnits ? "APPLY" : "PLAN";
         process.stdout.write(`${phase} platform=linux\n`);
         process.stdout.write(`${phase} unit-directory=${result.unitDirectory ?? "/etc/systemd/system"}\n`);
@@ -64,9 +67,9 @@ export const runServiceInstaller = (args, context = {}) => {
         process.stdout.write(`${phase} staging=${result.staging ?? "recorded"}\n`);
         if (!options.apply && !options.installUnits) process.stdout.write("PLAN no files or systemd state changed\n");
         else if (options.apply && !options.installUnits && !options.revert) {
-          process.stdout.write(`NEXT sudo node ${shellQuote(process.argv[1])} --install-units --service-user ${shellQuote(options.serviceUser)}\n`);
+          process.stdout.write(`NEXT sudo ${prefix}node ${shellQuote(process.argv[1])} --install-units --service-user ${shellQuote(options.serviceUser)}\n`);
         } else if (options.apply && options.revert && !options.installUnits) {
-          process.stdout.write(`NEXT sudo node ${shellQuote(process.argv[1])} --install-units --revert --service-user ${shellQuote(options.serviceUser)}\n`);
+          process.stdout.write(`NEXT sudo ${prefix}node ${shellQuote(process.argv[1])} --install-units --revert --service-user ${shellQuote(options.serviceUser)}\n`);
         }
       } else {
         process.stdout.write(`${options.revert ? "REVERT" : options.apply ? "APPLY" : "PLAN"} service-wrapper=${result.wrapper ?? "recorded"}\n`);
