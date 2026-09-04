@@ -7,7 +7,6 @@ export type DaemonTelemetry = {
 };
 
 export const RUNNER_FORGET_MS = 15 * 60_000;
-export const RUNNER_MAX_ENTRIES = 16;
 
 type Observation = {
   daemonVersion?: string | null | undefined;
@@ -23,14 +22,8 @@ export const createRunnerRegistry = (): {
 } => {
   const entries = new Map<string, DaemonTelemetry>();
 
-  const evictOldest = (): void => {
-    const oldest = [...entries.entries()].sort((left, right) => left[1].lastSeenAt.getTime() - right[1].lastSeenAt.getTime())[0];
-    if (oldest) entries.delete(oldest[0]);
-  };
-
   return {
     note: (runnerId, telemetry, now) => {
-      if (!entries.has(runnerId) && entries.size >= RUNNER_MAX_ENTRIES) evictOldest();
       // Replace every observation. An omitted field belongs to this daemon
       // incarnation and must not inherit telemetry from an older process.
       entries.set(runnerId, {

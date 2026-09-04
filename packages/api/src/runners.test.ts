@@ -5,7 +5,7 @@ import test from "node:test";
 import { RunStatus, RunnerKind, type PrismaClient } from "@anneal/db";
 
 import { createApp } from "./test-app.js";
-import { createRunnerRegistry, RUNNER_MAX_ENTRIES } from "./runners.js";
+import { createRunnerRegistry, RUNNER_FORGET_MS } from "./runners.js";
 
 test("runner online windows use the 30s floor and three poll intervals", () => {
   const registry = createRunnerRegistry();
@@ -29,23 +29,15 @@ test("runner observations replace omitted telemetry", () => {
   });
 });
 
-test("stale incarnations retire and the registry cap keeps the newest entries", () => {
+test("the registry keeps every runner inside the forget window and retires stale entries", () => {
   const registry = createRunnerRegistry();
   const start = new Date("2026-08-17T00:00:00.000Z");
-  registry.note("host-1", {}, start);
-  registry.note("host-2", {}, new Date(start.getTime() + 16 * 60_000));
-  registry.note("host-3", {}, new Date(start.getTime() + 32 * 60_000));
-  assert.deepEqual(registry.snapshot(new Date(start.getTime() + 32 * 60_000)).map((row) => row.runnerId), ["host-3"]);
+  registry.note("stale-runner", {}, start);
+  const recent = Array.from({ length: 23 }, (_, index) => `runner-${String(index + 1).padStart(2, "0")}`);
+  for (const runnerId of recent) registry.note(runnerId, {}, new Date(start.getTime() + 1));
 
-  const capped = createRunnerRegistry();
-  for (let index = 0; index < 20; index += 1) capped.note(`runner-${String(index).padStart(2, "0")}`, {}, new Date(start.getTime() + index));
-  const kept = capped.snapshot(new Date(start.getTime() + 20));
-  assert.equal(kept.length, RUNNER_MAX_ENTRIES);
-  assert.deepEqual(kept.map((row) => row.runnerId), Array.from({ length: 16 }, (_, index) => `runner-${String(index + 4).padStart(2, "0")}`));
-
-  const concurrent = createRunnerRegistry();
-  for (let index = 1; index <= 3; index += 1) concurrent.note(`host-${index}`, {}, new Date(start.getTime() + index * 10_000));
-  assert.equal(concurrent.snapshot(new Date(start.getTime() + 60_000)).length, 3);
+  const snapshot = registry.snapshot(new Date(start.getTime() + RUNNER_FORGET_MS + 1));
+  assert.deepEqual(snapshot.map((row) => row.runnerId), recent);
 });
 
 const withTokens = async (operation: () => Promise<void>): Promise<void> => {
