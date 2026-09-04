@@ -584,6 +584,7 @@ export const boardCard = (
     // run 2's outcome, and the card's only run line is the newest run's.
     mergeOutcome: latestRunMergeOutcome(row.runs, row.stepOutput),
     repairOf,
+    budgetRemaining: startability.checklist.budgetRemaining,
     chainAggregate: null,
   } satisfies BoardCard;
 };

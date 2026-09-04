@@ -64,6 +64,7 @@ import {
   type LatestAgentMessageEvent,
 } from "../latest-agent-message.js";
 import { lockDoneTasks, partitionArchivable } from "../task-archive.js";
+import { editableBrief } from "../task-brief.js";
 import {
   isCanonicalBlindFindingsStep,
   isCanonicalSolFindingsStep,
@@ -184,6 +185,7 @@ type RecurringFireResponse = SerializesTo<RecurringFireContract<Date>, Recurring
 type RunResponse = SerializesTo<RunContract<Date, Prisma.Decimal>, RunContract>;
 type TaskActivityResponse = SerializesTo<TaskActivityContract<Date>, TaskActivityContract>;
 type TaskDetailResponse = SerializesTo<TaskDetailContract<Date, Prisma.Decimal>, TaskDetailContract>;
+
 type TaskStartabilityResponse = SerializesTo<TaskStartabilityContract, TaskStartabilityContract>;
 type TaskStepOutputResponse = SerializesTo<TaskStepOutputContract<Date>, TaskStepOutputContract>;
 
@@ -306,6 +308,9 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
             name: true,
             stepIndex: true,
             outputKind: true,
+            // Not part of the projection: `readBrief` needs it to migrate a
+            // task written before the brief fence existed.
+            priorOutputKinds: true,
             taskTemplate: { select: { name: true } },
           },
         },
@@ -362,6 +367,7 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
         ? mergeRecovery
         : null,
     })) satisfies RunResponse[];
+    const templateStep = task.templateStep;
     return context.json({
       ...task,
       executionOwner: chainExecutionOwner(task),
@@ -370,6 +376,16 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
       strandedSalvageBranches: strandedSalvageBranchesFromRuns(task.runs),
       mergeOutcome,
       mergeRecovery,
+      budgetRemaining: admission.verdict.checklist.budgetRemaining,
+      editableBrief: editableBrief(task, templateStep),
+      // Re-stated rather than spread: the row carries `priorOutputKinds` for
+      // the brief read above, and the projection does not publish it.
+      templateStep: templateStep === null ? null : {
+        name: templateStep.name,
+        stepIndex: templateStep.stepIndex,
+        outputKind: templateStep.outputKind,
+        taskTemplate: templateStep.taskTemplate,
+      },
       runs,
     } satisfies TaskDetailResponse);
   });

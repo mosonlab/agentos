@@ -312,21 +312,35 @@ export const runLiveness = (run: RunLivenessSubject): RunLiveness => {
 /* -------------------------------------------------------------- the actions */
 
 /**
- * A retry only lands once the last run is terminal; the API rejects the rest.
+ * What the retry affordance may offer for this task.
+ *
+ * A retry only lands once the last run is terminal and the task still has run
+ * budget; the API rejects the rest. `budget-exhausted` is separated from
+ * `unavailable` because it is the one refusal the operator can lift — the
+ * detail page shows it as a disabled control pointing at the budget field,
+ * rather than as an enabled button the API answers with a 409.
  *
  * Takes the run separately because the two callers hold it differently — the
  * board card gets one projected `latestRun`, the detail page has the whole `runs`
  * array — and a rule the board and the detail page could state differently is a
- * rule the operator gets two answers from.
+ * rule the operator gets two answers from. `budgetRemaining` comes off the
+ * projection for the same reason: only the server reads a task's configured
+ * budget together with the grants its runs carry.
  */
-export const retryable = (
-  task: { status: TaskStatus; failureReason: string | null },
+export const retryShape = (
+  task: { status: TaskStatus; failureReason: string | null; budgetRemaining: boolean },
   run: { status: RunStatus } | null | undefined,
-): boolean => {
-  if (!run) return false;
-  if (isActiveRunStatus(run.status)) return false;
-  return task.status === "REVIEW" || task.failureReason !== null || run.status !== "SUCCEEDED";
+): "available" | "budget-exhausted" | "unavailable" => {
+  if (!run) return "unavailable";
+  if (isActiveRunStatus(run.status)) return "unavailable";
+  if (task.status !== "REVIEW" && task.failureReason === null && run.status === "SUCCEEDED") return "unavailable";
+  return task.budgetRemaining ? "available" : "budget-exhausted";
 };
+
+export const retryable = (
+  task: { status: TaskStatus; failureReason: string | null; budgetRemaining: boolean },
+  run: { status: RunStatus } | null | undefined,
+): boolean => retryShape(task, run) === "available";
 
 /* -------------------------------------------------------------- persistence */
 

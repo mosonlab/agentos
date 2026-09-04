@@ -125,7 +125,7 @@ test("structured task prompts lead with responsibility and collapse the common c
     assert.ok(parts.productContract?.startsWith("Product Contract: TC-UX v1.0"), fixture.name);
     assert.ok(parts.responsibility.length > 20, fixture.name);
     responsibilities.add(parts.responsibility);
-    const markup = renderToStaticMarkup(<TaskPrompt description={fixture.prompt} />);
+    const markup = renderToStaticMarkup(<TaskPrompt description={fixture.prompt} editableBrief={null} pending={false} onSave={() => {}} />);
     assert.ok(markup.indexOf(parts.responsibility.slice(0, 40)) < markup.indexOf("Product Contract"), fixture.name);
     assert.match(markup, /<details>/);
     assert.doesNotMatch(markup, /<details open/);
