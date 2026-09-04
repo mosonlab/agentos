@@ -131,7 +131,7 @@ sha256_of() {
 # owned by the unprivileged installer and is later copied into /etc by the
 # privileged service installer.
 # ---------------------------------------------------------------------------
-SYSTEMD_STAGING_DIR="${SYSTEMD_STAGING_DIR:-${AGENTOS_SYSTEMD_STAGING_DIR:-${AGENTOS_DEPLOY_STAGING_DIR:-${AGENTOS_INSTALL_ROOT:-${STAGING_DIR:-$REPOSITORY_ROOT/.agentos-deploy/systemd}}}}}"
+SYSTEMD_STAGING_DIR="${SYSTEMD_STAGING_DIR:-${AGENTOS_SYSTEMD_STAGING_DIR:-${AGENTOS_DEPLOY_STAGING_DIR:-${AGENTOS_INSTALL_ROOT:-${STAGING_DIR:-$REPOSITORY_ROOT/.agentos-deploy/launchd/staging/units}}}}}"
 if [ "$SERVICE_PLATFORM" = linux ] && [ "$MANIFEST_DIR" = "$AGENTOS_PREFIX/etc/plist-manifest" ]; then
   MANIFEST_DIR="$SYSTEMD_STAGING_DIR/plist-manifest"
 fi

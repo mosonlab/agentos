@@ -42,6 +42,11 @@ import {
   verifyServicePlistDefinitions,
 } from "./install-launchd.mjs";
 
+// This suite is the frozen launchd compatibility fixture. Keep exercising
+// that path when the merge-gate host itself is Linux; systemd behavior lives
+// in the dedicated installer suite.
+process.env.AGENTOS_SERVICE_PLATFORM = "darwin";
+
 const makeWritable = (path) => {
   if (!existsSync(path)) return;
   const status = lstatSync(path);

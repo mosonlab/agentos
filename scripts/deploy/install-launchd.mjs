@@ -758,7 +758,9 @@ export const renderSystemdSudoers = ({ serviceUser, labels = SERVICE_LABELS, sys
   const rules = [];
   for (const label of labels) {
     const unit = unitNameForLabel(label);
-    for (const verb of ["restart", "show", "is-active"]) rules.push(`${systemctlPath} ${verb} ${unit}`);
+    rules.push(`${systemctlPath} restart ${unit}`);
+    rules.push(`${systemctlPath} show -p ExecStart --value ${unit}`);
+    rules.push(`${systemctlPath} is-active ${unit}`);
   }
   return `${serviceUser} ALL=(root) NOPASSWD: ${rules.join(", ")}\n`;
 };

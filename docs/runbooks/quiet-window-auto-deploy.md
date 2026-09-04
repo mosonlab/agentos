@@ -186,6 +186,9 @@ export AGENTOS_SERVICE_PLATFORM=linux
 export SERVICE_USER="${SERVICE_USER:?set an existing non-root service account}"
 export DEPLOY_PG_DUMP_BINARY="${DEPLOY_PG_DUMP_BINARY:?set an absolute pg_dump path}"
 
+scripts/os-isolation/patch-runner-plists.sh --dry-run
+scripts/os-isolation/patch-runner-plists.sh --apply
+
 node scripts/deploy/install-launchd-services.mjs \
   --service-user "$SERVICE_USER" \
   --replace-existing

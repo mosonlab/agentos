@@ -90,7 +90,7 @@ verify_linux() {
   local LAUNCHER_USER="${LAUNCHER_USER:-${SUDO_USER:-$(id -un)}}"
   local SYSTEMCTL="${SYSTEMCTL_BIN:-${SYSTEMCTL:-systemctl}}"
   local REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-  local WRAPPER_PATH="${WRAPPER_PATH:-$REPO_ROOT/scripts/deploy/launchd-service-wrapper.mjs}"
+  local WRAPPER_PATH="${WRAPPER_PATH:-$REPO_ROOT/shared/bin/agentos-service-wrapper.mjs}"
   local problems=0
   local LINUX_SYSTEMCTL_OUTPUT=''
   local LINUX_ACTIVE_OUTPUT=''
@@ -193,7 +193,7 @@ verify_linux() {
     if ! systemctl_show_linux ExecStart "$unit"; then return; fi
     output="$LINUX_SYSTEMCTL_OUTPUT"
     case "$output" in
-      *"$WRAPPER_PATH"*"$label"*|*launchd-service-wrapper.mjs*"$label"*)
+      *"$WRAPPER_PATH"*"$label"*)
         pass_linux "$label ExecStart uses the stable wrapper and label" ;;
       *) fail_linux "$label ExecStart does not contain the stable wrapper path and label" ;;
     esac
