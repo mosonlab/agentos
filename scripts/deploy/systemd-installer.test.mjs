@@ -17,8 +17,8 @@ import test from "node:test";
 
 import {
   autoDeployEnvironmentValues,
+  installLaunchd,
   installLaunchdServices,
-  installStagedSystemdAutoDeploy,
   installStagedSystemdServices,
   planSystemdAutoDeploy,
   renderAutoDeploySystemdUnit,
@@ -381,15 +381,34 @@ test("auto-deploy systemd stage renders a oneshot and timer, enabling only the t
       const staged = planSystemdAutoDeploy({ ...options, apply: true });
       const calls = [];
       const execute = (_command, args) => { calls.push(args); return ""; };
-      const installed = installStagedSystemdAutoDeploy({
+      const installCode = installLaunchd(["--install-units", "--service-user", "anneal-test"], {
         ...options,
         manifestPath: staged.manifestPath,
         effectiveUid: 0,
         execute,
+        environment: { AGENTOS_SERVICE_PLATFORM: "linux" },
       });
-      assert.equal(installed.applied, true);
+      assert.equal(installCode, 0);
       assert.deepEqual(calls, [["daemon-reload"], ["enable", "--now", "com.agentos.auto-deploy.timer"]]);
       assert.equal(existsSync(join(unitDirectory, "com.agentos.auto-deploy.service")), true);
+      const planRevertCode = installLaunchd(["--revert", "--service-user", "anneal-test"], {
+        ...options,
+        manifestPath: staged.manifestPath,
+        effectiveUid: 501,
+        execute,
+        environment: { AGENTOS_SERVICE_PLATFORM: "linux" },
+      });
+      assert.equal(planRevertCode, 0);
+      assert.equal(existsSync(join(unitDirectory, "com.agentos.auto-deploy.service")), true);
+      const revertCode = installLaunchd(["--revert", "--apply", "--service-user", "anneal-test"], {
+        ...options,
+        manifestPath: staged.manifestPath,
+        effectiveUid: 0,
+        execute,
+        environment: { AGENTOS_SERVICE_PLATFORM: "linux" },
+      });
+      assert.equal(revertCode, 0);
+      assert.equal(existsSync(join(unitDirectory, "com.agentos.auto-deploy.service")), false);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

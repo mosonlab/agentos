@@ -1125,7 +1125,7 @@ export const installStagedSystemdServices = ({
   effectiveUid = typeof process.geteuid === "function" ? process.geteuid() : process.getuid(),
   revert = false,
   apply = true,
-} = {}) => {
+  } = {}) => {
   const platform = resolveServicePlatform();
   if (platform !== "linux") throw new Error("systemd-installer-unsupported:darwin");
   if (effectiveUid !== 0) throw new Error("systemd-installer-requires-root");
@@ -1422,7 +1422,7 @@ export const installLaunchd = (args, context = {}) => {
       resolveSystemdServiceUser({ serviceUser, platform, lookup: context.userLookup, execute: context.execute ?? execFileSync });
     }
     if (installUnits) {
-      const result = installStagedSystemdAutoDeploy({
+      installStagedSystemdAutoDeploy({
         repositoryRoot: context.repositoryRoot,
         manifestPath: context.manifestPath,
         unitDirectory: context.unitDirectory,
@@ -1433,13 +1433,35 @@ export const installLaunchd = (args, context = {}) => {
         revert,
         apply: true,
       });
-      process.stdout.write(`${apply ? "APPLY" : "PLAN"} platform=linux\n`);
-      process.stdout.write(`${apply ? "APPLY" : "PLAN"} unit-directory=${context.unitDirectory ?? SYSTEMD_UNIT_DIRECTORY}\n`);
-      process.stdout.write(`${apply ? "APPLY" : "PLAN"} units=2\n`);
-      process.stdout.write(`${apply ? "APPLY" : "PLAN"} staging=${context.stagingRoot ?? "recorded"}\n`);
-      return result;
+      const phase = revert ? "REVERT" : "APPLY";
+      process.stdout.write(`${phase} platform=linux\n`);
+      process.stdout.write(`${phase} unit-directory=${context.unitDirectory ?? SYSTEMD_UNIT_DIRECTORY}\n`);
+      process.stdout.write(`${phase} units=2\n`);
+      process.stdout.write(`${phase} staging=${context.stagingRoot ?? "recorded"}\n`);
+      return 0;
     }
-    if (typeof process.geteuid === "function" && process.geteuid() === 0) throw new Error("launchd-installer-refuses-root");
+    if (revert) {
+      installStagedSystemdAutoDeploy({
+        repositoryRoot: context.repositoryRoot,
+        manifestPath: context.manifestPath,
+        unitDirectory: context.unitDirectory,
+        sudoersPath: context.sudoersPath,
+        systemctlPath: context.systemctlPath,
+        execute: context.execute ?? execFileSync,
+        effectiveUid: context.effectiveUid,
+        revert: true,
+        apply,
+      });
+      process.stdout.write(`${apply ? "REVERT" : "PLAN"} platform=linux\n`);
+      process.stdout.write(`${apply ? "REVERT" : "PLAN"} unit-directory=${context.unitDirectory ?? SYSTEMD_UNIT_DIRECTORY}\n`);
+      process.stdout.write(`${apply ? "REVERT" : "PLAN"} units=2\n`);
+      process.stdout.write(`${apply ? "REVERT" : "PLAN"} staging=${context.stagingRoot ?? "recorded"}\n`);
+      if (!apply) process.stdout.write("PLAN no files or systemd state changed\n");
+      return 0;
+    }
+    const callerUid = context.effectiveUid
+      ?? (typeof process.geteuid === "function" ? process.geteuid() : process.getuid());
+    if (callerUid === 0) throw new Error("launchd-installer-refuses-root");
     const root = realpathSync(resolve(context.repositoryRoot ?? REPOSITORY_ROOT));
     const nodeBinary = realpathSync(context.nodeBinary ?? process.execPath);
     const gitBinary = context.gitBinary ? realpathSync(context.gitBinary) : requiredBinary("git");
@@ -1476,7 +1498,8 @@ export const installLaunchd = (args, context = {}) => {
     process.stdout.write(`${apply ? "APPLY" : "PLAN"} units=2\n`);
     process.stdout.write(`${apply ? "APPLY" : "PLAN"} staging=${result.staging}\n`);
     if (!apply) process.stdout.write("PLAN no files or systemd state changed\n");
-    return result;
+    else process.stdout.write(`NEXT sudo node ${process.argv[1]} --install-units --service-user ${serviceUser}\n`);
+    return 0;
   }
   if (installUnits) throw new Error("systemd-installer-unsupported:darwin");
   if (revert) throw new Error("launchd-auto-deploy-revert-unsupported");
@@ -1711,7 +1734,7 @@ export const installStagedSystemdAutoDeploy = ({
 } = {}) => {
   const platform = resolveServicePlatform();
   if (platform !== "linux") throw new Error("systemd-installer-unsupported:darwin");
-  if (effectiveUid !== 0) throw new Error("systemd-installer-requires-root");
+  if (apply && effectiveUid !== 0) throw new Error("systemd-installer-requires-root");
   const root = realpathSync(resolve(repositoryRoot ?? REPOSITORY_ROOT));
   const path = manifestPath ?? autoDeployManifestPath(root);
   if (!existsSync(path)) throw new Error("systemd-auto-deploy-manifest-missing");
@@ -1723,8 +1746,8 @@ export const installStagedSystemdAutoDeploy = ({
   const entries = [...manifest.entries, ...(Array.isArray(manifest.auxiliaryEntries) ? manifest.auxiliaryEntries : [])];
   const targetRoot = resolve(unitDirectory ?? manifest.unitDirectory ?? SYSTEMD_UNIT_DIRECTORY);
   const targetSudoers = resolve(sudoersPath ?? manifest.sudoersPath ?? SYSTEMD_SUDOERS_PATH);
-  const systemctl = systemctlPath ?? systemdCommandPath("systemctl", null, execute);
   if (!apply) return Object.freeze({ applied: false, reverted: false, entries: entries.map((entry) => entry.path) });
+  const systemctl = systemctlPath ?? systemdCommandPath("systemctl", null, execute);
   for (const entry of entries) {
     const current = fileDigest(entry.path);
     const recognized = current === entry.installedSha256
