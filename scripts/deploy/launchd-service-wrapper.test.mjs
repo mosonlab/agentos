@@ -28,7 +28,9 @@ import { resolveServicePlatform } from "./service-platform.mjs";
 import {
   generateServiceInventory,
   parseSharedEnvironment,
+  resolveRunnerIdPrefix,
   resolveRunnerCount,
+  runnerIdForLabel,
   SERVICE_LABELS,
   SERVICE_INVENTORY_ENTRIES,
   SERVICE_INVENTORY,
@@ -251,6 +253,69 @@ test("runner count keeps ten as the default and rejects invalid values", () => {
       () => resolveDeployRunnerCount({ AGENTOS_RUNNER_COUNT: value }),
       new RegExp(`runner-count-invalid:${value}$`, "u"),
     );
+  }
+});
+
+test("runner identity prefixes stay in lockstep across inventory and invocation", () => {
+  const prefix = "vm-";
+  assert.equal(resolveRunnerIdPrefix({ AGENTOS_RUNNER_ID_PREFIX: prefix }), prefix);
+  assert.equal(runnerIdForLabel("com.agentos.runner-4", prefix), "vm-runner-4");
+  assert.deepEqual(
+    generateServiceInventory(4, prefix),
+    generateDeployServiceInventory(4, prefix),
+  );
+  assert.throws(
+    () => resolveRunnerIdPrefix({ AGENTOS_RUNNER_ID_PREFIX: "bad/prefix" }),
+    /runner-id-prefix-invalid:bad\/prefix/u,
+  );
+});
+
+test("service invocation resolves the configured prefix without overriding an explicit runner id", () => {
+  const fixture = releaseFixture();
+  try {
+    const configured = resolveServiceInvocation({
+      repositoryRoot: fixture.root,
+      label: "com.agentos.runner-16",
+      environment: { AGENTOS_RUNNER_ID_PREFIX: "vm-" },
+    });
+    assert.equal(configured.env.RUNNER_ID, "vm-runner-16");
+    const explicit = resolveServiceInvocation({
+      repositoryRoot: fixture.root,
+      label: "com.agentos.runner-2",
+      environment: { AGENTOS_RUNNER_ID_PREFIX: "vm-", RUNNER_ID: "operator-runner" },
+    });
+    assert.equal(explicit.env.RUNNER_ID, "operator-runner");
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("the wrapper entrypoint accepts a runner above the default inventory without runner-count environment", () => {
+  const fixture = releaseFixture();
+  try {
+    const environment = {
+      ...process.env,
+      AGENTOS_REPOSITORY_ROOT: fixture.root,
+      AGENTOS_RUNNER_ID_PREFIX: "vm-",
+    };
+    for (const key of [
+      "FILES_ROOT",
+      "RUNNER_WORKSPACE_ROOT",
+      "RUNNER_DEPENDENCY_CACHE_ROOT",
+      "RUNNER_REPO_MIRROR_ROOT",
+      "CONTROL_PLANE_STATE_DIR",
+    ]) delete environment[key];
+    const result = spawnSync(process.execPath, [
+      fileURLToPath(new URL("./launchd-service-wrapper.mjs", import.meta.url)),
+      "com.agentos.runner-16",
+    ], {
+      encoding: "utf8",
+      env: environment,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /SERVICE-WRAPPER service=com\.agentos\.runner-16/u);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
   }
 });
 

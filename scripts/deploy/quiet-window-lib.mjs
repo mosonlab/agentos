@@ -5,6 +5,14 @@ export const BLOCKING_RUN_STATUSES = Object.freeze(["claimed", "provisioning", "
 export const DEFAULT_RUNNER_COUNT = 10;
 export const MAX_RUNNER_COUNT = 64;
 
+export const resolveRunnerIdPrefix = (environment = process.env) => {
+  const prefix = environment?.AGENTOS_RUNNER_ID_PREFIX ?? "";
+  if (typeof prefix !== "string" || !/^[A-Za-z0-9_.-]*$/u.test(prefix)) {
+    throw new Error(`runner-id-prefix-invalid:${String(prefix)}`);
+  }
+  return prefix;
+};
+
 const validatedRunnerCount = (value) => {
   const count = typeof value === "number"
     ? value
@@ -30,14 +38,18 @@ const runnerLabelForIndex = (index) => index === 1
   : `com.agentos.runner-${index}`;
 
 /** Generate the ordered service inventory consumed by deploy control paths. */
-export const generateServiceInventory = (runnerCount = resolveRunnerCount()) => {
+export const generateServiceInventory = (
+  runnerCount = resolveRunnerCount(),
+  runnerIdPrefix = resolveRunnerIdPrefix(),
+) => {
   const count = validatedRunnerCount(runnerCount);
+  const prefix = resolveRunnerIdPrefix({ AGENTOS_RUNNER_ID_PREFIX: runnerIdPrefix });
   const entries = [
     { label: "com.agentos.api", runnerId: null },
     { label: "com.agentos.inbox", runnerId: null },
     ...Array.from({ length: count }, (_unused, offset) => {
       const index = offset + 1;
-      return { label: runnerLabelForIndex(index), runnerId: `runner-${index}` };
+      return { label: runnerLabelForIndex(index), runnerId: `${prefix}runner-${index}` };
     }),
     { label: "com.agentos.web", runnerId: null },
   ];
