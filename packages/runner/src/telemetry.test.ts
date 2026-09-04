@@ -28,6 +28,18 @@ test("claim and heartbeat telemetry carry the exact package version", async () =
   });
 });
 
+test("claim declaration is sent only when the runner serves an explicit set", async () => {
+  const config = loadRunnerConfig();
+  const stats = async (): Promise<{ bavail: number; bsize: number }> => ({ bavail: 12, bsize: 4_096 });
+  const declaredConfig = { ...config, servedKinds: ["CODEX", "PI"] as const };
+
+  const undeclared = await claimRequestBody(config, stats);
+  const declared = await claimRequestBody(declaredConfig, stats);
+
+  assert.equal(Object.hasOwn(undeclared, "servedKinds"), false);
+  assert.deepEqual(declared, { ...undeclared, servedKinds: ["CODEX", "PI"] });
+});
+
 test("a statfs failure omits disk telemetry without blocking a claim", async () => {
   const config = loadRunnerConfig();
   const claim = await claimRequestBody(config, async () => { throw new Error("unmounted"); });
