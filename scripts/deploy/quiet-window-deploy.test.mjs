@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import { RUNTIME_TOOL_FILES } from "../../packages/runner/scripts/build-runtime-tools.mjs";
-import { DEPLOY_PHASES, UPGRADE_DEPLOY_PHASES } from "./deploy-phases.mjs";
+import { DEPLOY_PHASES, UPGRADE_DEPLOY_PHASES, deployPhasesForRole } from "./deploy-phases.mjs";
 import { openDeploymentAttempt, parseReleaseArtifactReceipt } from "./deployment-attempt.mjs";
 import {
   DeployFailure,
@@ -35,7 +35,7 @@ import {
   deployReleaseArtifactPaths,
   workspaceDependencyPaths,
 } from "./release-artifacts.mjs";
-import { pruneDeployHistory } from "./deploy-preflight.mjs";
+import { blockingRunsStatement, pruneDeployHistory } from "./deploy-preflight.mjs";
 import { createDeploymentLedger, DEPLOYMENT_LEDGER_STATES } from "./deployment-ledger.mjs";
 import { createProductionHost } from "./quiet-window-host.mjs";
 import {
@@ -59,6 +59,8 @@ import {
   deployRootFromEnvironment,
   verifyStableServicePaths,
 } from "./quiet-window-deploy.mjs";
+import { readRunnerTargetRevision, resolveDeployRole } from "./runner-role-target.mjs";
+import { runnerRegistrationRefusal } from "./runner-role-verification.mjs";
 
 const revisions = { from: "a".repeat(40), to: "b".repeat(40) };
 const REPOSITORY_ROOT = fileURLToPath(new URL("../..", import.meta.url));
@@ -91,6 +93,13 @@ const EXPECTED_PHASES = [
   "restart-services",
   "verify-services",
 ];
+const RUNNER_PHASES = EXPECTED_PHASES.filter((name) => ![
+  "backup",
+  "guarded-migration",
+  "generate-prisma-client",
+  "canonical-prompt-sync",
+  "verify-runtime-prisma-client",
+].includes(name));
 
 const RETRY_ESCALATION = Object.freeze({ reason: "remote-main-unreadable", attempts: 2 });
 
@@ -292,6 +301,58 @@ test("argv names exactly one mode", () => {
   assert.throws(
     () => parseDeployArguments(["--dry-run", "--prune-history"]),
     (error) => error.reason === "usage" && error.detail === "modes-are-mutually-exclusive",
+  );
+});
+
+test("deploy role defaults to control-plane and rejects unknown values", () => {
+  assert.equal(resolveDeployRole({}), "control-plane");
+  assert.equal(resolveDeployRole({ AGENTOS_DEPLOY_ROLE: "runner" }), "runner");
+  assert.throws(
+    () => resolveDeployRole({ AGENTOS_DEPLOY_ROLE: "database" }),
+    (error) => error instanceof DeployFailure && error.reason === "deploy-role-invalid",
+  );
+});
+
+test("runner target is the clean control-plane commit only when the source contains it", async () => {
+  const commit = "c".repeat(40);
+  const calls = [];
+  const target = await readRunnerTargetRevision({
+    apiBaseUrl: "http://control-plane.example.test/",
+    fetchImpl: async (url) => {
+      calls.push(url);
+      return { ok: true, json: async () => ({ service: "@anneal/api", stamped: true, commit, dirty: false }) };
+    },
+    sourceContainsCommit: async (candidate) => { calls.push(candidate); return true; },
+  });
+  assert.equal(target, commit);
+  assert.deepEqual(calls, ["http://control-plane.example.test/version", commit]);
+});
+
+test("runner target preflight names dirty, unreachable, and missing-source failures", async () => {
+  const commit = "d".repeat(40);
+  await assert.rejects(
+    readRunnerTargetRevision({
+      apiBaseUrl: "http://control-plane",
+      fetchImpl: async () => ({ ok: true, json: async () => ({ service: "@anneal/api", stamped: true, commit, dirty: true }) }),
+      sourceContainsCommit: async () => assert.fail("dirty target must stop before the source check"),
+    }),
+    (error) => error.reason === "control-plane-build-dirty",
+  );
+  await assert.rejects(
+    readRunnerTargetRevision({
+      apiBaseUrl: "http://control-plane",
+      fetchImpl: async () => { throw new Error("offline"); },
+      sourceContainsCommit: async () => assert.fail("unreachable target must stop before the source check"),
+    }),
+    (error) => error.reason === "control-plane-version-unreachable",
+  );
+  await assert.rejects(
+    readRunnerTargetRevision({
+      apiBaseUrl: "http://control-plane",
+      fetchImpl: async () => ({ ok: true, json: async () => ({ service: "@anneal/api", stamped: true, commit, dirty: false }) }),
+      sourceContainsCommit: async () => false,
+    }),
+    (error) => error.reason === "control-plane-commit-unavailable",
   );
 });
 
@@ -659,6 +720,42 @@ test("service inventory covers the thirteen production labels", () => {
   assert.equal(SERVICE_LABELS.at(-1), "com.agentos.web");
 });
 
+test("runner quiet-window SQL admits only exact local runner ids", () => {
+  const defaults = blockingRunsStatement();
+  assert.equal(defaults.sql.includes('"runnerId"'), false);
+  const scoped = blockingRunsStatement(undefined, ["mac-runner-1", "mac-runner-2"]);
+  assert.equal(scoped.sql, 'SELECT "id", "status"::text AS "status" FROM "Run" WHERE "status"::text IN ($1,$2,$3) AND "runnerId" IN ($4,$5) ORDER BY "id"');
+  assert.deepEqual(scoped.parameters, ["claimed", "provisioning", "running", "mac-runner-1", "mac-runner-2"]);
+});
+
+test("runner verification requires every local daemon to re-register on the target build", () => {
+  const targetCommit = "e".repeat(40);
+  const before = { "mac-runner-1": "2026-09-04T12:00:00.000Z", "mac-runner-2": "2026-09-04T12:00:01.000Z" };
+  const payload = { daemons: [
+    { runnerId: "mac-runner-1", online: true, daemonVersion: targetCommit, lastSeenAt: "2026-09-04T12:01:00.000Z" },
+    { runnerId: "mac-runner-2", online: true, daemonVersion: targetCommit, lastSeenAt: "2026-09-04T12:01:01.000Z" },
+    { runnerId: "vm-runner-1", online: true, daemonVersion: "old", lastSeenAt: "2026-09-04T12:01:02.000Z" },
+  ] };
+  const options = { payload, runnerIds: ["mac-runner-1", "mac-runner-2"], before, targetCommit };
+  assert.equal(runnerRegistrationRefusal(options), null);
+  assert.equal(runnerRegistrationRefusal({
+    ...options,
+    payload: { daemons: payload.daemons.slice(0, 1) },
+  }), "runner-missing-mac-runner-2");
+  assert.equal(runnerRegistrationRefusal({
+    ...options,
+    payload: { daemons: payload.daemons.map((daemon) => daemon.runnerId === "mac-runner-2"
+      ? { ...daemon, lastSeenAt: before["mac-runner-2"] }
+      : daemon) },
+  }), "runner-registration-stale-mac-runner-2");
+  assert.equal(runnerRegistrationRefusal({
+    ...options,
+    payload: { daemons: payload.daemons.map((daemon) => daemon.runnerId === "mac-runner-2"
+      ? { ...daemon, daemonVersion: "f".repeat(40) }
+      : daemon) },
+  }), "runner-build-mismatch-mac-runner-2");
+});
+
 test("the deploy host restarts and restores every Linux unit in inventory order", async () => {
   const calls = [];
   const serviceControl = {
@@ -896,6 +993,13 @@ test("fixture executes the whole deploy sequence with explicit attempt facts", a
   assert.deepEqual(records.map(({ state }) => state), [
     "STARTED", "ARTIFACT_PREPARED", "ARTIFACT_VERIFIED", "BACKED_UP", "SCHEMA_ADVANCED", "ACTIVATED", "VERIFIED", "SUCCEEDED",
   ]);
+});
+
+test("runner role selects its phase sequence from the role column and never calls database phases", async () => {
+  assert.deepEqual(deployPhasesForRole("runner").map(({ name }) => name), RUNNER_PHASES);
+  const { host, attempt, phaseCalls } = fixture();
+  assert.deepEqual(await executeUpgrade(host, attempt, "runner"), { ok: true });
+  assert.deepEqual(phaseCalls, RUNNER_PHASES);
 });
 
 test("a successful attempt invokes self-clear before releasing its resources", async () => {

@@ -8,6 +8,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
   realpathSync,
@@ -20,13 +21,15 @@ import { fileURLToPath } from "node:url";
 
 import {
   DeployFailure,
-  SERVICE_LABELS,
   decideInvocation,
   deployedBuildStampRefusal,
   dryRunDecision,
   executeUpgrade,
   failureOf,
+  generateServiceInventory,
   parseDeployArguments,
+  resolveRunnerCount,
+  resolveRunnerIdPrefix,
   shouldPersistFailure,
 } from "./quiet-window-lib.mjs";
 import {
@@ -71,6 +74,17 @@ import { verifyServiceInventory } from "./launchd-service-wrapper.mjs";
 import { serviceWrapperPath } from "./install-launchd.mjs";
 import { createServiceControl, describesStableWrapper } from "./service-control.mjs";
 import { resolveServicePlatform } from "./service-platform.mjs";
+import {
+  controlPlaneApiBaseUrl,
+  readRunnerTargetRevision,
+  resolveDeployRole,
+} from "./runner-role-target.mjs";
+import {
+  localRegistrationSnapshot,
+  readRunnerRegistry,
+  runnerIdsFromInventory,
+  runnerRegistrationRefusal,
+} from "./runner-role-verification.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -96,6 +110,8 @@ const DEPLOY_BARRIER_KEY = 1;
 const RETRYABLE_ESCALATION_REASONS = new Set([
   "remote-main-unreadable",
   "remote-main-read-timeout",
+  "control-plane-version-unreachable",
+  "control-plane-commit-unavailable",
   "quiet-window-query-failed",
   "deploy-barrier-unavailable",
 ]);
@@ -237,6 +253,51 @@ const remoteMainRevision = async () => {
   return revision;
 };
 
+const sourceRemoteContainsCommit = async (revision) => {
+  const sourceRemote = process.env.DEPLOY_SOURCE_REMOTE;
+  if (!sourceRemote) fail("environment-unreadable", "DEPLOY_SOURCE_REMOTE-missing");
+  mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
+  const probe = mkdtempSync(join(STATE_DIR, "source-commit-probe-"));
+  try {
+    const cloned = await command(loadBinaries().git, [
+      "clone",
+      "--mirror",
+      "--filter=blob:none",
+      sourceRemote,
+      probe,
+    ], {
+      capture: true,
+      timeoutMs: DEPLOY_STEP_TIMEOUT_MS.remoteMainRead,
+      timeoutReason: "control-plane-commit-unavailable",
+    });
+    if (cloned.code !== 0) return false;
+    const resolved = await command(loadBinaries().git, [
+      "-C",
+      probe,
+      "rev-parse",
+      "--verify",
+      `${revision}^{commit}`,
+    ], {
+      capture: true,
+      timeoutMs: DEPLOY_STEP_TIMEOUT_MS.remoteMainRead,
+      timeoutReason: "control-plane-commit-unavailable",
+    });
+    return resolved.code === 0 && resolved.stdout.trim() === revision;
+  } finally {
+    rmSync(probe, { recursive: true, force: true });
+  }
+};
+
+const targetRevision = async () => {
+  if (resolveDeployRole() === "control-plane") return remoteMainRevision();
+  const revision = await readRunnerTargetRevision({
+    apiBaseUrl: controlPlaneApiBaseUrl(),
+    sourceContainsCommit: sourceRemoteContainsCommit,
+  });
+  log(`PASS control-plane-version-read revision=${revision}`);
+  return revision;
+};
+
 const loadEnvironment = async () => {
   const envPath = environmentFilePath();
   if (!existsSync(envPath) || !statSync(envPath).isFile()) fail("environment-unreadable", ".env-missing-or-not-a-file");
@@ -299,11 +360,11 @@ const migrationTail = async () => {
   }
 };
 
-const blockingRuns = async () => {
+const blockingRuns = async (runnerIds = null) => {
   throwIfInterrupted();
   const db = await database();
   try {
-    const statement = blockingRunsStatement();
+    const statement = blockingRunsStatement(undefined, runnerIds);
     const runs = await db.$queryRawUnsafe(statement.sql, ...statement.parameters);
     throwIfInterrupted();
     return runs;
@@ -429,8 +490,8 @@ const acquireDeployBarrier = async () => {
   }
 };
 
-const waitForQuiet = (startWatchdog) => waitForQuietWithWatchdog({
-  blockingRuns,
+const waitForQuiet = (startWatchdog, blockingRunsForHost = () => blockingRuns()) => waitForQuietWithWatchdog({
+  blockingRuns: blockingRunsForHost,
   acquireBarrier: acquireDeployBarrier,
   startWatchdog,
   wait: () => sleep(POLL_MS),
@@ -497,7 +558,7 @@ const createDeployStartup = () => ({
     retryableReasons: RETRYABLE_ESCALATION_REASONS,
     retryCap: ESCALATION_RETRY_CAP,
   }),
-  readRemoteMain: remoteMainRevision,
+  readRemoteMain: targetRevision,
   persistFailure: (failure) => persistAndNotifyFailure(failure, "unknown", "unknown"),
 });
 
@@ -521,9 +582,9 @@ export const createDefaultServiceControl = () => createServiceControl({
   },
 });
 
-const serviceState = async (serviceControl) => {
+const serviceState = async (serviceControl, labels) => {
   const unavailable = [];
-  for (const label of SERVICE_LABELS) {
+  for (const label of labels) {
     if (!await serviceControl.isRunning(label)) unavailable.push(label);
   }
   return { ok: unavailable.length === 0, unavailable };
@@ -537,11 +598,17 @@ export const verifyStableServicePaths = async (serviceControl, {
   repositoryRoot = REPOSITORY_ROOT,
   environment = process.env,
   fetchImpl = fetch,
+  labels = generateServiceInventory(
+    resolveRunnerCount(environment),
+    resolveRunnerIdPrefix(environment),
+    resolveDeployRole(environment),
+  ).map(({ label }) => label),
 } = {}) => {
   const wrapper = serviceWrapperPath(repositoryRoot);
   try {
     return await verifyServiceInventory({
       repositoryRoot,
+      labels,
       environment,
       start: async (invocation) => {
         let description;
@@ -592,7 +659,23 @@ const makeWritable = (root) => {
 export const createDeployHost = ({
   serviceControl = createDefaultServiceControl(),
   verifyRecoveredServices = verifyStableServicePaths,
+  deployRole = resolveDeployRole(),
+  environment = process.env,
+  fetchImpl = fetch,
+  blockingRunsAdapter = null,
+  serviceVerificationTimeoutMs = 30_000,
+  serviceVerificationWait = sleep,
 } = {}) => {
+  const serviceInventory = generateServiceInventory(
+    resolveRunnerCount(environment),
+    resolveRunnerIdPrefix(environment),
+    deployRole,
+  );
+  const serviceLabels = serviceInventory.map(({ label }) => label);
+  const localRunnerIds = runnerIdsFromInventory(serviceInventory);
+  const scopedBlockingRuns = blockingRunsAdapter
+    ?? (() => blockingRuns(deployRole === "runner" ? localRunnerIds : null));
+  const apiBaseUrl = deployRole === "runner" ? controlPlaneApiBaseUrl(environment) : null;
   let canonicalSyncRefusals = [];
   const notifyDeployOutcome = async (record) => notify(canonicalSyncNoticeRecord(record, canonicalSyncRefusals));
   return createProductionHost({
@@ -606,7 +689,7 @@ export const createDeployHost = ({
         log,
       });
     },
-    blockingRuns,
+    blockingRuns: scopedBlockingRuns,
     artifactState: async (attempt) => {
       try {
         const artifact = findReleaseArtifact({
@@ -619,7 +702,7 @@ export const createDeployHost = ({
         return { ok: false, reason: failure.reason };
       }
     },
-    serviceState: () => serviceState(serviceControl),
+    serviceState: () => serviceState(serviceControl, serviceLabels),
     backupState: async () => {
       const requested = loadBinaries().backup;
       try {
@@ -708,7 +791,7 @@ export const createDeployHost = ({
           log(`STOP ${failure.reason} detail=${failure.detail}`);
           interruption.interruptWithFailure(failure);
         },
-      }));
+      }), scopedBlockingRuns);
       log("PASS quiet-window deploy-barrier-held blockers=0");
       return { barrier, resources: [barrier, watchdog] };
     },
@@ -737,7 +820,7 @@ export const createDeployHost = ({
       };
     },
     verifyStableServicePaths: async () => {
-      await verifyStableServicePaths(serviceControl);
+      await verifyStableServicePaths(serviceControl, { environment, fetchImpl, labels: serviceLabels });
     },
     backup: async (attempt) => {
       const revisions = attempt.requireFact("revisions");
@@ -821,7 +904,7 @@ export const createDeployHost = ({
     },
     assertQuietBeforeRestart: async (attempt) => {
       if (!await attempt.requireFact("barrier").verify()) fail("deploy-barrier-lost", "exclusive-session-lock-not-held");
-      const blockers = await blockingRuns();
+      const blockers = await scopedBlockingRuns();
       if (blockers.length > 0) fail("quiet-window-lost", `blockers-${blockers.length}`);
     },
     publishBuild: async (attempt) => {
@@ -855,25 +938,62 @@ export const createDeployHost = ({
       };
     },
     restartServices: async () => {
-      for (const label of SERVICE_LABELS) {
+      const runnerRegistrationsBeforeRestart = deployRole === "runner"
+        ? localRegistrationSnapshot(await readRunnerRegistry({
+            apiBaseUrl,
+            operatorToken: environment.OPERATOR_TOKEN,
+            fetchImpl,
+          }), localRunnerIds)
+        : null;
+      for (const label of serviceLabels) {
         await serviceControl.restart(label, { reason: "service-restart-failed" });
       }
+      return runnerRegistrationsBeforeRestart === null ? undefined : { runnerRegistrationsBeforeRestart };
     },
     verifyServices: async (attempt) => {
       const revisions = attempt.requireFact("revisions");
-      const deadline = Date.now() + 30_000;
+      const deadline = Date.now() + serviceVerificationTimeoutMs;
       let lastReason = "not-ready";
       while (Date.now() < deadline) {
-        const state = await serviceState(serviceControl);
+        const state = await serviceState(serviceControl, serviceLabels);
         if (!state.ok) {
           const manager = serviceControl.platform === "linux" ? "systemd" : "launchd";
           lastReason = `${manager}-unavailable-${state.unavailable.join(",")}`;
         }
-        else {
+        else if (deployRole === "runner") {
+          try {
+            const payload = await readRunnerRegistry({
+              apiBaseUrl,
+              operatorToken: environment.OPERATOR_TOKEN,
+              fetchImpl,
+            });
+            const refusal = runnerRegistrationRefusal({
+              payload,
+              runnerIds: localRunnerIds,
+              before: attempt.requireFact("runnerRegistrationsBeforeRestart"),
+              targetCommit: revisions.to,
+            });
+            if (refusal === null) {
+              throwIfInterrupted();
+              return {
+                serviceVerification: {
+                  runnerIds: localRunnerIds,
+                  activatedBuildCommit: revisions.to,
+                },
+              };
+            }
+            lastReason = refusal;
+          } catch (error) {
+            if (error instanceof DeployFailure && error.reason !== "runner-registration-verification-unavailable") throw error;
+            lastReason = error instanceof DeployFailure
+              ? `${error.reason}-${error.detail}`
+              : error instanceof Error ? error.name : "probe-failed";
+          }
+        } else {
           try {
             const port = process.env.API_PORT ?? "3000";
-            const health = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2_000) });
-            const version = await fetch(`http://127.0.0.1:${port}/version`, { signal: AbortSignal.timeout(2_000) });
+            const health = await fetchImpl(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2_000) });
+            const version = await fetchImpl(`http://127.0.0.1:${port}/version`, { signal: AbortSignal.timeout(2_000) });
             const payload = version.ok ? await version.json() : {};
             if (health.ok && version.ok && payload.commit === revisions.to && payload.dirty === false) {
               throwIfInterrupted();
@@ -893,12 +1013,12 @@ export const createDeployHost = ({
             lastReason = error instanceof Error ? error.name : "probe-failed";
           }
         }
-        await sleep(1_000);
+        await serviceVerificationWait(1_000);
       }
       fail("service-verification-failed", lastReason);
     },
     restorePreviousServices: async () => {
-      for (const label of SERVICE_LABELS) {
+      for (const label of serviceLabels) {
         await serviceControl.restart(label, {
           reason: "previous-service-restore-failed",
           allowAfterInterrupt: true,
@@ -909,7 +1029,7 @@ export const createDeployHost = ({
       // The pointer has already been restored by the transaction coordinator.
       // Re-run the complete loaded-definition and readiness proof before the
       // rollback is allowed to become a proven recovery outcome.
-      await verifyRecoveredServices(serviceControl);
+      await verifyRecoveredServices(serviceControl, { environment, fetchImpl, labels: serviceLabels });
     },
     escalate: writeEscalation,
     markEscalationNotified: async () => markEscalationNotified({ path: ESCALATION_PATH }),
@@ -934,6 +1054,7 @@ const main = async () => {
     }
     return 0;
   }
+  const deployRole = resolveDeployRole();
   const attempt = openDeploymentAttempt({
     deployRoot: REPOSITORY_ROOT,
     targetCommit: invocation.targetCommit,
@@ -943,13 +1064,13 @@ const main = async () => {
     retryEscalation: invocation.retryEscalation,
     ...(invocation.lock === null ? {} : { resources: [invocation.lock] }),
   });
-  const host = createDeployHost();
+  const host = createDeployHost({ deployRole });
   if (invocation.mode === "dry-run") {
-    const decision = await dryRunDecision(host, attempt);
+    const decision = await dryRunDecision(host, attempt, deployRole);
     for (const line of decision.lines) log(line);
     return !decision.artifact.ok || !decision.services.ok || !decision.backup.ok ? 1 : 0;
   }
-  const result = await executeUpgrade(host, attempt);
+  const result = await executeUpgrade(host, attempt, deployRole);
   if (result.ok && !result.skipped) pruneHistory();
   return result.ok ? 0 : 1;
 };

@@ -1,4 +1,4 @@
-import { DEPLOY_PHASES, UPGRADE_DEPLOY_PHASES } from "./deploy-phases.mjs";
+import { deployPhasesForRole, upgradeDeployPhasesForRole } from "./deploy-phases.mjs";
 
 export const BLOCKING_RUN_STATUSES = Object.freeze(["claimed", "provisioning", "running"]);
 
@@ -181,7 +181,7 @@ export const decideInvocation = async (startup, mode) => {
 
 /** Execute the full deployment attempt through the host seam. Every phase
  * receives the attempt and establishes facts for the phases that follow. */
-export const executeUpgrade = async (host, attempt) => {
+export const executeUpgrade = async (host, attempt, deployRole = "control-plane") => {
   let schemaAdvanced = false;
   let activationAttempted = false;
   let activationOutcomeProven = false;
@@ -247,7 +247,7 @@ export const executeUpgrade = async (host, attempt) => {
   try {
     let publicationReady = false;
     try {
-      for (const phase of DEPLOY_PHASES) {
+      for (const phase of deployPhasesForRole(deployRole)) {
         if (phase.scope === "upgrade") upgradeStarted = true;
         if (phase.hostMethod === "publishBuild") activationAttempted = true;
         let facts;
@@ -312,13 +312,16 @@ export const executeUpgrade = async (host, attempt) => {
 
 /** Dry-run reads the deployment host every upgrade uses, calling only the
  * methods that establish no facts and mutate nothing. */
-export const dryRunDecision = async (host, attempt) => {
+export const dryRunDecision = async (host, attempt, deployRole = "control-plane") => {
+  const backupPromise = deployRole === "control-plane"
+    ? host.backupState()
+    : Promise.resolve({ ok: true, mode: "skipped" });
   const [{ revisions }, runs, artifact, services, backup] = await Promise.all([
     host.readRevisions(attempt),
     host.blockingRuns(),
     host.artifactState(attempt),
     host.serviceState(),
-    host.backupState(),
+    backupPromise,
   ]);
   const quiet = quietWindowIsOpen(runs);
   const lines = [
@@ -328,6 +331,6 @@ export const dryRunDecision = async (host, attempt) => {
     `DRY-RUN services=${services.ok ? "ready" : "not-ready"}`,
     `DRY-RUN backup=${backup.ok ? "ready" : "not-ready"} mode=${backup.mode}${backup.reason ? ` reason=${backup.reason}` : ""}`,
   ];
-  for (const phase of UPGRADE_DEPLOY_PHASES) lines.push(`DRY-RUN plan step=${phase.name} mutation=skipped`);
+  for (const phase of upgradeDeployPhasesForRole(deployRole)) lines.push(`DRY-RUN plan step=${phase.name} mutation=skipped`);
   return { quiet, revisions, runs, artifact, services, backup, lines };
 };
