@@ -974,7 +974,6 @@ export const zh = {
   "tasks.aggregate.state.settled": "已完成",
   "tasks.aggregate.state.stopsAfter": "将在步骤完成后停止",
   "tasks.aggregate.state.waiting-on-predecessor": "等待中",
-  "tasks.aggregate.stopAfter": "在当前步骤完成后停止",
   "tasks.aggregate.waitingOn": "已锁定：{name}",
   "tasks.announcement.moved": "已将 {name} 移至{status}",
   "tasks.archiveAll": "全部归档",
