@@ -12,6 +12,10 @@ import { DIRECT_TEMPLATE_NAME, PR_TEMPLATE_NAME } from "./agent-contract.js";
 import { canonicalOutputSchema, canonicalOutputSchemas } from "./canonical-output-schema.js";
 import { INTEGRATOR_TEMPLATE_NAME } from "./merge-integrator.js";
 import {
+  retiredStepShapeDifferences,
+  type LegacyStepRecord,
+} from "./template-step-fields.js";
+import {
   loadAllTemplateStepSources,
   loadTemplateStepSources,
   templateStepStructureDifferences,
@@ -598,5 +602,96 @@ test("layer, requiresCommit, and dependency provisioning are structural fields i
   assert.deepEqual(
     templateStepStructureDifferences({ ...persisted, provisionDependencies: !expected.provisionDependencies }, expected),
     ["provisionDependencies"],
+  );
+});
+
+test("one field table decides both row-vs-spec comparisons", async () => {
+  // The roster, pinned: a structural column added to a step shape without an
+  // entry in the field table cannot make either comparator report it.
+  const expected = (await loadTemplateStepSources(DIRECT_TEMPLATE_NAME))[2]!;
+  const persisted: PersistedTemplateStepStructure = {
+    name: expected.name,
+    assigneeAgent: { name: expected.agentName! },
+    assigneeType: "AGENT",
+    layer: expected.layer,
+    approvalGate: expected.approvalGate,
+    optional: expected.optional,
+    outputKind: expected.outputKind,
+    attachmentsFromPrevious: expected.attachmentsFromPrevious,
+    priorOutputKinds: expected.priorOutputKinds,
+    opensPullRequest: expected.opensPullRequest,
+    requiresCommit: expected.requiresCommit,
+    provisionDependencies: expected.provisionDependencies,
+    baseFromStepIndex: expected.baseFromStepIndex,
+    spawnPolicy: expected.spawnPolicy as PersistedTemplateStepStructure["spawnPolicy"],
+  };
+  const changed: PersistedTemplateStepStructure = {
+    name: `${expected.name} (renamed)`,
+    assigneeAgent: null,
+    assigneeType: "HUMAN",
+    layer: expected.layer + 1,
+    approvalGate: !expected.approvalGate,
+    optional: !expected.optional,
+    outputKind: `${expected.outputKind}-v2`,
+    attachmentsFromPrevious: !expected.attachmentsFromPrevious,
+    priorOutputKinds: [...expected.priorOutputKinds, "spec"],
+    opensPullRequest: !expected.opensPullRequest,
+    requiresCommit: !expected.requiresCommit,
+    provisionDependencies: !expected.provisionDependencies,
+    baseFromStepIndex: (expected.baseFromStepIndex ?? 0) + 1,
+    spawnPolicy: { changed: true },
+  };
+  assert.deepEqual(templateStepStructureDifferences(changed, expected), [
+    "name", "agent", "assigneeType", "layer", "approvalGate", "optional", "outputKind",
+    "attachmentsFromPrevious", "priorOutputKinds", "opensPullRequest", "requiresCommit",
+    "provisionDependencies", "baseFromStepIndex", "spawnPolicy",
+  ]);
+
+  // The retired-shape reading of the same table: every field is data on the
+  // record, and the prior-output whitelist is deliberately not read, because
+  // its migration is independent of any graph transition.
+  const record: LegacyStepRecord = {
+    name: expected.name,
+    agentName: expected.agentName,
+    assigneeType: "AGENT" as LegacyStepRecord["assigneeType"],
+    layer: expected.layer,
+    approvalGate: expected.approvalGate,
+    optional: expected.optional,
+    outputKind: expected.outputKind,
+    attachmentsFromPrevious: expected.attachmentsFromPrevious,
+    opensPullRequest: expected.opensPullRequest,
+    requiresCommit: expected.requiresCommit,
+    provisionDependencies: expected.provisionDependencies,
+    baseFromStepIndex: expected.baseFromStepIndex,
+    spawnPolicy: expected.spawnPolicy as LegacyStepRecord["spawnPolicy"],
+  };
+  assert.deepEqual(retiredStepShapeDifferences(persisted, record), []);
+  assert.deepEqual(retiredStepShapeDifferences({ ...persisted, priorOutputKinds: ["anything"] }, record), []);
+  assert.deepEqual(retiredStepShapeDifferences(changed, record), [
+    "name", "agent", "assigneeType", "layer", "approvalGate", "optional", "outputKind",
+    "attachmentsFromPrevious", "opensPullRequest", "requiresCommit",
+    "provisionDependencies", "baseFromStepIndex", "spawnPolicy",
+  ]);
+
+  // An omitted field is the documented default, not an unconstrained one.
+  const omitted: LegacyStepRecord = {
+    name: record.name,
+    agentName: record.agentName,
+    assigneeType: record.assigneeType,
+    layer: record.layer,
+    approvalGate: record.approvalGate,
+    outputKind: record.outputKind,
+    attachmentsFromPrevious: record.attachmentsFromPrevious,
+    opensPullRequest: record.opensPullRequest,
+    baseFromStepIndex: record.baseFromStepIndex,
+    spawnPolicy: record.spawnPolicy,
+  };
+  assert.deepEqual(
+    retiredStepShapeDifferences({ ...persisted, optional: false, requiresCommit: false, provisionDependencies: true }, omitted),
+    [],
+  );
+  assert.deepEqual(
+    retiredStepShapeDifferences({ ...persisted, optional: true, requiresCommit: false, provisionDependencies: true }, omitted),
+    ["optional"],
   );
 });

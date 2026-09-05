@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 import {
-  agentExecutionSucceeded,
+  agentExitVerdict,
   PR_TEMPLATE_NAME,
   type BudgetGate,
   type PersistedRunOutput,
@@ -598,11 +598,10 @@ export const executeClaim = async (
       const relaunch = await decideProviderRelaunch({
         purpose: "resume-disconnect",
         providerConversationId: deadProviderConversationId,
-        exitResumable: adapter.isInRunResumeCandidate?.(
-          evidence,
-          deadProviderConversationId,
-          deadHandle.providerState,
-        ) ?? false,
+        // The shared verdict owns the exit record; the adapter adds only the
+        // provider-shaped reading of a drop it already classified.
+        exitResumable: agentExitVerdict(evidence).case === "dropped"
+          && (adapter.isProviderDisconnect?.(evidence, deadHandle.providerState) ?? false),
         attempts: providerResumeAttempts,
         authorityHeld: () => runLease.authority.held,
         budgetRefused: () => budget.refusal !== null,
@@ -654,6 +653,10 @@ export const executeClaim = async (
       evidence = await resumedHandle.exit;
       producedOutput = outputTail(evidence);
     }
+    // The dead child is classified once here, from the evidence the Run ends
+    // on. Every question the rest of this function asks about how the agent
+    // process ended is one case of this verdict.
+    const exitVerdict = agentExitVerdict(evidence);
     let regressionHandoffPersisted = false;
     if (runLease.held) {
       try {
@@ -685,7 +688,7 @@ export const executeClaim = async (
         });
       }
     }
-    if (agentExecutionSucceeded(evidence)
+    if (exitVerdict.case === "succeeded"
       && claim.task.templateStep?.outputKind
       && runLease.held
       && terminalFailureReason === null) {
@@ -797,7 +800,7 @@ export const executeClaim = async (
                 payload: {
                   outputKind,
                   outputPersisted: remediated,
-                  terminalSuccess: agentExecutionSucceeded(remediationEvidence),
+                  terminalSuccess: agentExitVerdict(remediationEvidence).case === "succeeded",
                   evidence: exitEvidencePayload(remediationEvidence),
                   workspaceChanged,
                   ...(workspaceChanged ? {
@@ -852,14 +855,14 @@ export const executeClaim = async (
       });
     }
     let postDeliveryDisconnectTolerated = false;
-    const disconnectCandidate = evidence.exitCode === 0
-      && evidence.signal === null
-      && evidence.terminationReason === null
-      && evidence.terminalEventSeen === false
+    // A clean drop is the exit half; the rest is this Run's own state, which
+    // no reading of the exit record can supply.
+    const postDeliveryDisconnect = exitVerdict.case === "dropped"
+      && exitVerdict.cleanExit
       && terminalFailureReason === null
       && budget.refusal === null
       && runLease.held;
-    if (disconnectCandidate) {
+    if (postDeliveryDisconnect) {
       try {
         const outputEvidence = await session.outputStatus();
         const satisfaction = outputEvidence?.satisfaction;
@@ -947,15 +950,14 @@ export const executeClaim = async (
       });
       return;
     }
-    // A validated, fenced Regression handoff is the step's terminal product
-    // only when the provider did not explicitly reject the session. Transport
-    // loss remains recoverable, but a terminal failure keeps its authority.
-    const explicitTerminalFailure = evidence.terminalEventSeen && !evidence.terminalSuccess;
     const regressionMechanicallySettled = regressionHandoffPersisted
-      && !explicitTerminalFailure
+      // A validated, fenced Regression handoff is the step's terminal product
+      // only when the provider did not explicitly reject the session. Transport
+      // loss remains recoverable, but a terminal failure keeps its authority.
+      && exitVerdict.case !== "refused"
       && terminalFailureReason === null
       && budget.refusal === null;
-    const executionSucceeded = (agentExecutionSucceeded(evidence)
+    const executionSucceeded = (exitVerdict.case === "succeeded"
       || regressionMechanicallySettled
       || postDeliveryDisconnectTolerated)
       && terminalFailureReason === null
@@ -1054,7 +1056,7 @@ export const executeClaim = async (
     // value is what used to be spelled by overwriting `exitCode`,
     // `terminalEventSeen` and `terminalSuccess` so the control plane's copy of
     // the success predicate would agree with the verdict already reached here.
-    const successOutcome: RunOutcome = agentExecutionSucceeded(evidence)
+    const successOutcome: RunOutcome = exitVerdict.case === "succeeded"
       ? { case: "succeeded" }
       : regressionMechanicallySettled
         ? { case: "regression-mechanically-settled" }

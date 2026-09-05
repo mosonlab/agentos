@@ -111,15 +111,16 @@ export interface CliAdapter {
   heartbeat(handle: RuntimeHandle): Promise<HeartbeatSnapshot>;
   classifyError(evidence: ExitEvidence): ClassifiedFailure;
   /**
-   * Provider-owned qualification for an in-Run resume after a dead child. The
-   * verdict reads the adapter's own `providerState` from that child, so no
-   * provider-shaped history has to travel on the shared exit record.
+   * Is this dead child's exit a disconnect of the provider's own transport?
+   *
+   * Asked only about an exit the shared verdict already classified as
+   * `dropped`, so the fields that say a child was stopped or reported its own
+   * end are not this hook's business. What it adds is provider-shaped: the
+   * text a provider uses for a lost connection, and the adapter's own
+   * `providerState` from that child, so no provider-shaped history has to
+   * travel on the shared exit record.
    */
-  isInRunResumeCandidate?(
-    evidence: ExitEvidence,
-    providerConversationId: string | null,
-    providerState: unknown,
-  ): boolean;
+  isProviderDisconnect?(evidence: ExitEvidence, providerState: unknown): boolean;
 }
 
 export type AdapterEventParser = (
@@ -163,12 +164,8 @@ export type AdapterDeclaration = {
   providerEventPersistence: ProviderEventPersistencePredicate;
   parseEvent: AdapterEventParser;
   preflight(spec: PreflightSpec): Promise<PreflightResult>;
-  /** Optional provider-owned qualification for in-Run resume. */
-  isInRunResumeCandidate?(
-    evidence: ExitEvidence,
-    providerConversationId: string | null,
-    providerState: unknown,
-  ): boolean;
+  /** Optional provider-owned reading of a dropped exit, see `CliAdapter`. */
+  isProviderDisconnect?(evidence: ExitEvidence, providerState: unknown): boolean;
 };
 
 export const createAdapterState = (
@@ -555,8 +552,8 @@ export const createCliAdapter = (declaration: AdapterDeclaration): CliAdapter =>
   kill: (handle, reason) => killRuntime(handle, reason),
   heartbeat: (handle) => heartbeatRuntime(handle),
   classifyError: (evidence) => classifyRuntimeError(evidence),
-  ...(declaration.isInRunResumeCandidate
-    ? { isInRunResumeCandidate: declaration.isInRunResumeCandidate }
+  ...(declaration.isProviderDisconnect
+    ? { isProviderDisconnect: declaration.isProviderDisconnect }
     : {}),
 });
 

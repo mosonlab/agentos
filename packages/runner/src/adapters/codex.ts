@@ -59,23 +59,18 @@ export const initialCodexState = (): CodexProviderState => ({ sawNonReconnectPro
 const codexState = (providerState: unknown): CodexProviderState => providerState as CodexProviderState;
 
 /**
- * Decide whether a dead Codex child can be continued in the same Run.
+ * Is this dead Codex child's exit Codex's own transport dropping?
  *
- * Reconnect progress is reported through Codex's `error` event, but a plain
- * reconnect message is only provisional. The adapter's own state carries the
- * history of non-reconnect provider errors so a later reconnect status cannot
- * hide an earlier terminal provider error.
+ * Asked only about an exit the shared `agentExitVerdict` already classified as
+ * `dropped`, so nothing here re-reads whether the child was stopped or
+ * reported its own end. What is left is Codex-shaped. Reconnect progress is
+ * reported through Codex's `error` event, but a plain reconnect message is only
+ * provisional: the adapter's own state carries the history of non-reconnect
+ * provider errors so a later reconnect status cannot hide an earlier terminal
+ * provider error.
  */
-export const isCodexInRunResumeCandidate = (
-  evidence: ExitEvidence,
-  providerConversationId: string | null,
-  providerState: unknown,
-): boolean => {
-  if (evidence.terminalEventSeen
-    || evidence.signal !== null
-    || evidence.terminationReason !== null
-    || providerConversationId === null
-    || codexState(providerState).sawNonReconnectProviderError) return false;
+export const isCodexProviderDisconnect = (evidence: ExitEvidence, providerState: unknown): boolean => {
+  if (codexState(providerState).sawNonReconnectProviderError) return false;
 
   if (NON_RESUMABLE_FAILURE_CLASSES.has(classifyRuntimeError(evidence).failureClass)) return false;
 
@@ -334,5 +329,5 @@ export const codexDeclaration: AdapterDeclaration = Object.freeze({
   providerEventPersistence: () => true,
   parseEvent: parseCodexEvent,
   preflight,
-  isInRunResumeCandidate: isCodexInRunResumeCandidate,
+  isProviderDisconnect: isCodexProviderDisconnect,
 });
