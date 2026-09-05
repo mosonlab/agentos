@@ -266,7 +266,7 @@ test("the canonical PR workflow documents its clean-tree and five-section handov
   assert.match(text, /exact command and its observed exit\/result\s+summary/u);
   assert.match(text, /`No commands reported in the task\s+output\.`/u);
   assert.match(text, /`Not available at this step\.`/u);
-  assert.match(text, /Review outcomes`\s+initially[\s\S]*Sol and blind finding[\s\S]*id,\s+severity,\s+and\s+title/u);
+  assert.match(text, /Review outcomes`\s+initially[\s\S]*code review and blind code review finding[\s\S]*id,\s+severity,\s+and\s+title/u);
   assert.match(text, /fixed output's `residualRisks`/u);
   assert.match(text, /Anneal` contains the current Task id and non-null Chain id/u);
   assert.match(text, /already-open[\s\S]*same initial body[\s\S]*reads the body back exactly/u);

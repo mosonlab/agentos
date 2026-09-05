@@ -88,7 +88,8 @@ Implementation has five routes:
 - **senior-dev-opus-medium**, with the reason on the same line, when the operator
   chooses to spend Claude capacity on that work instead of Codex capacity.
   It is the same senior-developer prompt on Claude Opus 5 medium; it is
-  never a default, and the chain keeps its Sol and blind reviews unchanged.
+  never a default, and the chain keeps its code review and blind code review
+  steps unchanged.
 - **frontend-dev-opus-medium** for frontend implementation work (UI components, pages,
   client-side behavior).
 

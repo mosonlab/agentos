@@ -32,6 +32,9 @@ test("the pull-request template has current identity, prompt history, and explic
     }, {
       marker: "pre-astra-low-review-fix",
       promptDigest: undefined,
+    }, {
+      marker: "model-neutral-review-step-names",
+      promptDigest: undefined,
     }],
   );
   assert.deepEqual(CURRENT_CANONICAL_STEP_ORDINALS[PR_TEMPLATE_NAME], {
@@ -69,7 +72,7 @@ test("a matching no-history pull-request row is current, never a rollover", () =
     },
     {
       stepIndex: 2,
-      name: "Code review (Sol)",
+      name: "Code review",
       layer: 2,
       agentName: "code-reviewer-sol-high",
       approvalGate: false,
@@ -86,7 +89,7 @@ test("a matching no-history pull-request row is current, never a rollover", () =
     },
     {
       stepIndex: 3,
-      name: "Code review (Opus blind)",
+      name: "Blind code review",
       layer: 2,
       agentName: "code-reviewer-opus-high",
       approvalGate: false,

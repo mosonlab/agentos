@@ -148,3 +148,17 @@ test("a generation is published once and the history is never empty", () => {
   assert.ok(empty);
   assert.match(empty, /publishes no prompt generation at all/u);
 });
+
+
+test("a shape-only successor retains its digest and must register the outgoing shape", () => {
+  const history = published(
+    { digest: CURRENT, retiredByShape: "model-neutral-review-step-names" },
+    { digest: CURRENT },
+  );
+  assert.equal(publishedGenerationDrift("direct", history,
+    [registered("model-neutral-review-step-names")], CURRENT), null);
+  assert.match(publishedGenerationDrift("direct", history, [], CURRENT)!, /names structural retirement/u);
+  assert.match(publishedGenerationDrift("direct", published(
+    ...history.slice(0, 1), ...history,
+  ), [registered("model-neutral-review-step-names")], CURRENT)!, /twice/u);
+});
