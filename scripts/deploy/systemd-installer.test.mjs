@@ -593,6 +593,7 @@ test("rendered unit syntax is verified by systemd-analyze when available", (t) =
     writeFileSync(autoService, renderAutoDeploySystemdUnit(undefined, autoValues));
     writeFileSync(autoTimer, renderAutoDeploySystemdTimer());
     files.push(autoService, autoTimer);
+    const renderedNames = files.map((file) => file.slice(root.length + 1));
     for (const path of files) {
       const verified = spawnSync("systemd-analyze", ["verify", path], {
         encoding: "utf8",
@@ -600,7 +601,13 @@ test("rendered unit syntax is verified by systemd-analyze when available", (t) =
       });
       const output = `${verified.stdout ?? ""}${verified.stderr ?? ""}`;
       assert.equal(verified.status, 0, output);
-      assert.doesNotMatch(output, /Unknown|Failed to parse/u);
+      // systemd-analyze also loads the host's own units and reports on them;
+      // only the lines naming a unit this test rendered are evidence here.
+      const rendered = output
+        .split("\n")
+        .filter((line) => line.startsWith(root) || renderedNames.some((name) => line.startsWith(`${name}:`)))
+        .join("\n");
+      assert.doesNotMatch(rendered, /Unknown|Failed to parse/u);
     }
   } finally {
     rmSync(root, { recursive: true, force: true });

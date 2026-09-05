@@ -2658,7 +2658,7 @@ export const installLaunchd = (args, context = {}) => {
       resolveSystemdServiceUser({ serviceUser, platform, lookup: context.userLookup, execute: context.execute ?? execFileSync });
     }
     if (installUnits) {
-      installStagedSystemdAutoDeploy({
+      const { phase } = installStagedSystemdAutoDeploy({
         repositoryRoot: context.repositoryRoot,
         manifestPath: context.manifestPath,
         unitDirectory: context.unitDirectory,
@@ -2674,7 +2674,6 @@ export const installLaunchd = (args, context = {}) => {
         revert,
         apply: true,
       });
-      const phase = installerPhase({ revert, applied: true });
       process.stdout.write(`${phase} platform=linux\n`);
       process.stdout.write(`${phase} unit-directory=${context.unitDirectory ?? SYSTEMD_UNIT_DIRECTORY}\n`);
       process.stdout.write(`${phase} units=2\n`);
@@ -2682,7 +2681,7 @@ export const installLaunchd = (args, context = {}) => {
       return 0;
     }
     if (revert) {
-      installStagedSystemdAutoDeploy({
+      const { phase } = installStagedSystemdAutoDeploy({
         repositoryRoot: context.repositoryRoot,
         manifestPath: context.manifestPath,
         unitDirectory: context.unitDirectory,
@@ -2697,7 +2696,6 @@ export const installLaunchd = (args, context = {}) => {
         revert: true,
         apply,
       });
-      const phase = installerPhase({ revert: true, applied: apply });
       process.stdout.write(`${phase} platform=linux\n`);
       process.stdout.write(`${phase} unit-directory=${context.unitDirectory ?? SYSTEMD_UNIT_DIRECTORY}\n`);
       process.stdout.write(`${phase} units=2\n`);
@@ -2743,7 +2741,7 @@ export const installLaunchd = (args, context = {}) => {
       execute: context.execute ?? execFileSync,
       deployRole,
     });
-    const phase = installerPhase({ applied: apply });
+    const { phase } = result;
     process.stdout.write(`${phase} platform=linux\n`);
     process.stdout.write(`${phase} unit-directory=${context.unitDirectory ?? SYSTEMD_UNIT_DIRECTORY}\n`);
     process.stdout.write(`${phase} units=2\n`);
@@ -2933,7 +2931,7 @@ export const planSystemdAutoDeploy = ({
   const timerPath = join(targetRoot, AUTO_DEPLOY_TIMER);
   if (!apply) return Object.freeze({
     applied: false,
-    reverted: false,
+    phase: installerPhase({ applied: false }),
     platform: "linux",
     staging: stage,
     unitDirectory: targetRoot,
@@ -2996,7 +2994,7 @@ export const planSystemdAutoDeploy = ({
   writeAtomic(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 0o600);
   return Object.freeze({
     applied: true,
-    reverted: false,
+    phase: installerPhase({ applied: true }),
     platform: "linux",
     staging: stage,
     unitDirectory: targetRoot,
@@ -3067,7 +3065,7 @@ export const installStagedSystemdAutoDeploy = ({
   if (readFileSync(entries[1].stagedPath, "utf8") !== expectedTimer) throw new Error(`systemd-staged-unit-invalid:${AUTO_DEPLOY_TIMER}`);
   if (!apply) return Object.freeze({
     applied: false,
-    reverted: false,
+    phase: installerPhase({ revert, applied: false }),
     platform: "linux",
     staging: expectedStage,
     unitDirectory: targetRoot,
@@ -3099,7 +3097,7 @@ export const installStagedSystemdAutoDeploy = ({
     runSystemctl({ systemctlPath: systemctl, args: ["daemon-reload"], execute });
     runSystemctl({ systemctlPath: systemctl, args: ["enable", "--now", AUTO_DEPLOY_TIMER], unit: AUTO_DEPLOY_TIMER, execute });
     return Object.freeze({
-      applied: true, reverted: false, platform: "linux", staging: expectedStage,
+      applied: true, phase: installerPhase({ applied: true }), platform: "linux", staging: expectedStage,
       unitDirectory: targetRoot, deployRole, units: entries.map((entry) => entry.unit), entries: entries.map((entry) => entry.path),
     });
   }
@@ -3124,7 +3122,7 @@ export const installStagedSystemdAutoDeploy = ({
   rmSync(transactionStatePath, { force: true });
   rmSync(expectedStage, { recursive: true, force: true });
   return Object.freeze({
-    applied: true, reverted: true, platform: "linux", deployRole, staging: expectedStage,
+    applied: true, phase: installerPhase({ revert: true, applied: true }), platform: "linux", deployRole, staging: expectedStage,
     unitDirectory: targetRoot, units: entries.map((entry) => entry.unit), entries: entries.map((entry) => entry.path),
   });
 };
