@@ -225,6 +225,8 @@ curl -X DELETE "$BASE_URL/projects/$PROJECT_ID" -H "Authorization: Bearer $OPERA
 - The response retains the aggregate totals, daily series, model totals, agent
   totals, and top runs. Agent rows additionally report cached-read percentage,
   unknown-split run count, and known uncached-input tokens and spend.
+- Model totals retain each Run's root model, including native-child Runs whose
+  unsplit token usage is estimated at that root model's rates.
 - `waste` partitions `wastedUsd` exactly into operator-cancelled and failed
   spend; failed spend is further partitioned by failure class.
 - `chains` contains terminal chains whose last run ended in the window, with
