@@ -24,15 +24,17 @@ import { loadAllTemplateStepSources } from "../src/template-sources.js";
 // installation. Nothing this file seeds changed with the move.
 const prisma = new PrismaClient();
 
+// Canonical roles, not names: an operator may rename an Agent, and a historical
+// template is still the template these roles bound.
 const HISTORICAL_NINE_STEP_CONTRACT = [
-  [1, "spec", AssigneeType.AGENT, "spec", true],
-  [2, "plan", AssigneeType.AGENT, "plan", false],
-  [3, "review-coordinator", AssigneeType.AGENT, "plan-review", false],
-  [4, "plan-reviser", AssigneeType.AGENT, "revised-plan", true],
-  [5, "implementation-plan-executioner", AssigneeType.AGENT, "implementation", false],
-  [6, "review-coordinator", AssigneeType.AGENT, "code-review", false],
-  [7, "senior-dev", AssigneeType.AGENT, "fixed-implementation", false],
-  [8, "librarian", AssigneeType.AGENT, "documentation", false],
+  [1, "spec-opus-high", AssigneeType.AGENT, "spec", true],
+  [2, "plan-fable-medium", AssigneeType.AGENT, "plan", false],
+  [3, "review-coordinator-astra-medium", AssigneeType.AGENT, "plan-review", false],
+  [4, "plan-reviser-opus-high", AssigneeType.AGENT, "revised-plan", true],
+  [5, "plan-executor-astra-medium", AssigneeType.AGENT, "implementation", false],
+  [6, "review-coordinator-astra-medium", AssigneeType.AGENT, "code-review", false],
+  [7, "senior-dev-astra-medium", AssigneeType.AGENT, "fixed-implementation", false],
+  [8, "librarian-luna-xhigh", AssigneeType.AGENT, "documentation", false],
   [9, null, AssigneeType.HUMAN, "approval", true],
 ] as const;
 
@@ -43,9 +45,13 @@ type HistoricalSeedTemplate = Readonly<{
     assigneeType: AssigneeType;
     approvalGate: boolean;
     outputKind: string;
-    assigneeAgent: { name: string } | null;
+    assigneeAgent: { name: string; canonicalRole: string | null } | null;
   }[];
 }>;
+
+/** The role a step binds, falling back to the slug for an operator-made Agent. */
+const stepRoleName = (step: HistoricalSeedTemplate["steps"][number] | undefined): string | null =>
+  step?.assigneeAgent ? step.assigneeAgent.canonicalRole ?? step.assigneeAgent.name : null;
 
 const historicalSeedLegacyName = (
   templateName: "compound-engineer-workflow" | "direct-engineer-workflow" | typeof PR_TEMPLATE_NAME,
@@ -65,7 +71,7 @@ const historicalSeedLegacyName = (
     && HISTORICAL_NINE_STEP_CONTRACT.every(([stepIndex, agentName, assigneeType, outputKind, approvalGate], index) => {
       const step = existing.steps[index];
       return step?.stepIndex === stepIndex
-        && (step.assigneeAgent?.name ?? null) === agentName
+        && stepRoleName(step) === agentName
         && step.assigneeType === assigneeType
         && step.outputKind === outputKind
         && step.approvalGate === approvalGate;
@@ -73,20 +79,20 @@ const historicalSeedLegacyName = (
   const isHistoricalTenStepTemplate = existing.steps.length === 10
     && existing.steps.every((step, index) => step.stepIndex === index + 1)
     && historicalIntegrator?.outputKind === INTEGRATOR_OUTPUT_KIND
-    && historicalIntegrator.assigneeAgent?.name === INTEGRATOR_AGENT_NAME;
+    && stepRoleName(historicalIntegrator) === INTEGRATOR_AGENT_NAME;
   const isHistoricalHumanTwelveStepTemplate = existing.steps.length === 12
     && existing.steps[10]?.assigneeType === AssigneeType.HUMAN
     && existing.steps[10]?.outputKind === "approval"
-    && existing.steps[11]?.assigneeAgent?.name === INTEGRATOR_AGENT_NAME
+    && stepRoleName(existing.steps[11]) === INTEGRATOR_AGENT_NAME
     && existing.steps[11]?.outputKind === INTEGRATOR_OUTPUT_KIND;
   const isRegressionFirstThirteenStepTemplate = existing.steps.length === 13
     && existing.steps.every((step, index) => step.stepIndex === index + 1)
-    && existing.steps[9]?.assigneeAgent?.name === "regression-verifier"
+    && stepRoleName(existing.steps[9]) === "regression-verifier-luna-xhigh"
     && existing.steps[9]?.outputKind === "regression-verification"
-    && existing.steps[10]?.assigneeAgent?.name === "librarian"
+    && stepRoleName(existing.steps[10]) === "librarian-luna-xhigh"
     && existing.steps[10]?.outputKind === "documentation"
     && existing.steps[11]?.outputKind === "merge-authorization"
-    && existing.steps[12]?.assigneeAgent?.name === INTEGRATOR_AGENT_NAME
+    && stepRoleName(existing.steps[12]) === INTEGRATOR_AGENT_NAME
     && existing.steps[12]?.outputKind === INTEGRATOR_OUTPUT_KIND;
 
   if (isHistoricalHumanTwelveStepTemplate) return legacyHumanTwelveStepTemplateName(existing.id);
@@ -120,29 +126,46 @@ const main = async (): Promise<void> => {
   });
 
   for (const role of sources.roles) {
-    const existing = await prisma.agent.findUnique({
-      where: { projectId_name: { projectId: project.id, name: role.name } },
-      select: { runtimeConfigCustomized: true },
-    });
-    const runtimeConfigCustomized = existing?.runtimeConfigCustomized === true;
-    const useCanonicalRuntimeConfig = !runtimeConfigCustomized;
-    await prisma.agent.upsert({
-      where: { projectId_name: { projectId: project.id, name: role.name } },
-      update: {
-        environmentId: environment.id,
-        title: role.title,
-        ...(useCanonicalRuntimeConfig ? { model: role.model, runnerPreference: role.runnerPreference } : {}),
-        inboxAccess: role.inboxAccess,
-        foundationalPrompt: sources.foundationalPrompt,
-        rolePrompt: role.rolePrompt,
+    // Canonical identity is `canonicalRole`, not `name`: the operator may rename
+    // an Agent, and the seed still has to find the row it installed. A row that
+    // predates the column is adopted by name once, on this pass.
+    const existing = await prisma.agent.findFirst({
+      where: {
+        projectId: project.id,
+        OR: [{ canonicalRole: role.canonicalRole }, { canonicalRole: null, name: role.name }],
       },
-      create: {
+      select: { id: true, customizedFields: true },
+    });
+    const customized = new Set(existing?.customizedFields ?? []);
+    const canonical = <T>(field: string, value: T): { [key: string]: T } | Record<string, never> => (
+      customized.has(field) ? {} : { [field]: value }
+    );
+    if (existing) {
+      await prisma.agent.update({
+        where: { id: existing.id },
+        data: {
+          canonicalRole: role.canonicalRole,
+          environmentId: environment.id,
+          ...canonical("name", role.name),
+          ...canonical("title", role.title),
+          ...canonical("model", role.model),
+          ...canonical("runnerPreference", role.runnerPreference),
+          inboxAccess: role.inboxAccess,
+          foundationalPrompt: sources.foundationalPrompt,
+          rolePrompt: role.rolePrompt,
+        },
+      });
+      continue;
+    }
+    await prisma.agent.create({
+      data: {
         projectId: project.id,
         environmentId: environment.id,
+        canonicalRole: role.canonicalRole,
         name: role.name,
         title: role.title,
         model: role.model,
-        runtimeConfigCustomized: false,
+        customizedFields: [],
         codexServiceTier: CodexServiceTier.DEFAULT,
         runnerPreference: role.runnerPreference,
         inboxAccess: role.inboxAccess,
@@ -152,10 +175,13 @@ const main = async (): Promise<void> => {
     });
   }
 
-  const agentByName = new Map((await prisma.agent.findMany({ where: { projectId: project.id } })).map((agent) => [agent.name, agent]));
+  const projectAgents = await prisma.agent.findMany({ where: { projectId: project.id } });
+  const agentByRole = new Map(projectAgents.flatMap((agent) => (
+    agent.canonicalRole === null ? [] : [[agent.canonicalRole, agent] as const]
+  )));
   const seededAgentIds = sources.roles.map((role) => {
-    const agent = agentByName.get(role.name);
-    if (!agent) throw new Error(`Missing seeded agent ${role.name}`);
+    const agent = agentByRole.get(role.canonicalRole);
+    if (!agent) throw new Error(`Missing seeded agent ${role.canonicalRole}`);
     return agent.id;
   });
   // The agents/ contract no longer seeds skills; this clears links a prior
@@ -163,11 +189,13 @@ const main = async (): Promise<void> => {
   await prisma.agentSkill.deleteMany({ where: { agentId: { in: seededAgentIds } } });
   await prisma.agentCollaboration.deleteMany({ where: { agentId: { in: seededAgentIds } } });
   for (const role of sources.roles) {
-    const agent = agentByName.get(role.name)!;
+    const agent = agentByRole.get(role.canonicalRole)!;
+    // Frontmatter collaborators name role files, so they resolve by canonical
+    // identity too: a renamed Agent keeps the edges its role declares.
     for (const collaboratorName of role.collaborators) {
-      const collaborator = agentByName.get(collaboratorName);
+      const collaborator = agentByRole.get(collaboratorName);
       if (!collaborator || !seededAgentIds.includes(collaborator.id)) {
-        throw new Error(`Agent ${role.name} references unknown collaborator ${collaboratorName}`);
+        throw new Error(`Agent ${role.canonicalRole} references unknown collaborator ${collaboratorName}`);
       }
       await prisma.agentCollaboration.create({
         data: { agentId: agent.id, allowedAgentId: collaborator.id, projectId: project.id },
@@ -182,7 +210,7 @@ const main = async (): Promise<void> => {
         where: { projectId_name: { projectId: project.id, name: templateName } },
         include: {
           steps: {
-            include: { assigneeAgent: { select: { name: true } } },
+            include: { assigneeAgent: { select: { name: true, canonicalRole: true } } },
             orderBy: { stepIndex: "asc" },
           },
         },

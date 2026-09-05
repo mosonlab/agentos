@@ -72,7 +72,7 @@ test("explicit create and patch foundation paths remain available", async () => 
   assert.equal(patched.body.foundationalPrompt, "patched foundation");
 });
 
-test("patching an Agent model records an operator runtime override", async () => {
+test("patching an Agent model marks exactly the fields the edit changed", async () => {
   const { project, environment } = await seedProject("runtime-override");
   const response = await call("POST", `/projects/${project.id}/agents`, {
     ...createBody(environment.id, "created"), foundationalPrompt: "foundation",
@@ -86,12 +86,14 @@ test("patching an Agent model records an operator runtime override", async () =>
   const stored = await db.agent.findUniqueOrThrow({ where: { id: response.body.id } });
   assert.equal(stored.model, "claude-opus-5:medium");
   assert.equal(stored.runnerPreference, "CLAUDE");
-  assert.equal(stored.runtimeConfigCustomized, true);
+  // The patch also submitted the runner the Agent already had, which marks nothing:
+  // only a field whose value actually changed stops following canonical.
+  assert.deepEqual(stored.customizedFields, ["model"]);
 });
 
 test("reset-runtime-config restores the role source and leaves canonical sync with nothing to adopt", async () => {
   await runDbScript("seed.ts");
-  const source = (await loadAgentSources()).roles.find(({ name }) => name === "default");
+  const source = (await loadAgentSources()).roles.find(({ canonicalRole }) => canonicalRole === "default");
   assert.ok(source);
   const project = await db.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
   const agent = await db.agent.findUniqueOrThrow({
@@ -100,11 +102,13 @@ test("reset-runtime-config restores the role source and leaves canonical sync wi
   assert.deepEqual({
     model: agent.model,
     runnerPreference: agent.runnerPreference,
-    runtimeConfigCustomized: agent.runtimeConfigCustomized,
+    canonicalRole: agent.canonicalRole,
+    customizedFields: agent.customizedFields,
   }, {
     model: source.model,
     runnerPreference: source.runnerPreference,
-    runtimeConfigCustomized: false,
+    canonicalRole: source.canonicalRole,
+    customizedFields: [],
   });
 
   const patched = await call("PATCH", `/agents/${agent.id}`, {
@@ -118,11 +122,11 @@ test("reset-runtime-config restores the role source and leaves canonical sync wi
   });
   assert.deepEqual(await db.agent.findUniqueOrThrow({
     where: { id: agent.id },
-    select: { model: true, runnerPreference: true, runtimeConfigCustomized: true },
+    select: { model: true, runnerPreference: true, customizedFields: true },
   }), {
     model: "claude-opus-5:medium",
     runnerPreference: RunnerPreference.CLAUDE,
-    runtimeConfigCustomized: true,
+    customizedFields: ["model", "runnerPreference"],
   });
 
   const reset = await call("POST", `/agents/${agent.id}/reset-runtime-config`);
@@ -132,13 +136,13 @@ test("reset-runtime-config restores the role source and leaves canonical sync wi
     select: {
       model: true,
       runnerPreference: true,
-      runtimeConfigCustomized: true,
+      customizedFields: true,
       runtimeConfigDriftNoticeFingerprint: true,
     },
   }), {
     model: source.model,
     runnerPreference: source.runnerPreference,
-    runtimeConfigCustomized: false,
+    customizedFields: [],
     runtimeConfigDriftNoticeFingerprint: null,
   });
 

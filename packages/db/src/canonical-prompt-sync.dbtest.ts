@@ -909,7 +909,7 @@ test("sync adopts uncustomized model-only runtime drift", async () => {
     data: {
       model: "gpt-5.6-sol:medium",
       runnerPreference: RunnerPreference.CODEX,
-      runtimeConfigCustomized: false,
+      customizedFields: [],
       runtimeConfigDriftNoticeFingerprint: "stale-runtime-drift",
     },
   });
@@ -923,11 +923,11 @@ test("sync adopts uncustomized model-only runtime drift", async () => {
 
   const executioner = await prisma.agent.findUniqueOrThrow({
     where: { projectId_name: { projectId: project.id, name: "plan-executor-astra-medium" } },
-    select: { model: true, runnerPreference: true, runtimeConfigCustomized: true, runtimeConfigDriftNoticeFingerprint: true },
+    select: { model: true, runnerPreference: true, customizedFields: true, runtimeConfigDriftNoticeFingerprint: true },
   });
   assert.deepEqual(executioner, {
     ...executionerSource,
-    runtimeConfigCustomized: false,
+    customizedFields: [],
     runtimeConfigDriftNoticeFingerprint: null,
   });
   assert.equal(await prisma.inboxMessage.count({
@@ -946,7 +946,7 @@ test("sync notifies once per current customized runtime drift without overwritin
       id: true,
       model: true,
       runnerPreference: true,
-      runtimeConfigCustomized: true,
+      customizedFields: true,
       runtimeConfigDriftNoticeFingerprint: true,
     },
   });
@@ -970,7 +970,7 @@ test("sync notifies once per current customized runtime drift without overwritin
       data: {
         model: mergeResolver.model,
         runnerPreference: mergeResolver.runnerPreference,
-        runtimeConfigCustomized: mergeResolver.runtimeConfigCustomized,
+        customizedFields: mergeResolver.customizedFields,
         runtimeConfigDriftNoticeFingerprint: mergeResolver.runtimeConfigDriftNoticeFingerprint,
       },
     });
@@ -980,7 +980,7 @@ test("sync notifies once per current customized runtime drift without overwritin
   });
   await prisma.agent.update({
     where: { id: mergeResolver.id },
-    data: { ...originalProduction, runtimeConfigCustomized: true },
+    data: { ...originalProduction, customizedFields: ["model", "runnerPreference"] },
   });
 
   const firstSync = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
@@ -989,9 +989,9 @@ test("sync notifies once per current customized runtime drift without overwritin
 
   const afterFirstSync = await prisma.agent.findUniqueOrThrow({
     where: { projectId_name: { projectId: project.id, name: "merge-resolver-opus-medium" } },
-    select: { model: true, runnerPreference: true, runtimeConfigCustomized: true },
+    select: { model: true, runnerPreference: true, customizedFields: true },
   });
-  assert.deepEqual(afterFirstSync, { ...originalProduction, runtimeConfigCustomized: true });
+  assert.deepEqual(afterFirstSync, { ...originalProduction, customizedFields: ["model", "runnerPreference"] });
 
   const firstNotice = await prisma.inboxMessage.findMany({
     where: { agentId: mergeResolver.id, body: { startsWith: "Canonical runtime drift detected" } },
@@ -1010,7 +1010,7 @@ test("sync notifies once per current customized runtime drift without overwritin
     "u",
   ));
   assert.match(firstNotice[0]!.body, /Production: model=gpt-5\.6-sol:high, runner=CODEX/u);
-  assert.match(firstNotice[0]!.body, /runtimeConfigCustomized=true/u);
+  assert.match(firstNotice[0]!.body, /customizedFields=model,runnerPreference/u);
 
   const unchangedSync = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
   assert.equal(unchangedSync.status, 0, unchangedSync.output);
@@ -1032,9 +1032,9 @@ test("sync notifies once per current customized runtime drift without overwritin
   assert.match(notices[1]!.body, /Production: model=gpt-5\.6-sol:medium, runner=CODEX/u);
   const afterChangedSync = await prisma.agent.findUniqueOrThrow({
     where: { id: mergeResolver.id },
-    select: { model: true, runnerPreference: true, runtimeConfigCustomized: true },
+    select: { model: true, runnerPreference: true, customizedFields: true },
   });
-  assert.deepEqual(afterChangedSync, { ...changedProduction, runtimeConfigCustomized: true });
+  assert.deepEqual(afterChangedSync, { ...changedProduction, customizedFields: ["model", "runnerPreference"] });
 
   await prisma.agent.update({ where: { id: mergeResolver.id }, data: originalProduction });
   const returnedSync = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
@@ -1068,7 +1068,7 @@ test("sync adopts uncustomized runtime drift without promoting it", async (t) =>
       id: true,
       model: true,
       runnerPreference: true,
-      runtimeConfigCustomized: true,
+      customizedFields: true,
       runtimeConfigDriftNoticeFingerprint: true,
     },
   });
@@ -1087,7 +1087,7 @@ test("sync adopts uncustomized runtime drift without promoting it", async (t) =>
       data: {
         model: agent.model,
         runnerPreference: agent.runnerPreference,
-        runtimeConfigCustomized: agent.runtimeConfigCustomized,
+        customizedFields: agent.customizedFields,
         runtimeConfigDriftNoticeFingerprint: agent.runtimeConfigDriftNoticeFingerprint,
       },
     });
@@ -1095,7 +1095,7 @@ test("sync adopts uncustomized runtime drift without promoting it", async (t) =>
   const production = { model: "claude-opus-5:medium", runnerPreference: RunnerPreference.CLAUDE };
   await prisma.agent.update({
     where: { id: agent.id },
-    data: { ...production, runtimeConfigCustomized: false, runtimeConfigDriftNoticeFingerprint: "stale-runtime-drift" },
+    data: { ...production, customizedFields: [], runtimeConfigDriftNoticeFingerprint: "stale-runtime-drift" },
   });
 
   const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
@@ -1106,10 +1106,10 @@ test("sync adopts uncustomized runtime drift without promoting it", async (t) =>
 
   assert.deepEqual(await prisma.agent.findUniqueOrThrow({
     where: { id: agent.id },
-    select: { model: true, runnerPreference: true, runtimeConfigCustomized: true, runtimeConfigDriftNoticeFingerprint: true },
+    select: { model: true, runnerPreference: true, customizedFields: true, runtimeConfigDriftNoticeFingerprint: true },
   }), {
     ...defaultSource,
-    runtimeConfigCustomized: false,
+    customizedFields: [],
     runtimeConfigDriftNoticeFingerprint: null,
   });
   const notices = await prisma.inboxMessage.findMany({
@@ -1271,7 +1271,7 @@ test(`sync recreates a missing ${specialName} Agent from senior-dev-astra-medium
   assert.equal(sol.runnerPreference, specialSource.runnerPreference);
   assert.equal(sol.inboxAccess, true);
   assert.equal(sol.environmentId, source.environmentId);
-  assert.equal(sol.runtimeConfigCustomized, false);
+  assert.deepEqual(sol.customizedFields, []);
   // The role binds no template step, so the source Agent's write grant is the
   // only way it can reach a repository.
   assert.deepEqual(await prisma.agentRepoAccess.findMany({

@@ -258,158 +258,179 @@ test("Agent API refuses Fast for a non-Codex model", async () => {
   });
 });
 
-test("Agent API refuses an executioner rename", async () => {
-  await withTokens(async () => {
-    let updated = false;
-    const executioner = lockedAgent({
-      id: "agent-executioner",
-      projectId: "project-1",
-      environmentId: "environment-1",
-      name: "plan-executor-astra-medium",
-      title: "Implementation Plan Executioner",
-      model: "gpt-5.6-sol:high",
-      runnerPreference: RunnerPreference.CODEX,
-      foundationalPrompt: "foundation",
-      rolePrompt: "role",
-    });
-    const tx = {
-      $queryRaw: async () => [{ id: executioner!.id }],
-      agent: {
-        findUnique: async () => executioner,
-        update: async () => { updated = true; return executioner; },
+/**
+ * The compound implementation root is now a capability, not a name (R14). These
+ * cases pin what that means for PATCH: the binding decides the runtime refusal,
+ * the sentinel keeps its name, an unbound Agent may take any runtime the catalog
+ * allows, and each edit marks only the fields it changed.
+ */
+const patchAgentDatabase = (
+  agent: Record<string, unknown> | null,
+  options: { compoundStep?: boolean } = {},
+): { database: PrismaClient; updates: Array<Record<string, unknown>> } => {
+  const updates: Array<Record<string, unknown>> = [];
+  const tx = {
+    $queryRaw: async () => (agent ? [{ id: agent.id }] : []),
+    agent: {
+      findUnique: async () => agent,
+      update: async ({ data }: { data: Record<string, unknown> }) => {
+        updates.push(data);
+        return { ...agent, ...data };
       },
-    };
-    const database = {
+    },
+    taskTemplateStep: {
+      findMany: async () => (options.compoundStep
+        ? [{ stepIndex: 5, outputKind: "implementation", taskTemplate: { name: "compound-engineer-workflow" } }]
+        : []),
+    },
+  };
+  return {
+    updates,
+    database: {
       ...tx,
       $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
-    } as unknown as PrismaClient;
-    const response = await createApp(database).request(`/agents/${executioner!.id}`, {
-      method: "PATCH",
-      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "renamed-executioner" }),
-    });
-    assert.equal(response.status, 400);
-    assert.deepEqual(await response.json(), {
-      error: "plan-executor-astra-medium is a canonical Agent name and cannot be changed",
-    });
-    assert.equal(updated, false);
-  });
-});
+    } as unknown as PrismaClient,
+  };
+};
 
-test("Agent API refuses a non-Codex executioner runtime", async () => {
+const executorRow = (overrides: Record<string, unknown> = {}): Record<string, unknown> => lockedAgent({
+  id: "agent-executor",
+  projectId: "project-1",
+  environmentId: "environment-1",
+  name: "plan-executor-astra-medium",
+  canonicalRole: "plan-executor-astra-medium",
+  customizedFields: [],
+  title: "Plan Executor",
+  model: "gpt-5.6-sol:high",
+  runnerPreference: RunnerPreference.CODEX,
+  foundationalPrompt: "foundation",
+  rolePrompt: "role",
+  ...overrides,
+})!;
+
+test("Agent API refuses a non-Codex runtime for an Agent bound to a compound implementation root", async () => {
   await withTokens(async () => {
-    let updated = false;
-    const executioner = lockedAgent({
-      id: "agent-executioner",
-      projectId: "project-1",
-      environmentId: "environment-1",
-      name: "plan-executor-astra-medium",
-      title: "Implementation Plan Executioner",
-      model: "gpt-5.6-sol:high",
-      runnerPreference: RunnerPreference.CODEX,
-      foundationalPrompt: "foundation",
-      rolePrompt: "role",
-    });
-    const tx = {
-      $queryRaw: async () => [{ id: executioner!.id }],
-      agent: {
-        findUnique: async () => executioner,
-        update: async () => { updated = true; return executioner; },
-      },
-    };
-    const database = {
-      ...tx,
-      $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
-    } as unknown as PrismaClient;
-    const response = await createApp(database).request(`/agents/${executioner!.id}`, {
+    const executor = executorRow();
+    const { database, updates } = patchAgentDatabase(executor, { compoundStep: true });
+    const response = await createApp(database).request(`/agents/${executor.id}`, {
       method: "PATCH",
       headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
       body: JSON.stringify({ model: "claude-opus-5:medium", runnerPreference: RunnerPreference.CLAUDE }),
     });
     assert.equal(response.status, 400);
     assert.deepEqual(await response.json(), {
-      error: "plan-executor-astra-medium requires a Codex gpt-* model",
+      error: "An Agent bound to a compound implementation root requires a Codex gpt-* model",
     });
-    assert.equal(updated, false);
+    assert.deepEqual(updates, []);
   });
 });
 
-test("Agent API does not mark unchanged runtime fields as an operator override", async () => {
+test("Agent API allows the same runtime edit for an Agent that binds no compound implementation root", async () => {
   await withTokens(async () => {
-    let updateData: Record<string, unknown> | null = null;
-    const executioner = lockedAgent({
-      id: "agent-executioner",
-      projectId: "project-1",
-      environmentId: "environment-1",
-      name: "plan-executor-astra-medium",
-      title: "Implementation Plan Executioner",
-      model: "gpt-5.6-sol:high",
-      runnerPreference: RunnerPreference.CODEX,
-      foundationalPrompt: "foundation",
-      rolePrompt: "role",
-      runtimeConfigCustomized: false,
+    const executor = executorRow({ id: "agent-unbound", name: "senior-dev-astra-medium", canonicalRole: "senior-dev-astra-medium" });
+    const { database, updates } = patchAgentDatabase(executor);
+    const response = await createApp(database).request(`/agents/${executor.id}`, {
+      method: "PATCH",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "claude-opus-5:medium", runnerPreference: RunnerPreference.CLAUDE }),
     });
-    const tx = {
-      $queryRaw: async () => [{ id: executioner!.id }],
-      agent: {
-        findUnique: async () => executioner,
-        update: async ({ data }: { data: Record<string, unknown> }) => {
-          updateData = data;
-          return { ...executioner, ...data };
-        },
-      },
-    };
-    const database = {
-      ...tx,
-      $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
-    } as unknown as PrismaClient;
-    const response = await createApp(database).request(`/agents/${executioner!.id}`, {
+    assert.equal(response.status, 200);
+    assert.deepEqual(updates, [{
+      model: "claude-opus-5:medium",
+      runnerPreference: RunnerPreference.CLAUDE,
+      customizedFields: ["model", "runnerPreference"],
+    }]);
+  });
+});
+
+test("Agent API refuses renaming the mechanical merge sentinel and allows renaming any other Agent", async () => {
+  await withTokens(async () => {
+    const sentinel = executorRow({ id: "agent-sentinel", name: "merge-integrator", canonicalRole: "merge-integrator" });
+    const refused = patchAgentDatabase(sentinel);
+    const response = await createApp(refused.database).request(`/agents/${sentinel.id}`, {
+      method: "PATCH",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "renamed-sentinel" }),
+    });
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), {
+      error: "merge-integrator is the mechanical merge sentinel and its name cannot be changed",
+    });
+    assert.deepEqual(refused.updates, []);
+
+    // The executor's canonical identity is its role, so its slug is the operator's.
+    const executor = executorRow();
+    const allowed = patchAgentDatabase(executor, { compoundStep: true });
+    const renamed = await createApp(allowed.database).request(`/agents/${executor.id}`, {
+      method: "PATCH",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "our-plan-executor" }),
+    });
+    assert.equal(renamed.status, 200);
+    assert.deepEqual(allowed.updates, [{ name: "our-plan-executor", customizedFields: ["name"] }]);
+  });
+});
+
+test("Agent API marks only the fields an edit actually changes", async () => {
+  await withTokens(async () => {
+    const executor = executorRow({ customizedFields: ["model"] });
+    const { database, updates } = patchAgentDatabase(executor, { compoundStep: true });
+    const response = await createApp(database).request(`/agents/${executor.id}`, {
       method: "PATCH",
       headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
       body: JSON.stringify({
         title: "Renamed title",
-        model: executioner!.model,
-        runnerPreference: executioner!.runnerPreference,
+        model: executor.model,
+        runnerPreference: executor.runnerPreference,
       }),
     });
     assert.equal(response.status, 200);
-    assert.deepEqual(updateData, {
+    assert.deepEqual(updates, [{
       title: "Renamed title",
       model: "gpt-5.6-sol:high",
       runnerPreference: RunnerPreference.CODEX,
-    });
+      customizedFields: ["model", "title"],
+    }]);
   });
 });
 
 test("reset-runtime-config restores canonical runtime values and refuses invalid reset targets", async () => {
   await withTokens(async () => {
     const roles = (await loadAgentSources()).roles;
-    const canonicalRole = roles.find(({ name }) => name === "default");
+    const canonicalRole = roles.find(({ canonicalRole: role }) => role === "default");
     const nonCodexRole = roles.find(({ runnerPreference }) => runnerPreference === RunnerPreference.CLAUDE);
     assert.ok(canonicalRole);
     assert.ok(nonCodexRole);
     const updates: Array<Record<string, unknown>> = [];
+    // Renamed by the operator, and still the `default` role: the reset finds its
+    // source by canonicalRole, not by the name on the row.
     const canonical = lockedAgent({
       id: "agent-default",
-      name: "default",
+      name: "our-default",
+      canonicalRole: "default",
+      customizedFields: ["name", "model", "runnerPreference"],
       model: "custom-model",
       runnerPreference: RunnerPreference.CLAUDE,
-      runtimeConfigCustomized: true,
       runtimeConfigDriftNoticeFingerprint: "stale-fingerprint",
     });
     const tx = {
       $queryRaw: async (_strings: unknown, agentId: string) => agentId === "missing" ? [] : [{ id: agentId }],
+      taskTemplateStep: { findMany: async () => [] },
       agent: {
         findUnique: async ({ where }: { where: { id: string } }) => {
           if (where.id === "agent-custom") return lockedAgent({
             id: "agent-custom",
             name: "operator-agent",
+            canonicalRole: null,
+            customizedFields: [],
             model: "custom-model",
             runnerPreference: RunnerPreference.CLAUDE,
           });
           if (where.id === "agent-archived") return lockedAgent({
             id: "agent-archived",
             name: "default",
+            canonicalRole: "default",
+            customizedFields: [],
             archivedAt: new Date(),
             model: canonical!.model,
             runnerPreference: canonical!.runnerPreference,
@@ -417,10 +438,11 @@ test("reset-runtime-config restores canonical runtime values and refuses invalid
           if (where.id === "agent-fast-tier") return lockedAgent({
             id: "agent-fast-tier",
             name: nonCodexRole.name,
+            canonicalRole: nonCodexRole.canonicalRole,
+            customizedFields: ["model", "runnerPreference"],
             model: "gpt-5.6-sol:high",
             runnerPreference: RunnerPreference.CODEX,
             codexServiceTier: CodexServiceTier.FAST,
-            runtimeConfigCustomized: true,
           });
           if (where.id === canonical!.id) return canonical;
           return null;
@@ -451,10 +473,11 @@ test("reset-runtime-config restores canonical runtime values and refuses invalid
     });
     const reset = await request(canonical!.id);
     assert.equal(reset.status, 200);
+    // The reset clears only what it restored: the operator's rename survives it.
     assert.deepEqual(updates, [{
       model: canonicalRole.model,
       runnerPreference: canonicalRole.runnerPreference,
-      runtimeConfigCustomized: false,
+      customizedFields: ["name"],
       runtimeConfigDriftNoticeFingerprint: null,
     }]);
   });

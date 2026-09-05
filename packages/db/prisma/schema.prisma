@@ -277,11 +277,18 @@ model Agent {
   projectId                           String
   environmentId                       String
   name                                String
+  /// The canonical identity of this Agent: the `agents/roles/<name>.md` file it
+  /// was installed from, null for an operator-created Agent. `name` is a slug the
+  /// operator may edit, so canonical seed, prompt sync and role binding match on
+  /// this column instead.
+  canonicalRole                       String?
   title                               String
   model                               String
-  /// Set when the operator changes model or runner in the console. Canonical
-  /// seed and prompt sync preserve this runtime choice.
-  runtimeConfigCustomized             Boolean              @default(false)
+  /// Fields the operator edited in the console. Canonical seed and prompt sync
+  /// keep a listed field and adopt every unlisted one; prompts always follow
+  /// canonical. Values are Agent column names: name, title, model,
+  /// runnerPreference.
+  customizedFields                    String[]             @default([])
   /// The customized canonical/production comparison most recently reported
   /// to Inbox. Cleared when that drift is no longer present.
   runtimeConfigDriftNoticeFingerprint String?
@@ -314,6 +321,7 @@ model Agent {
   inboxMessages                       InboxMessage[]
 
   @@unique([projectId, name])
+  @@unique([projectId, canonicalRole])
   @@unique([id, projectId])
   @@index([projectId])
   @@index([environmentId])

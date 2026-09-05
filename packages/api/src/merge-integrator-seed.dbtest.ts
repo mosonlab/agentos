@@ -112,7 +112,7 @@ const createA1Project = async (slug: string) => {
         inboxAccess: role.inboxAccess,
         foundationalPrompt: sources.foundationalPrompt,
         rolePrompt: role.rolePrompt,
-        runtimeConfigCustomized: false,
+        customizedFields: [],
         runtimeConfigDriftNoticeFingerprint: null,
         disabledTools: [],
       },
@@ -175,7 +175,7 @@ const agentSnapshot = async (projectIds: string[]) => db.agent.findMany({
     name: true,
     title: true,
     model: true,
-    runtimeConfigCustomized: true,
+    customizedFields: true,
     runtimeConfigDriftNoticeFingerprint: true,
     codexServiceTier: true,
     foundationalPrompt: true,
@@ -298,16 +298,16 @@ test("re-seeding preserves an operator-selected model and runner", async () => {
   const project = await db.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
   await db.agent.update({
     where: { projectId_name: { projectId: project.id, name: "spec-opus-high" } },
-    data: { model: "claude-opus-5:medium", runnerPreference: "CLAUDE", runtimeConfigCustomized: true },
+    data: { model: "claude-opus-5:medium", runnerPreference: "CLAUDE", customizedFields: ["model", "runnerPreference"] },
   });
 
   const reseeded = await seed();
   assert.equal(reseeded.code, 0, reseeded.output);
   const spec = await db.agent.findUniqueOrThrow({
     where: { projectId_name: { projectId: project.id, name: "spec-opus-high" } },
-    select: { model: true, runnerPreference: true, runtimeConfigCustomized: true },
+    select: { model: true, runnerPreference: true, customizedFields: true },
   });
-  assert.deepEqual(spec, { model: "claude-opus-5:medium", runnerPreference: "CLAUDE", runtimeConfigCustomized: true });
+  assert.deepEqual(spec, { model: "claude-opus-5:medium", runnerPreference: "CLAUDE", customizedFields: ["model", "runnerPreference"] });
 });
 
 test("canonical sync restores step, merge-resolver-opus-medium role, and foundational prompts when structure matches", async () => {
@@ -709,7 +709,7 @@ test("canonical sync restores Agent prompts in every Project and preserves custo
     data: {
       model: "gpt-5.6-sol:medium",
       runnerPreference: RunnerPreference.CODEX,
-      runtimeConfigCustomized: false,
+      customizedFields: [],
       runtimeConfigDriftNoticeFingerprint: "stale-runtime-drift",
       foundationalPrompt: "second foundational prompt drift",
       rolePrompt: "second role prompt drift",
@@ -720,7 +720,7 @@ test("canonical sync restores Agent prompts in every Project and preserves custo
     data: {
       model: "claude-opus-5:medium",
       runnerPreference: RunnerPreference.CLAUDE,
-      runtimeConfigCustomized: true,
+      customizedFields: ["model", "runnerPreference"],
       runtimeConfigDriftNoticeFingerprint: null,
       foundationalPrompt: "custom foundational prompt drift",
       rolePrompt: "custom role prompt drift",
@@ -742,14 +742,14 @@ test("canonical sync restores Agent prompts in every Project and preserves custo
     rolePrompt: persistedUncustomized.rolePrompt,
     model: persistedUncustomized.model,
     runnerPreference: persistedUncustomized.runnerPreference,
-    runtimeConfigCustomized: persistedUncustomized.runtimeConfigCustomized,
+    customizedFields: persistedUncustomized.customizedFields,
     runtimeConfigDriftNoticeFingerprint: persistedUncustomized.runtimeConfigDriftNoticeFingerprint,
   }, {
     foundationalPrompt: sources.foundationalPrompt,
     rolePrompt: uncustomizedSource.rolePrompt,
     model: uncustomizedSource.model,
     runnerPreference: uncustomizedSource.runnerPreference,
-    runtimeConfigCustomized: false,
+    customizedFields: [],
     runtimeConfigDriftNoticeFingerprint: null,
   });
   assert.deepEqual({
@@ -757,14 +757,14 @@ test("canonical sync restores Agent prompts in every Project and preserves custo
     rolePrompt: persistedCustomized.rolePrompt,
     model: persistedCustomized.model,
     runnerPreference: persistedCustomized.runnerPreference,
-    runtimeConfigCustomized: persistedCustomized.runtimeConfigCustomized,
+    customizedFields: persistedCustomized.customizedFields,
     runtimeConfigDriftNoticeFingerprint: persistedCustomized.runtimeConfigDriftNoticeFingerprint,
   }, {
     foundationalPrompt: sources.foundationalPrompt,
     rolePrompt: customizedSource.rolePrompt,
     model: "claude-opus-5:medium",
     runnerPreference: RunnerPreference.CLAUDE,
-    runtimeConfigCustomized: true,
+    customizedFields: ["model", "runnerPreference"],
     runtimeConfigDriftNoticeFingerprint: JSON.stringify({
       canonical: { model: customizedSource.model, runnerPreference: customizedSource.runnerPreference },
       production: { model: "claude-opus-5:medium", runnerPreference: RunnerPreference.CLAUDE },
@@ -826,7 +826,7 @@ test("canonical sync isolates a foreign invalid runtime pair and still updates c
     data: {
       model: "claude-opus-5:medium",
       runnerPreference: RunnerPreference.CODEX,
-      runtimeConfigCustomized: false,
+      customizedFields: [],
     },
   });
   const foreignBefore = await agentSnapshot([second.project.id]);

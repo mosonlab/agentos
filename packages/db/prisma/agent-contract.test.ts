@@ -53,7 +53,11 @@ test("canonical role frontmatter matches the Prisma seed contract", async () => 
     const runner = frontmatterValue(source, "runner").toUpperCase();
     assert.ok(runner in RunnerPreference, `${file} must declare a supported runner`);
     return {
+      // The file name is the canonical role; the contract refuses a file whose
+      // frontmatter names a different role, so both are read from the source.
+      canonicalRole: file.slice(0, -".md".length),
       name: frontmatterValue(source, "name"),
+      title: frontmatterValue(source, "title"),
       model: frontmatterValue(source, "model"),
       runnerPreference: RunnerPreference[runner as keyof typeof RunnerPreference],
     };

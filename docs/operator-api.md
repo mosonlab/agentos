@@ -340,6 +340,20 @@ curl -X DELETE "$BASE_URL/secrets/$SECRET_ID" -H "Authorization: Bearer $OPERATO
 
 ## Agents and capabilities
 
+Every Agent response carries three fields beyond its stored columns and prompts:
+
+- `canonicalRole` — the `agents/roles/<role>.md` file this Agent was installed
+  from, or `null` for one you created. It is the Agent's canonical identity:
+  seeding, canonical prompt sync and role binding all match on it, so renaming an
+  Agent never detaches it from its role.
+- `customizedFields` — the fields you edited (`name`, `title`, `model`,
+  `runnerPreference`). Canonical sync adopts every field that is not listed and
+  leaves the listed ones alone. Prompts are never listed: they always follow
+  canonical.
+- `assignable` — `false` only for the mechanical merge sentinel
+  `merge-integrator`, which exists so the merge step can carry a Run but is not
+  an Agent you may assign. Agent pickers filter on it.
+
 ### GET `/projects/:projectId/agents`
 
 - Required path parameter: `projectId`.
@@ -377,6 +391,16 @@ curl "$BASE_URL/agents/$AGENT_ID" -H "Authorization: Bearer $OPERATOR_TOKEN"
 - Required JSON: at least one agent field (`environmentId`, `name`, `title`,
   `model`, `codexServiceTier`, `foundationalPrompt`, `rolePrompt`,
   `runnerPreference`, `inboxAccess`, or `disabledTools`).
+- Editing `name`, `title`, `model` or `runnerPreference` to a different value adds
+  that field to `customizedFields`, so canonical sync stops rewriting it.
+  Submitting the value the Agent already has marks nothing.
+- Refused with 400 when the Agent is bound to a compound implementation root and
+  the patch would leave it on a non-Codex runner or a non-`gpt-*` model: that step
+  drives subagents and only a Codex `gpt-*` runtime can run it. The refusal follows
+  the binding, not the Agent's name — an Agent that binds no such step may take any
+  runtime the catalog allows.
+- Refused with 400 when it would rename `merge-integrator`, the mechanical merge
+  sentinel the platform identifies by name.
 
 ```sh
 curl -X PATCH "$BASE_URL/agents/$AGENT_ID" \
@@ -387,12 +411,15 @@ curl -X PATCH "$BASE_URL/agents/$AGENT_ID" \
 ### POST `/agents/:agentId/reset-runtime-config`
 
 - Required path parameter: `agentId`.
-- Required JSON: none. The agent must have a canonical role source and must
-  not be archived. The canonical role's `model` and `runnerPreference` are
-  applied immediately, and the agent becomes eligible for future canonical
-  runtime updates. A stored non-default `codexServiceTier` must also be valid
-  for the canonical model and runner; if reset refuses that combination, first
-  PATCH `codexServiceTier` to `DEFAULT`, then retry the reset.
+- Required JSON: none. The agent must carry a `canonicalRole` whose role source
+  exists, and must not be archived. The source is found by `canonicalRole`, so a
+  renamed Agent still resets to the role it was installed from. The canonical
+  role's `model` and `runnerPreference` are applied immediately and removed from
+  `customizedFields`, so both become eligible for future canonical runtime
+  updates; an edited `name` or `title` stays customized. A stored non-default
+  `codexServiceTier` must also be valid for the canonical model and runner; if
+  reset refuses that combination, first PATCH `codexServiceTier` to `DEFAULT`,
+  then retry the reset.
 
 ```sh
 curl -X POST "$BASE_URL/agents/$AGENT_ID/reset-runtime-config" \
@@ -410,6 +437,9 @@ curl -X DELETE "$BASE_URL/agents/$AGENT_ID" -H "Authorization: Bearer $OPERATOR_
 ### POST `/agents/:agentId/archive`
 
 - Required path parameter: `agentId`.
+- Refused with 409 when the Agent still holds live task or run references, and
+  when any staffing profile entry names it; the refusal lists the profiles, which
+  you edit before retrying.
 
 ```sh
 curl -X POST "$BASE_URL/agents/$AGENT_ID/archive" -H "Authorization: Bearer $OPERATOR_TOKEN"
@@ -421,6 +451,26 @@ curl -X POST "$BASE_URL/agents/$AGENT_ID/archive" -H "Authorization: Bearer $OPE
 
 ```sh
 curl -X POST "$BASE_URL/agents/$AGENT_ID/unarchive" -H "Authorization: Bearer $OPERATOR_TOKEN"
+```
+
+### POST `/agents/:agentId/duplicate`
+
+- Required path parameter: `agentId`.
+- Required JSON field: `name`, unused in this project.
+- Copies the setup, not the history: prompts, `model`, `runnerPreference`,
+  `codexServiceTier`, `disabledTools`, `environmentId`, `inboxAccess`, the
+  collaborators this Agent may talk to, and its repository, skill, MCP, secret and
+  filesystem grants (with fresh grant ids). Tasks, template steps, sessions, runs,
+  inbox history and other Agents' collaborations with this one are not copied.
+- The copy is your Agent, not the role: `canonicalRole` is `null` and
+  `customizedFields` empty, so canonical sync never rewrites it.
+- Refused with 409 when `name` is taken in the project, and when the source is
+  `merge-integrator`: one mechanical merge sentinel is the whole contract.
+
+```sh
+curl -X POST "$BASE_URL/agents/$AGENT_ID/duplicate" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"senior-dev-luna-max-experiment"}'
 ```
 
 ### GET `/agents/:agentId/secret-grants`
