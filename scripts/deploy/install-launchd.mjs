@@ -1540,6 +1540,53 @@ const linuxServiceValues = ({ root, inventory, nodeBinary, path, serviceUser, wr
   }),
 ));
 
+const SERVICE_INSTALLER_UNCHANGED = Object.freeze({
+  darwin: "PLAN no files or launchd state changed",
+  linux: "PLAN no files or systemd state changed",
+});
+const LAUNCHD_ACTIVATION_NOTICE = "NEXT reload each service plist with launchctl, then run the wrapper inventory readiness check";
+
+/** The phase word an installer invocation performed. A revert names itself
+ * even when it only planned; an invocation that changed nothing is a plan. */
+const installerPhase = ({ revert = false, applied }) => revert ? "REVERT" : applied ? "APPLY" : "PLAN";
+
+/** The privileged systemd step that remains after an unprivileged stage,
+ * spelled except for the entrypoint path only the caller knows. */
+const privilegedStageCommand = ({ deployRole, runnerIdPrefix, serviceUser, revert }) => Object.freeze({
+  environment: `${deployRole === DEFAULT_DEPLOY_ROLE ? "" : `AGENTOS_DEPLOY_ROLE=${deployRole} `}${runnerIdPrefix
+    ? `AGENTOS_RUNNER_ID_PREFIX=${shellQuote(runnerIdPrefix)} `
+    : ""}`,
+  options: `--install-units${revert ? " --revert" : ""} --service-user ${shellQuote(serviceUser)}`,
+});
+
+const systemdInstallerReport = ({ unitDirectory, units, staging }) => [
+  ["platform", "linux"],
+  ["unit-directory", unitDirectory],
+  ["units", String(units.length)],
+  ["staging", staging],
+];
+
+const launchdInstallerReport = ({ wrapper, entries }) => [
+  ["service-wrapper", wrapper],
+  ["service-definitions", String(entries.length)],
+];
+
+/** The one outcome both platforms return. It names the phase performed, the
+ * report a caller prints under that phase word, the notice this installer can
+ * spell itself, and the privileged command that remains. Callers read these
+ * fields; nobody recomputes the phase from the options it was given. */
+const serviceInstallerOutcome = ({ platform, revert = false, applied, report, remaining = null, ...detail }) => Object.freeze({
+  phase: installerPhase({ revert, applied }),
+  platform,
+  applied,
+  report: Object.freeze(report.map((fact) => Object.freeze(fact))),
+  notice: applied
+    ? (platform === "darwin" && !revert ? LAUNCHD_ACTIVATION_NOTICE : null)
+    : SERVICE_INSTALLER_UNCHANGED[platform],
+  remaining,
+  ...detail,
+});
+
 const systemdStagePlan = ({
   repositoryRoot,
   nodeBinary = process.execPath,
@@ -1617,10 +1664,10 @@ const systemdStagePlan = ({
   ])));
   verifySystemdServiceDefinitions(unitDefinitions, inventory);
   const unitPaths = inventory.entries.map(({ unitName }) => join(resolvedUnitDirectory, unitName));
-  if (!apply) return Object.freeze({
-    applied: false,
-    reverted: false,
+  if (!apply) return serviceInstallerOutcome({
     platform: "linux",
+    applied: false,
+    report: systemdInstallerReport({ unitDirectory: resolvedUnitDirectory, units: unitPaths, staging: stageRoot }),
     staging: stageRoot,
     unitDirectory: resolvedUnitDirectory,
     runnerIdPrefix,
@@ -1788,10 +1835,11 @@ const systemdStagePlan = ({
   }
   mkdirSync(dirname(manifestPath), { recursive: true, mode: 0o700 });
   writeAtomic(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 0o600);
-  return Object.freeze({
-    applied: true,
-    reverted: false,
+  return serviceInstallerOutcome({
     platform: "linux",
+    applied: true,
+    report: systemdInstallerReport({ unitDirectory: resolvedUnitDirectory, units: unitEntries, staging: stageRoot }),
+    remaining: privilegedStageCommand({ deployRole, runnerIdPrefix, serviceUser: account, revert: false }),
     staging: stageRoot,
     unitDirectory: resolvedUnitDirectory,
     serviceUser: account,
@@ -1854,10 +1902,14 @@ export const installStagedSystemdServices = ({
   });
   const entries = validated.entries;
   const systemctl = systemctlPath ?? systemdCommandPath("systemctl", null, execute);
-  if (!apply) return Object.freeze({
-    applied: false,
-    reverted: false,
+  if (!apply) return serviceInstallerOutcome({
     platform: "linux",
+    applied: false,
+    report: systemdInstallerReport({
+      unitDirectory: resolvedUnitDirectory,
+      units: validated.inventory.entries,
+      staging: validated.stageRoot,
+    }),
     staging: validated.stageRoot,
     unitDirectory: resolvedUnitDirectory,
     units: validated.inventory.entries.map(({ unitName }) => unitName),
@@ -2013,10 +2065,14 @@ export const installStagedSystemdServices = ({
         throw new Error(`systemd-service-manifest-update-failed:complete:${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    return Object.freeze({
-      applied: true,
-      reverted: false,
+    return serviceInstallerOutcome({
       platform: "linux",
+      applied: true,
+      report: systemdInstallerReport({
+        unitDirectory: resolvedUnitDirectory,
+        units: validated.inventory.entries,
+        staging: validated.stageRoot,
+      }),
       staging: validated.stageRoot,
       unitDirectory: resolvedUnitDirectory,
       runnerIdPrefix: manifest.renderInputs?.runnerIdPrefix ?? "",
@@ -2067,10 +2123,15 @@ export const installStagedSystemdServices = ({
   rmSync(path, { force: true });
   rmSync(transactionStatePath, { force: true });
   rmSync(validated.stageRoot, { recursive: true, force: true });
-  return Object.freeze({
-    applied: true,
-    reverted: true,
+  return serviceInstallerOutcome({
     platform: "linux",
+    revert: true,
+    applied: true,
+    report: systemdInstallerReport({
+      unitDirectory: resolvedUnitDirectory,
+      units: validated.inventory.entries,
+      staging: validated.stageRoot,
+    }),
     staging: validated.stageRoot,
     unitDirectory: resolvedUnitDirectory,
     units: validated.inventory.entries.map(({ unitName }) => unitName),
@@ -2123,10 +2184,23 @@ const installLinuxServices = (options = {}) => {
       manifest.wrapperReverted = true;
       writeAtomic(path, `${JSON.stringify(manifest, null, 2)}\n`, 0o600);
     }
-    return Object.freeze({
-      applied: apply,
-      reverted: false,
+    return serviceInstallerOutcome({
       platform: "linux",
+      revert: true,
+      applied: apply,
+      report: systemdInstallerReport({
+        unitDirectory: resolvedUnitDirectory,
+        units: validated.inventory.entries,
+        staging: validated.stageRoot,
+      }),
+      remaining: apply
+        ? privilegedStageCommand({
+            deployRole: validated.inventory.deployRole,
+            runnerIdPrefix: validated.inventory.runnerIdPrefix,
+            serviceUser: manifest.serviceUser,
+            revert: true,
+          })
+        : null,
       staging: validated.stageRoot,
       unitDirectory: resolvedUnitDirectory,
       runnerIdPrefix: validated.inventory.runnerIdPrefix,
@@ -2293,12 +2367,15 @@ export const installLaunchdServices = ({
         }
       }
     }
-    if (!apply) return {
+    if (!apply) return serviceInstallerOutcome({
+      platform: "darwin",
+      revert: true,
       applied: false,
-      reverted: false,
+      report: launchdInstallerReport({ wrapper, entries: manifest.entries }),
       deployRole,
+      wrapper,
       entries: manifest.entries.map((entry) => entry.path),
-    };
+    });
     for (const entry of manifest.entries) {
       if (entry.existed) {
         if (observed.get(entry.path) !== entry.originalSha256) {
@@ -2309,7 +2386,15 @@ export const installLaunchdServices = ({
       if (entry.backupPath) rmSync(entry.backupPath, { force: true });
     }
     rmSync(manifestPath, { force: true });
-    return { applied: true, reverted: true, deployRole, entries: manifest.entries.map((entry) => entry.path) };
+    return serviceInstallerOutcome({
+      platform: "darwin",
+      revert: true,
+      applied: true,
+      report: launchdInstallerReport({ wrapper, entries: manifest.entries }),
+      deployRole,
+      wrapper,
+      entries: manifest.entries.map((entry) => entry.path),
+    });
   }
   const resolvedNode = resolve(nodeBinary);
   const resolvedGit = gitBinary ? resolve(gitBinary) : resolvedNode;
@@ -2427,14 +2512,15 @@ export const installLaunchdServices = ({
       throw new Error(`launchd-service-definition-drift:${entry.path}`);
     }
   }
-  if (!apply) return {
+  if (!apply) return serviceInstallerOutcome({
+    platform: "darwin",
     applied: false,
-    reverted: false,
+    report: launchdInstallerReport({ wrapper, entries }),
     deployRole,
     wrapper,
     entries: entries.map(({ path: entryPath }) => entryPath),
     rendered,
-  };
+  });
   if (!existsSync(join(sharedRoot, ".env"))) throw new Error("shared-environment-missing");
   for (const directory of SHARED_RUNTIME_DIRECTORIES) {
     mkdirSync(join(sharedRoot, directory), { recursive: true, mode: 0o700 });
@@ -2535,14 +2621,15 @@ export const installLaunchdServices = ({
     });
     writeAtomic(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 0o600);
   }
-  return {
+  return serviceInstallerOutcome({
+    platform: "darwin",
     applied: true,
-    reverted: false,
+    report: launchdInstallerReport({ wrapper, entries }),
     deployRole,
     wrapper,
     bootstrap,
     entries: entries.map(({ path: entryPath }) => entryPath),
-  };
+  });
 };
 
 export const installLaunchd = (args, context = {}) => {
@@ -2579,7 +2666,7 @@ export const installLaunchd = (args, context = {}) => {
         revert,
         apply: true,
       });
-      const phase = revert ? "REVERT" : "APPLY";
+      const phase = installerPhase({ revert, applied: true });
       process.stdout.write(`${phase} platform=linux\n`);
       process.stdout.write(`${phase} unit-directory=${context.unitDirectory ?? SYSTEMD_UNIT_DIRECTORY}\n`);
       process.stdout.write(`${phase} units=2\n`);
@@ -2602,10 +2689,11 @@ export const installLaunchd = (args, context = {}) => {
         revert: true,
         apply,
       });
-      process.stdout.write(`${apply ? "REVERT" : "PLAN"} platform=linux\n`);
-      process.stdout.write(`${apply ? "REVERT" : "PLAN"} unit-directory=${context.unitDirectory ?? SYSTEMD_UNIT_DIRECTORY}\n`);
-      process.stdout.write(`${apply ? "REVERT" : "PLAN"} units=2\n`);
-      process.stdout.write(`${apply ? "REVERT" : "PLAN"} staging=${context.stagingRoot ?? "recorded"}\n`);
+      const phase = installerPhase({ revert: true, applied: apply });
+      process.stdout.write(`${phase} platform=linux\n`);
+      process.stdout.write(`${phase} unit-directory=${context.unitDirectory ?? SYSTEMD_UNIT_DIRECTORY}\n`);
+      process.stdout.write(`${phase} units=2\n`);
+      process.stdout.write(`${phase} staging=${context.stagingRoot ?? "recorded"}\n`);
       if (!apply) process.stdout.write("PLAN no files or systemd state changed\n");
       return 0;
     }
@@ -2647,10 +2735,11 @@ export const installLaunchd = (args, context = {}) => {
       execute: context.execute ?? execFileSync,
       deployRole,
     });
-    process.stdout.write(`${apply ? "APPLY" : "PLAN"} platform=linux\n`);
-    process.stdout.write(`${apply ? "APPLY" : "PLAN"} unit-directory=${context.unitDirectory ?? SYSTEMD_UNIT_DIRECTORY}\n`);
-    process.stdout.write(`${apply ? "APPLY" : "PLAN"} units=2\n`);
-    process.stdout.write(`${apply ? "APPLY" : "PLAN"} staging=${result.staging}\n`);
+    const phase = installerPhase({ applied: apply });
+    process.stdout.write(`${phase} platform=linux\n`);
+    process.stdout.write(`${phase} unit-directory=${context.unitDirectory ?? SYSTEMD_UNIT_DIRECTORY}\n`);
+    process.stdout.write(`${phase} units=2\n`);
+    process.stdout.write(`${phase} staging=${result.staging}\n`);
     if (!apply) process.stdout.write("PLAN no files or systemd state changed\n");
     else {
       const role = deployRole === DEFAULT_DEPLOY_ROLE ? "" : `AGENTOS_DEPLOY_ROLE=${deployRole} `;
@@ -2691,21 +2780,22 @@ export const installLaunchd = (args, context = {}) => {
   };
   verifyRenderedToolchain(values);
   const rendered = renderLaunchdPlist(readFileSync(TEMPLATE, "utf8"), values);
-  process.stdout.write(`${apply ? "APPLY" : "PLAN"} label=${LABEL}\n`);
-  process.stdout.write(`${apply ? "APPLY" : "PLAN"} destination=${destination}\n`);
-  process.stdout.write(`${apply ? "APPLY" : "PLAN"} repository=${values.repositoryRoot}\n`);
-  process.stdout.write(`${apply ? "APPLY" : "PLAN"} node=${values.nodeBinary}\n`);
-  process.stdout.write(`${apply ? "APPLY" : "PLAN"} path=${values.path}\n`);
-  process.stdout.write(`${apply ? "APPLY" : "PLAN"} git=${values.gitBinary}\n`);
-  process.stdout.write(`${apply ? "APPLY" : "PLAN"} npm=${values.npmBinary}\n`);
-  process.stdout.write(`${apply ? "APPLY" : "PLAN"} rendered_toolchain=verified\n`);
-  if (values.backup) process.stdout.write(`${apply ? "APPLY" : "PLAN"} pg_dump_mode=${values.backup.mode}\n`);
+  const phase = installerPhase({ applied: apply });
+  process.stdout.write(`${phase} label=${LABEL}\n`);
+  process.stdout.write(`${phase} destination=${destination}\n`);
+  process.stdout.write(`${phase} repository=${values.repositoryRoot}\n`);
+  process.stdout.write(`${phase} node=${values.nodeBinary}\n`);
+  process.stdout.write(`${phase} path=${values.path}\n`);
+  process.stdout.write(`${phase} git=${values.gitBinary}\n`);
+  process.stdout.write(`${phase} npm=${values.npmBinary}\n`);
+  process.stdout.write(`${phase} rendered_toolchain=verified\n`);
+  if (values.backup) process.stdout.write(`${phase} pg_dump_mode=${values.backup.mode}\n`);
   if (values.backup?.mode === "host") {
-    process.stdout.write(`${apply ? "APPLY" : "PLAN"} pg_dump=${values.backup.pgDumpBinary}\n`);
+    process.stdout.write(`${phase} pg_dump=${values.backup.pgDumpBinary}\n`);
   } else if (values.backup) {
-    process.stdout.write(`${apply ? "APPLY" : "PLAN"} docker=${values.backup.dockerBinary}\n`);
-    process.stdout.write(`${apply ? "APPLY" : "PLAN"} pg_dump_container=${values.backup.container}\n`);
-    process.stdout.write(`${apply ? "APPLY" : "PLAN"} container_pg_dump=${values.backup.pgDumpBinary}\n`);
+    process.stdout.write(`${phase} docker=${values.backup.dockerBinary}\n`);
+    process.stdout.write(`${phase} pg_dump_container=${values.backup.container}\n`);
+    process.stdout.write(`${phase} container_pg_dump=${values.backup.pgDumpBinary}\n`);
   }
 
   if (!apply) {

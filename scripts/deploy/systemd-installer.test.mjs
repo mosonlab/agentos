@@ -37,6 +37,7 @@ import {
   verifySystemdAutoDeployDefinitions,
   verifySystemdServiceDefinitions,
 } from "./install-launchd.mjs";
+import { runServiceInstaller } from "./install-launchd-services.mjs";
 import { generateServiceInventory, resolveServiceInventory } from "./service-inventory.mjs";
 
 const DEFAULT_INVENTORY = resolveServiceInventory({});
@@ -54,6 +55,15 @@ const withServicePlatform = async (platform, work) => {
 };
 
 const withLinux = (work) => withServicePlatform("linux", work);
+
+const shellQuote = (value) => `'${String(value).replaceAll("'", `'"'"'`)}'`;
+const captureStdout = (work) => {
+  const chunks = [];
+  const original = process.stdout.write;
+  process.stdout.write = (chunk) => { chunks.push(String(chunk)); return true; };
+  try { work(); } finally { process.stdout.write = original; }
+  return chunks.join("");
+};
 
 const prepareManifestValidationCase = (platform) => {
   const root = mkdtempSync(join(tmpdir(), `agentos-${platform}-manifest-invalid-`));
@@ -595,6 +605,59 @@ test("rendered unit syntax is verified by systemd-analyze when available", (t) =
   }
 });
 
+test("the service CLI prints the phase, report and remaining step the installer returns", async () => {
+  await withLinux(async () => {
+    const root = mkdtempSync(join(tmpdir(), "agentos-systemd-cli-outcome-"));
+    const unitDirectory = join(root, "etc/systemd/system");
+    const sudoersPath = join(root, "etc/sudoers.d/anneal-service-control");
+    const context = {
+      repositoryRoot: root,
+      nodeBinary: process.execPath,
+      gitBinary: process.execPath,
+      unitDirectory,
+      sudoersPath,
+      visudoPath: "/usr/bin/true",
+      userLookup: accountLookup,
+      effectiveUid: 501,
+    };
+    const stageCommand = (options) => `NEXT sudo node ${shellQuote(process.argv[1])} ${options}\n`;
+    try {
+      const planned = captureStdout(() => assert.equal(runServiceInstaller(["--service-user", "anneal-test"], context), 0));
+      const stagingRoot = planned.match(/^PLAN staging=(.*)$/mu)[1];
+      assert.equal(planned, [
+        "PLAN platform=linux",
+        `PLAN unit-directory=${unitDirectory}`,
+        `PLAN units=${SERVICE_LABELS.length}`,
+        `PLAN staging=${stagingRoot}`,
+        "PLAN no files or systemd state changed\n",
+      ].join("\n"));
+      const applied = captureStdout(() =>
+        assert.equal(runServiceInstaller(["--apply", "--service-user", "anneal-test"], context), 0));
+      assert.equal(applied, [
+        "APPLY platform=linux",
+        `APPLY unit-directory=${unitDirectory}`,
+        `APPLY units=${SERVICE_LABELS.length}`,
+        `APPLY staging=${applied.match(/^APPLY staging=(.*)$/mu)[1]}`,
+        stageCommand("--install-units --service-user 'anneal-test'"),
+      ].join("\n"));
+      const plannedRevert = captureStdout(() =>
+        assert.equal(runServiceInstaller(["--revert", "--service-user", "anneal-test"], context), 0));
+      assert.match(plannedRevert, /^REVERT platform=linux\n/u);
+      assert.match(plannedRevert, /\nPLAN no files or systemd state changed\n$/u);
+      const stagedRevert = captureStdout(() =>
+        assert.equal(runServiceInstaller(["--revert", "--apply", "--service-user", "anneal-test"], context), 0));
+      assert.match(stagedRevert, /^REVERT platform=linux\n/u);
+      assert.equal(
+        stagedRevert.endsWith(stageCommand("--install-units --revert --service-user 'anneal-test'")),
+        true,
+        stagedRevert,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 test("the real service CLI enforces the Linux root boundary and sudo -n policy", async () => {
   await withLinux(async () => {
     const root = mkdtempSync(join(tmpdir(), "agentos-systemd-installer-"));
@@ -747,7 +810,7 @@ test("the real service CLI enforces the Linux root boundary and sudo -n policy",
         userLookup: accountLookup,
         visudoPath: "/usr/bin/true",
       });
-      assert.equal(reverted.reverted, true);
+      assert.deepEqual([reverted.phase, reverted.applied], ["REVERT", true]);
       assert.equal(reverted.platform, "linux");
       assert.equal(existsSync(join(unitDirectory, "com.agentos.api.service")), false);
       assert.equal(existsSync(join(unitDirectory, "com.agentos.api.service.d")), false);
