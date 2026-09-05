@@ -1790,6 +1790,10 @@ test("seed and sync preserve every seed-era legacy template identity", async () 
     templateId,
     taskId,
     templateStepId,
+    template: await prisma.taskTemplate.findUniqueOrThrow({
+      where: { id: templateId },
+      include: { steps: { orderBy: { stepIndex: "asc" } } },
+    }),
     task: await prisma.task.findUniqueOrThrow({
       where: { id: taskId },
       select: { templateId: true, templateStepId: true, status: true, chainId: true },
@@ -1800,9 +1804,10 @@ test("seed and sync preserve every seed-era legacy template identity", async () 
   for (const [index, legacyRow] of legacyRows.entries()) {
     const persisted = await prisma.taskTemplate.findUniqueOrThrow({
       where: { id: legacyRow.templateId },
-      select: { name: true },
+      include: { steps: { orderBy: { stepIndex: "asc" } } },
     });
     assert.equal(persisted.name, legacyRow.legacyName);
+    assert.deepEqual(persisted.steps, legacyBeforeSync[index]!.template.steps);
     assert.deepEqual(canonicalTemplateIdentity(persisted.name), {
       canonicalName: legacyRow.canonicalName,
       generation: legacyRow.marker,
@@ -1821,9 +1826,12 @@ test("seed and sync preserve every seed-era legacy template identity", async () 
   const resynced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
   assert.equal(resynced.status, 0, resynced.output);
   for (const legacyRow of legacyRows) {
-    assert.equal(await prisma.taskTemplate.count({
-      where: { id: legacyRow.templateId, name: legacyRow.legacyName },
-    }), 1);
+    const persisted = await prisma.taskTemplate.findUniqueOrThrow({
+      where: { id: legacyRow.templateId },
+      include: { steps: { orderBy: { stepIndex: "asc" } } },
+    });
+    assert.equal(persisted.name, legacyRow.legacyName);
+    assert.deepEqual(persisted.steps, legacyBeforeSync.find(({ templateId }) => templateId === legacyRow.templateId)!.template.steps);
     assert.equal(await prisma.taskTemplate.count({
       where: { projectId: project.id, name: legacyRow.canonicalName },
     }), 1);
