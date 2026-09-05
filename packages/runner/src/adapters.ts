@@ -107,6 +107,9 @@ export const buildPrompt = (claim: ClaimedTask): string => [
       `- Persisted task output from Run ${claim.previousRunHandoff.output.runId} (${claim.previousRunHandoff.output.kind}, commit ${claim.previousRunHandoff.output.commitSha ?? "unbound"}):\n${claim.previousRunHandoff.output.body}`,
       `- This output remains bound to Run ${claim.previousRunHandoff.output.runId}. Before successful completion, publish the current Run's canonical task_output; reuse the body only if it still matches the current exact head.`,
     ] : ["- The previous Run did not publish a current task output."]),
+    ...(claim.previousRunHandoff.salvage ? [
+      `- The previous Run left a WIP salvage commit ${claim.previousRunHandoff.salvage.commitSha}, made on top of ${claim.previousRunHandoff.salvage.parentSha}. That salvage commit is the HEAD this Run starts on; its parent is the commit the previous attempt started from.`,
+    ] : []),
     ...(claim.previousRunHandoff.retryReason === "approval-rejected-without-feedback" ? [
       "- The human rejected the approval gate without a reason. Use inbox_ask to obtain the required change before revising the output.",
     ] : []),

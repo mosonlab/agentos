@@ -159,6 +159,10 @@ export const completionInput = z.object({
   pushedBranch: z.string().nullable().optional(),
   baseSha: z.string().nullable().optional(),
   headSha: z.string().nullable().optional(),
+  // The first parent of the salvage commit `headSha` names, sent only on the
+  // salvage path. The next Run of the task is handed both, so a step bound to
+  // a particular head can recognise its own salvaged attempt.
+  salvageParentSha: z.string().nullable().optional(),
   output: z.string().max(500_000).nullable().optional(),
   pushStatus: z.nativeEnum(PushStatus).default(PushStatus.NOT_REQUESTED),
   pushRemote: z.string().nullable().optional(),
@@ -902,6 +906,7 @@ export const completeRun = async (
         pushedBranch: body.pushedBranch ?? run.pushedBranch,
         baseSha: body.baseSha ?? run.baseSha,
         headSha: body.headSha ?? null,
+        salvageParentSha: body.salvageParentSha ?? null,
         pushStatus: body.pushStatus,
         pushRemote: body.pushRemote ?? null,
         pushError: body.pushError ?? null,

@@ -12,6 +12,7 @@ import {
   canonicalOutputRefusal,
   persistSessionTaskOutput,
   requiredOutputKind,
+  salvageResumeEvidence,
 } from "./canonical-task-output.js";
 
 const step = (template: string, stepIndex: number, outputKind: string) => ({
@@ -427,4 +428,21 @@ test("present review siblings must agree on their reviewed base", async () => {
     persistenceRefusal(result),
     "fixed-implementation sibling reviews disagree on the reviewed base",
   );
+});
+
+test("a salvaged prior attempt is handed to the next Run as its commit and parent", () => {
+  const salvaged = {
+    pushedBranch: "agentos/task-1/run-1",
+    headSha: "s".repeat(40),
+    salvageParentSha: "r".repeat(40),
+  };
+  assert.deepEqual(salvageResumeEvidence("task-1", 1, salvaged), {
+    commitSha: "s".repeat(40),
+    parentSha: "r".repeat(40),
+  });
+  // An ordinary publication is not a salvage, whatever else it reported.
+  assert.equal(salvageResumeEvidence("task-1", 1, { ...salvaged, pushedBranch: "feature/chain" }), null);
+  // A Run that predates the salvage-parent evidence claims nothing about it.
+  assert.equal(salvageResumeEvidence("task-1", 1, { ...salvaged, salvageParentSha: null }), null);
+  assert.equal(salvageResumeEvidence("task-1", 1, { ...salvaged, headSha: null }), null);
 });

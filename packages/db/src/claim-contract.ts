@@ -42,7 +42,7 @@ import type { RegressionRepairHandoff } from "./merge-tail.js";
  * mechanical claim whose caller does not send this exact version rather than
  * allowing the two separately built processes to drift silently.
  */
-export const RUN_COMPLETION_CONTRACT_VERSION = 1;
+export const RUN_COMPLETION_CONTRACT_VERSION = 2;
 
 /** Stable refusal discriminator shared by the API and mechanical executor. */
 export const MECHANICAL_CONTRACT_MISMATCH_CODE = "mechanical_contract_mismatch";
@@ -198,6 +198,12 @@ export type ClaimPreviousRunHandoff = {
     | "operator-retry"
     | "retry";
   output: { runId: string; kind: string; body: string; commitSha: string | null } | null;
+  /** Present only when the previous attempt ended in a WIP salvage push, which
+   *  is the commit this Run is starting on. `parentSha` is the commit that
+   *  salvage was made on top of, so a step whose contract is bound to a
+   *  particular head can decide whether the salvaged work belongs to it
+   *  instead of stopping to ask a human. */
+  salvage: { commitSha: string; parentSha: string } | null;
 };
 
 /** Server-parsed authority for runner-owned direct-chain workspace bootstrap. */

@@ -2161,6 +2161,13 @@ field is report-only; omitted or empty means no observation and never changes
 the Run outcome. A late cancellation acknowledgement backfills this evidence
 when reconciliation terminalized the Run first.
 
+That completion payload also accepts the optional `salvageParentSha`: the first
+parent of the WIP salvage commit a failed Run pushed, which `headSha` names. It
+is persisted on the Run and handed, with the salvage commit itself, to the next
+Run of the same task as the `salvage` member of its claim's
+`previousRunHandoff`, so a step bound to a particular head can recognise the
+salvaged work of its own prior attempt. Runs that did not salvage omit it.
+
 The machine-only `POST /runner/tasks/claim` request may include the optional
 `servedKinds` array of exact `RunnerKind` names. Omitting `servedKinds` means
 the runner serves every kind; when it is declared, the control plane offers

@@ -335,6 +335,9 @@ export type Completion = {
   pushedBranch?: string | null;
   baseSha?: string | null;
   headSha?: string | null;
+  /** The salvage commit's first parent, sent only when this Run salvaged. The
+   *  control plane hands it, with `headSha`, to the next Run of the task. */
+  salvageParentSha?: string | null;
   output?: string | null;
   pushStatus?: "NOT_REQUESTED" | "PENDING" | "SUCCEEDED" | "FAILED";
   pushRemote?: string | null;

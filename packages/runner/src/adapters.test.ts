@@ -338,6 +338,7 @@ test("buildPrompt gives a retry the immediate prior output without reusing provi
       failureReason: null,
       retryReason: "approval-rejected-without-feedback",
       output: { runId: "run-1", kind: "plan", body: "Prior plan body", commitSha: "a".repeat(40) },
+      salvage: null,
     },
   });
   assert.match(prompt, /Platform-pinned previous-run handoff:[\s\S]*Prior plan body/u);
@@ -2022,4 +2023,22 @@ test("the runner registry exposes provider-owned session policy", () => {
     "PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR", "AGENTOS_CODEX_SERVICE_TIER", "AGENTOS_PI_EXPECTS_OPENAI_CODEX",
   ]);
   assert.equal(piDeclaration.launcherEnvironmentVariables.includes("PI_CODING_AGENT_SESSION_DIR"), false);
+});
+
+test("a salvaged prior attempt names its commit and parent in the prompt", () => {
+  const prompt = buildPrompt({
+    ...claim,
+    previousRunHandoff: {
+      schemaVersion: 1,
+      previousRunId: "run-1",
+      status: "FAILED",
+      failureReason: "Selected model is at capacity. Please try a different model.",
+      retryReason: "automatic-retry",
+      output: null,
+      salvage: { commitSha: "s".repeat(40), parentSha: "r".repeat(40) },
+    },
+  });
+  // Without this the fix step has to reconstruct from git history whether the
+  // head it starts on is its own salvaged attempt.
+  assert.match(prompt, new RegExp(`WIP salvage commit ${"s".repeat(40)}, made on top of ${"r".repeat(40)}`, "u"));
 });

@@ -1123,11 +1123,15 @@ test("a failed run commits uncommitted changes, pushes them as WIP, and opens no
   const fake: CommandRunner = async (executable, args) => {
     calls.push(`${executable} ${args.join(" ")}`);
     if (executable === "git" && args[0] === "status") return "M tracked.ts\n?? new.ts";
+    if (executable === "git" && args[0] === "log") return "reviewed-head-sha\n";
     return executable === "git" && args[0] === "rev-parse" ? "salvage-sha" : "";
   };
   const result = await salvageWorkspace(config, salvageIdentity, workspace, { command: fake });
   assert.equal(result?.pushStatus, "SUCCEEDED");
   assert.equal(result?.headSha, "salvage-sha");
+  // The next Run of this task starts on the salvage commit. Naming its parent
+  // here is what lets that Run tell a resumable salvage from a stray head.
+  assert.equal(result?.salvageParentSha, "reviewed-head-sha");
   assert.equal(result?.failureClass, undefined);
   assert.equal(result?.pullRequestUrl, undefined);
   assert.deepEqual(calls, [
@@ -1135,6 +1139,7 @@ test("a failed run commits uncommitted changes, pushes them as WIP, and opens no
     "git status --porcelain",
     "git -c user.name=Anneal Runner -c user.email=runner@agentos.local -c commit.gpgSign=false -c core.hooksPath=/dev/null commit --no-verify -m WIP salvage for Anneal run run-2",
     "git rev-parse HEAD",
+    "git log -1 --format=%P HEAD",
     "git push origin HEAD:refs/heads/agentos/task-1/run-2",
   ]);
   assert.equal(calls.some((call) => call.includes("--force")), false);
@@ -1159,6 +1164,7 @@ test("a failed run still pushes commits the agent made before crashing", async (
   };
   const result = await salvageWorkspace(config, salvageIdentity, workspace, { command: fake });
   assert.equal(result?.headSha, "agent-commit-sha");
+  assert.equal(result?.salvageParentSha, undefined, "a root salvage commit reports no parent rather than failing");
   assert.equal(calls.some((call) => call.includes(" commit ")), false);
   assert.equal(calls.at(-1), "git push origin HEAD:refs/heads/agentos/task-1/run-2");
 });

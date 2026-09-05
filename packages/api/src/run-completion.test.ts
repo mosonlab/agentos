@@ -38,6 +38,7 @@ test("the completion input shape is pinned to its shared contract version", () =
     .digest("hex");
   const schemaHashesByVersion: Record<number, string> = {
     1: "fb27fe3f07d0dce703452f1706186bfe61521eb3bcd41fad9d193b51876ad9b7",
+    2: "f5011d9c1544cfa944e5de207d3bd045e3a221eced953677051f4317bae886c7",
   };
 
   assert.equal(schemaHash, schemaHashesByVersion[RUN_COMPLETION_CONTRACT_VERSION]);
