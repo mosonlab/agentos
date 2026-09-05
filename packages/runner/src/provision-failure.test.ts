@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 
+import { runOwnedHead } from "@anneal/db";
+
 import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig } from "./config.js";
 import { RUNNER_EXCEPTION_REASON, runnerExceptionEnvelope } from "./envelope.js";
@@ -104,7 +106,7 @@ const claim = (remoteUrl: string): ClaimedTask => ({
     implementationHeadSha: null,
     promptHash: "hash",
     workspacePath: null,
-    branch: null,
+    branch: runOwnedHead("task-113", 1),
     baseSha: null,
   },
   session: { id: "session-113" },

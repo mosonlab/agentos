@@ -1,5 +1,5 @@
 import { confirmedWrite, isDeterministicRefusal, isLostResponse } from "@anneal/github-client";
-import { canonicalOutputSchema, PR_TEMPLATE_NAME, type PrHandoffKind, type PrHandoffOutput } from "@anneal/db";
+import { canonicalOutputSchema, PR_TEMPLATE_NAME, type PrHandoffKind, type PrHandoffOutput, runOwnedHead } from "@anneal/db";
 
 import type { ClaimedTask, FailureClass } from "./api.js";
 import type { RunnerConfig } from "./config.js";
@@ -875,9 +875,9 @@ export const deliverWorkspace = async (
  * run branch as WIP so the work survives workspace cleanup. Never opens a PR,
  * and never reports a failureClass — the run already has one from CLI evidence.
  *
- * The per-run branch here is deliberate and is now load-bearing: a failed run's
- * half-finished tree must never enter the chain's shared branch, which every
- * later step of the chain clones. Never change this to workspace.branch.
+ * The ref this pushes is the one the Run owns (`runOwnedHead` in @anneal/db),
+ * never `workspace.branch`: a failed run's half-finished tree must never enter
+ * the chain's shared branch, which every later step of the chain clones.
  *
  * Note what this function does *not* control: the completion payload still
  * reports `Run.branch` as the workspace branch (runner.ts spreads the workspace
@@ -897,7 +897,7 @@ export const salvageWorkspace = async (
     ?? bindCommandRunner(config.runAsPrefix, workspace.path, workspaceEnvironment(config));
   const retryOptions = dependencies.retryOptions ?? {};
   const remote = identity.remoteUrl ?? "origin";
-  const branch = `agentos/${identity.taskId}/run-${identity.runNumber}`;
+  const branch = runOwnedHead(identity.taskId, identity.runNumber);
   try {
     // Respect .gitignore while including tracked deletions and untracked files.
     await command("git", ["add", "-A"]);

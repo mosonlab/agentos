@@ -1,4 +1,4 @@
-import { lockRunRow, lockTaskRow, Prisma, RunStatus } from "@anneal/db";
+import { lockRunRow, lockTaskRow, Prisma, runOwnedHead, RunStatus } from "@anneal/db";
 
 import type { Refusal } from "./refusal.js";
 
@@ -149,6 +149,7 @@ export type LockedAuthorityRun = {
   runNumber: number;
   pushedBranch: string | null;
   branch: string | null;
+  targetBranch: string | null;
 };
 
 /**
@@ -178,6 +179,7 @@ export const lockAuthorityRun = async (
       runNumber: true,
       pushedBranch: true,
       branch: true,
+      targetBranch: true,
     },
   });
 };
@@ -213,7 +215,7 @@ export const salvageAuthorityRefusal = (
   if (!run) return "unknown-run";
   if (run.runnerId !== authority.runnerId) return "wrong-runner";
   if (run.fencingToken !== authority.fencingToken) return "stale-fence";
-  const expectedBranch = run.taskId ? `agentos/${run.taskId}/run-${run.runNumber}` : null;
+  const expectedBranch = run.taskId ? runOwnedHead(run.taskId, run.runNumber) : null;
   if (
     run.repoId === null
     || authority.pushedBranch !== expectedBranch

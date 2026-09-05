@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 
 import {
-  CleanupStatus, FailureClass, openRun, resolveRunBranches, RunStatus, SessionExecutionStatus,
+  CleanupStatus, FailureClass, openRun, resolveRunBranches, runOwnedHead, RunStatus, SessionExecutionStatus,
   type Prisma, type PrismaClient,
 } from "@anneal/db";
 
@@ -409,7 +409,7 @@ export const acknowledgeReclaimSalvage = async (
   input: { runnerId: string; runId: string; pushedBranch: string },
   repairReplacement: (
     tx: Prisma.TransactionClient,
-    run: { taskId: string; runNumber: number; branch: string | null },
+    run: { taskId: string; runNumber: number; branch: string | null; targetBranch: string | null },
   ) => Promise<ReplacementRepair> = repairReplacementAfterSalvage,
 ): Promise<false | ReplacementRepair> => {
   return db.$transaction(async (tx) => {
@@ -418,9 +418,10 @@ export const acknowledgeReclaimSalvage = async (
       select: {
         id: true, runnerId: true, taskId: true, runNumber: true, status: true,
         workspaceReclaimAt: true, workspaceReclaimedAt: true, pushedBranch: true, branch: true,
+        targetBranch: true,
       },
     });
-    const expected = run?.taskId ? `agentos/${run.taskId}/run-${run.runNumber}` : null;
+    const expected = run?.taskId ? runOwnedHead(run.taskId, run.runNumber) : null;
     if (!run || !ownedByCaller(run, input.runnerId) || !isTerminal(run.status)
       || !run.workspaceReclaimAt || run.workspaceReclaimedAt
       || input.pushedBranch !== expected
@@ -440,6 +441,7 @@ export const acknowledgeReclaimSalvage = async (
       taskId: run.taskId,
       runNumber: run.runNumber,
       branch: run.branch,
+      targetBranch: run.targetBranch,
     });
     if (repair === "already-started") {
       const replacement = await tx.run.findFirst({
@@ -467,7 +469,7 @@ export const acknowledgeReclaimSalvage = async (
  * attempt, and enqueue a fresh row with a distinct workspace id. */
 export const repairReplacementAfterSalvage = async (
   tx: Prisma.TransactionClient,
-  run: { taskId: string; runNumber: number; branch: string | null },
+  run: { taskId: string; runNumber: number; branch: string | null; targetBranch: string | null },
 ): Promise<ReplacementRepair> => {
   // Salvage can arrive after Hold has committed but before this replacement
   // reaches /start. Join the same Task/Chain mutex as every other Run producer,
@@ -542,10 +544,21 @@ export const repairReplacementAfterSalvage = async (
     include: { repo: true, templateStep: true },
   });
   if (!task?.repo) return "already-started";
-  const branches = await resolveRunBranches(tx, { ...task, repo: task.repo }, { branch: run.branch });
+  // A late salvage moves only the publication evidence the *base* resolves
+  // against, so only the base is repaired here. The replacement's head was
+  // decided at its own birth by `resolveRunBranches` and stays that Run's:
+  // re-deciding it from the salvaged Run would hand a replacement the ref its
+  // predecessor owns. The `enqueue` arm is what asks for the base under current
+  // evidence rather than the replacement's birth snapshot, which is exactly
+  // what a moved base means; the head that arm returns is discarded.
+  const { targetBranch } = await resolveRunBranches(tx, { ...task, repo: task.repo }, {
+    intent: "enqueue",
+    runNumber: run.runNumber + 1,
+    prior: { branch: run.branch, targetBranch: run.targetBranch, runNumber: run.runNumber },
+  });
   const repaired = await tx.run.updateMany({
     where: { id: replacement.id, status: RunStatus.QUEUED },
-    data: { branch: branches.branch, targetBranch: branches.targetBranch },
+    data: { targetBranch },
   });
   return repaired.count === 1 ? "repaired" : "already-started";
 };

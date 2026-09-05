@@ -676,11 +676,12 @@ test("a non-chain retry inherits the prior branch as its base only against push 
     id: "task-1", projectId: "project-1", repoId: "repo-1", chainId: null, chainIndex: null,
     templateId: null, targetBranch: null, repo: { defaultBranch: "main" },
   };
-  const prior = { branch: "agentos/task-1/run-1" };
+  const prior = { branch: "agentos/task-1/run-1", targetBranch: null, runNumber: 1 };
+  const birth = { intent: "retry", runNumber: 2, prior } as const;
   // The production shape (issue #118, runs cmsy9kg5j0001mp76wb95xiyu and
   // siblings): run 1's push failed, so `branch` names a ref no remote has and
   // cloning it burns the retry. Falling back is what makes the retry runnable.
-  assert.deepEqual(await resolveRunBranches(branchTx([]), task, prior), {
+  assert.deepEqual(await resolveRunBranches(branchTx([]), task, birth), {
     branch: "agentos/task-1/run-1", targetBranch: "main",
   });
   // Evidence from another task or another remote is not evidence for this one.
@@ -688,14 +689,14 @@ test("a non-chain retry inherits the prior branch as its base only against push 
     { taskId: "task-9", chainId: null, repoId: "repo-1", runNumber: 1, pushedBranch: "agentos/task-1/run-1" },
     { taskId: "task-1", chainId: null, repoId: "repo-2", runNumber: 1, pushedBranch: "agentos/task-1/run-1" },
   ]);
-  assert.deepEqual(await resolveRunBranches(foreign, { ...task, targetBranch: "release/1.2" }, prior), {
+  assert.deepEqual(await resolveRunBranches(foreign, { ...task, targetBranch: "release/1.2" }, birth), {
     branch: "agentos/task-1/run-1", targetBranch: "release/1.2",
   });
   // The push landed: the ref exists, so the retry continues on top of it.
   const published = branchTx([
     { taskId: "task-1", chainId: null, repoId: "repo-1", runNumber: 1, pushedBranch: "agentos/task-1/run-1" },
   ]);
-  assert.deepEqual(await resolveRunBranches(published, task, prior), {
+  assert.deepEqual(await resolveRunBranches(published, task, birth), {
     branch: "agentos/task-1/run-1", targetBranch: "agentos/task-1/run-1",
   });
 });
@@ -710,7 +711,7 @@ test("a retry bases on the newest WIP salvage rather than discarding what did re
   assert.deepEqual(await resolveRunBranches(tx, {
     id: "task-1", projectId: "project-1", repoId: "repo-1", chainId: null, chainIndex: null,
     templateId: null, targetBranch: null, repo: { defaultBranch: "main" },
-  }, { branch: "agentos/task-1/run-1" }), {
+  }, { intent: "retry", runNumber: 3, prior: { branch: "agentos/task-1/run-1", targetBranch: null, runNumber: 1 } }), {
     branch: "agentos/task-1/run-1", targetBranch: "agentos/task-1/run-2",
   });
 });
@@ -721,7 +722,7 @@ test("a template retry falls back to its own targetBranch but still honours a si
   assert.deepEqual(await resolveRunBranches(branchTx([]), {
     id: "task-1", projectId: "project-1", repoId: "repo-1", chainId: "chain-1", chainIndex: 0,
     templateId: "template-1", targetBranch: "main", repo: { defaultBranch: "main" },
-  }, { branch: "agentos/task-1/run-1" }), {
+  }, { intent: "retry", runNumber: 2, prior: { branch: "agentos/task-1/run-1", targetBranch: null, runNumber: 1 } }), {
     branch: "agentos/task-1/run-1", targetBranch: "main",
   });
   // Step ②: the chain branch is shared across the template's tasks, so the
@@ -734,7 +735,7 @@ test("a template retry falls back to its own targetBranch but still honours a si
   assert.deepEqual(await resolveRunBranches(tx, {
     id: "task-2", projectId: "project-1", repoId: "repo-1", chainId: "chain-1", chainIndex: 1,
     templateId: "template-1", targetBranch: "main", repo: { defaultBranch: "main" },
-  }, { branch: "agentos/chain-1" }), {
+  }, { intent: "retry", runNumber: 2, prior: { branch: "agentos/chain-1", targetBranch: null, runNumber: 1 } }), {
     branch: "agentos/chain-1", targetBranch: "agentos/chain-1",
   });
 });
@@ -747,7 +748,7 @@ test("a template operator retry publishes the declared head while basing on the 
   assert.deepEqual(await resolveRunBranches(tx, {
     id: "task-1", projectId: "project-1", repoId: "repo-1", chainId: "chain-1", chainIndex: 0,
     templateId: "template-1", targetBranch: "main", repo: { defaultBranch: "main" },
-  }, { branch: salvage }), {
+  }, { intent: "retry", runNumber: 3, prior: { branch: salvage, targetBranch: null, runNumber: 2 } }), {
     branch: "declared/chain-head",
     targetBranch: salvage,
   });
@@ -761,7 +762,7 @@ test("a successor first run bases on the newest sibling publication whatever ref
   assert.deepEqual(await resolveRunBranches(tx, {
     id: "task-2", projectId: "project-1", repoId: "repo-1", chainId: "chain-1", chainIndex: 1,
     templateId: "template-1", targetBranch: "declared/chain-head", repo: { defaultBranch: "main" },
-  }, null), {
+  }, { intent: "enqueue", runNumber: 1, prior: null }), {
     branch: "declared/chain-head",
     targetBranch: salvage,
   });
@@ -772,7 +773,7 @@ test("a successor first run bases on the newest sibling publication whatever ref
   assert.deepEqual(await resolveRunBranches(declared, {
     id: "task-2", projectId: "project-1", repoId: "repo-1", chainId: "chain-1", chainIndex: 1,
     templateId: "template-1", targetBranch: "declared/chain-head", repo: { defaultBranch: "main" },
-  }, null), {
+  }, { intent: "enqueue", runNumber: 1, prior: null }), {
     branch: "declared/chain-head",
     targetBranch: "declared/chain-head",
   });
@@ -782,7 +783,7 @@ test("a deferred template first run recovers its shared head from a later step",
   assert.deepEqual(await resolveRunBranches(branchTx([], "custom/template-head"), {
     id: "task-1", projectId: "project-1", repoId: "repo-1", chainId: "chain-1", chainIndex: 0,
     templateId: "template-1", targetBranch: "main", repo: { defaultBranch: "main" },
-  }, null), {
+  }, { intent: "enqueue", runNumber: 1, prior: null }), {
     branch: "custom/template-head", targetBranch: "main",
   });
 });

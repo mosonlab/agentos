@@ -18,6 +18,7 @@ import {
   pinnedImplementationRange,
   runBudgetCeiling,
 } from "./run-open.js";
+import { runOwnedHead } from "./run-head.js";
 
 const now = new Date("2026-08-26T12:00:00.000Z");
 
@@ -92,6 +93,7 @@ const taskRow = (overrides: Record<string, unknown> = {}) => ({
 const intents = (): OpenRunIntent[] => [
   { kind: "enqueue", readyAt: now },
   { kind: "merge-tail-requeue", readyAt: now, budgetGrant: 1 },
+  { kind: "merge-tail-repair", readyAt: now },
   { kind: "task-created", readyAt: now },
   { kind: "retry", readyAt: now },
   { kind: "integrator-authorized", readyAt: now },
@@ -295,7 +297,7 @@ test("a null resolved base cannot match an unpublished prior Run", async () => {
   assert.equal(creates[0]?.requiresCommit, true);
 });
 
-test("an automatic retry preserves its declared head while using salvage as its base", async () => {
+test("an automatic retry preserves a Task-owned head while using salvage as its base", async () => {
   const repo = { id: "repo-1", defaultBranch: "main" };
   const shared = "feat/shared";
   const salvage = "agentos/task-1/run-1";
@@ -330,15 +332,21 @@ test("an automatic retry preserves its declared head while using salvage as its 
     const opened = await openRun(tx, task.id, intent);
 
     assert.equal(opened.ok, true, `prior branch ${priorBranch ?? "null"}`);
-    assert.equal(creates[0]?.branch, priorBranch, `prior branch ${priorBranch ?? "null"}`);
+    // A head the Task owns carries forward; a prior Run that never received one
+    // leaves this Run to publish the ref it owns.
+    assert.equal(
+      creates[0]?.branch,
+      priorBranch ?? runOwnedHead(task.id, 4),
+      `prior branch ${priorBranch ?? "null"}`,
+    );
     assert.equal(creates[0]?.targetBranch, salvage, `prior branch ${priorBranch ?? "null"}`);
   }
 });
 
-test("automatic retries do not inherit the runner's per-Run fallback as a declared head", async () => {
+test("automatic retries publish the ref they own rather than the previous Run's", async () => {
   const repo = { id: "repo-1", defaultBranch: "main" };
-  const run1Salvage = "agentos/task-1/run-1";
-  const run2Salvage = "agentos/task-1/run-2";
+  const run1Salvage = runOwnedHead("task-1", 1);
+  const run2Salvage = runOwnedHead("task-1", 2);
   const publishedRuns = [
     { taskId: "task-1", repoId: repo.id, pushedBranch: run2Salvage },
     { taskId: "task-1", repoId: repo.id, pushedBranch: run1Salvage },
@@ -363,7 +371,7 @@ test("automatic retries do not inherit the runner's per-Run fallback as a declar
   });
 
   assert.equal(openedRun2.ok, true);
-  assert.equal(firstRetry.creates[0]?.branch, null);
+  assert.equal(firstRetry.creates[0]?.branch, run2Salvage);
   assert.equal(firstRetry.creates[0]?.targetBranch, run1Salvage);
 
   const run2 = priorRun({
@@ -386,8 +394,125 @@ test("automatic retries do not inherit the runner's per-Run fallback as a declar
   });
 
   assert.equal(openedRun3.ok, true);
-  assert.equal(secondRetry.creates[0]?.branch, null);
+  assert.equal(secondRetry.creates[0]?.branch, runOwnedHead("task-1", 3));
   assert.equal(secondRetry.creates[0]?.targetBranch, run2Salvage);
+});
+
+test("every birth intent takes its publish head from one module and none is left null", async () => {
+  const repo = { id: "repo-1", defaultBranch: "main" };
+  const chainHead = "agentos/chain/tail-deadbeef";
+  const priorHead = runOwnedHead("task-1", 3);
+  const withPrior = (overrides: Record<string, unknown> = {}) => taskRow({
+    repoId: repo.id,
+    repo,
+    runs: [priorRun({ repoId: repo.id, branch: priorHead, targetBranch: "main" })],
+    ...overrides,
+  });
+  const sourceRetry = {
+    sourceRunId: "run-3",
+    sourceMaxRunsPerTask: 5,
+    sourceBudgetGrants: 1,
+  } as const;
+  const cases: Array<{
+    name: string;
+    task: ReturnType<typeof taskRow>;
+    intent: OpenRunIntent;
+    branch: string;
+    targetBranch: string | null;
+  }> = [
+    {
+      name: "enqueue",
+      task: taskRow({ repoId: repo.id, repo }),
+      intent: { kind: "enqueue", readyAt: now },
+      branch: runOwnedHead("task-1", 1),
+      targetBranch: "main",
+    },
+    {
+      name: "merge-tail-requeue",
+      task: taskRow({ repoId: repo.id, repo }),
+      intent: { kind: "merge-tail-requeue", readyAt: now, budgetGrant: 1 },
+      branch: runOwnedHead("task-1", 1),
+      targetBranch: "main",
+    },
+    {
+      name: "task-created",
+      task: taskRow({ repoId: repo.id, repo }),
+      intent: { kind: "task-created", readyAt: now },
+      branch: runOwnedHead("task-1", 1),
+      targetBranch: "main",
+    },
+    {
+      // The repair card is chain-detached and publishes onto the chain head it
+      // was created to repair, which is its own targetBranch.
+      name: "merge-tail-repair",
+      task: taskRow({ repoId: repo.id, repo, targetBranch: chainHead }),
+      intent: { kind: "merge-tail-repair", readyAt: now },
+      branch: chainHead,
+      targetBranch: chainHead,
+    },
+    {
+      // An operator retry continues the head its predecessor was told to
+      // publish; provisioning recreates the ref when the remote lacks it.
+      name: "retry",
+      task: withPrior(),
+      intent: { kind: "retry", readyAt: now },
+      branch: priorHead,
+      targetBranch: "main",
+    },
+    {
+      name: "integrator-authorized",
+      task: withPrior({
+        assigneeAgent: agent({ name: "merge-integrator" }),
+        templateStepId: integratorStep.id,
+        templateStep: integratorStep,
+        runs: [priorRun({ repoId: repo.id, branch: chainHead, targetBranch: "release/1.2" })],
+      }),
+      intent: { kind: "integrator-authorized", readyAt: now },
+      branch: chainHead,
+      targetBranch: "release/1.2",
+    },
+    {
+      // The ref the previous Run owned is not carried forward: this one
+      // receives its own.
+      name: "retry-after-completion",
+      task: withPrior(),
+      intent: { kind: "retry-after-completion", readyAt: now, budgetGrant: 1, ...sourceRetry },
+      branch: runOwnedHead("task-1", 4),
+      targetBranch: "main",
+    },
+    {
+      // A lost lease reported nothing terminal about the head, so the
+      // replacement continues it.
+      name: "retry-after-lease-loss",
+      task: withPrior(),
+      intent: { kind: "retry-after-lease-loss", readyAt: now, ...sourceRetry },
+      branch: priorHead,
+      targetBranch: "main",
+    },
+  ];
+  assert.deepEqual(
+    cases.map((fixture) => fixture.name).sort(),
+    intents().map((intent) => intent.kind).sort(),
+    "every birth intent states its publish target here",
+  );
+
+  for (const fixture of cases) {
+    const options = fixture.name === "integrator-authorized"
+      ? { lockedAgent: agent({ name: "merge-integrator" }) }
+      : {};
+    const { tx, creates } = fakeTx(fixture.task, options);
+    const opened = await openRun(tx, fixture.task.id, fixture.intent);
+    assert.equal(opened.ok, true, fixture.name);
+    assert.equal(creates[0]?.branch, fixture.branch, fixture.name);
+    assert.equal(creates[0]?.targetBranch, fixture.targetBranch, fixture.name);
+  }
+});
+
+test("a Task without a Repo is born with no publish head at all", async () => {
+  const { tx, creates } = fakeTx(taskRow({ runs: [priorRun({ branch: null })] }));
+  const opened = await openRun(tx, "task-1", { kind: "retry", readyAt: now });
+  assert.equal(opened.ok, true);
+  assert.equal(creates[0]?.branch, null);
 });
 
 test("a pinned base follows the template Step when conditional tasks use dense chain ordinals", async () => {

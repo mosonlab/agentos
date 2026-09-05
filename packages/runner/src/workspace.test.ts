@@ -210,6 +210,34 @@ test("an explicit true template step keeps the repository dependency policy path
   }
 });
 
+test("provisioning refuses a claim that carries no publish head", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentos-workspace-no-head-"));
+  try {
+    const config = {
+      workspaceRoot: join(root, "workspaces"),
+      runAsPrefix: [],
+      path: process.env.PATH ?? "/usr/bin:/bin",
+      home: root,
+      gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
+    } as unknown as RunnerConfig;
+    // The head is decided once, at Run birth, by @anneal/db. A runner that
+    // filled a missing one in was the second decider this seam removed, so its
+    // absence is a fault to report rather than a name to invent.
+    const claim = workspaceClaim({
+      task: { id: "task-no-head" },
+      repo: { remoteUrl: join(root, "origin.git"), defaultBranch: "main" },
+      run: { id: "run-no-head", runNumber: 1, targetBranch: "main", branch: null },
+    });
+
+    await assert.rejects(
+      provisionWorkspace(config, claim, NO_DEPENDENCIES),
+      /carries no publish head/u,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("a workspace cloned from its own published head still resolves the target branch", async () => {
   const root = await mkdtemp(join(tmpdir(), "agentos-workspace-target-refspec-"));
   try {
