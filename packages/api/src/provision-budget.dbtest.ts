@@ -5,6 +5,7 @@ import { after, before, beforeEach, test } from "node:test";
 
 import { DependencyProvisioning, FAILURE_ENVELOPE_VERSION, type FailureEnvelope, PrismaClient } from "@anneal/db";
 
+import { retryDelayMs } from "./execution.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
 
@@ -343,3 +344,32 @@ test("raising a task's budget is honoured without waiting for a refund", async (
   assert.equal(queued.maxRunsPerTask, 3);
   assert.equal(queued.budgetGrants, 0, "a raised budget is a bigger budget, not a grant");
 });
+
+for (const providerError of [
+  "Selected model is at capacity. Please try a different model.",
+  "This model is currently at capacity. Please try again.",
+]) {
+  test(`EXECUTE capacity refusal refunds and queues the delayed retry: ${providerError}`, async () => {
+    const context = await seedTask("capacity-refund", 1);
+    const { run, runnerId, fencingToken } = await makeRunnable(context, 1);
+    const envelope: FailureEnvelope = {
+      ...executeEnvelope, runnerClass: null, terminalEventSeen: true, terminalSuccess: false,
+      providerError, stderrSummary: null,
+    };
+    const before = Date.now();
+    const response = await completeRun(run.id, { runnerId, fencingToken }, envelope);
+    const after = Date.now();
+    assert.equal(response.status, 200, await response.text());
+    const closed = await db.run.findUniqueOrThrow({ where: { id: run.id } });
+    assert.equal(closed.failureClass, "TRANSIENT_PROVIDER");
+    assert.equal(closed.budgetGrants, 1);
+    assert.equal(closed.maxRunsPerTask, 2);
+    const retry = await db.run.findFirstOrThrow({ where: { taskId: context.task.id, runNumber: 2 } });
+    assert.equal(retry.status, "QUEUED");
+    assert.equal(retry.budgetGrants, 1);
+    assert.equal(retry.maxRunsPerTask, 2);
+    const delay = retryDelayMs(1, "TRANSIENT_PROVIDER");
+    assert.ok(retry.readyAt.getTime() >= before + delay);
+    assert.ok(retry.readyAt.getTime() <= after + delay);
+  });
+}

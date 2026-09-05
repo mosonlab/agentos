@@ -31,6 +31,8 @@ import {
   INTEGRATOR_STEP_INDEX,
   INTEGRATOR_TEMPLATE_NAME,
   PR_TEMPLATE_NAME,
+  LEGACY_TEMPLATE_GENERATIONS,
+  templatePromptGenerationDigest,
   legacyNineStepTemplateName,
   legacyAdjudicationTemplateName,
   legacyTenStepTemplateName,
@@ -356,7 +358,12 @@ test("canonical sync installs the reviewed PR prompt generation while instantiat
     include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
   });
   const fixed = template.steps.find(({ outputKind }) => outputKind === "fixed-implementation")!;
+  // This deployed generation predates the salvage-resume exception as well as
+  // the HEAD-tree cleanup check; reconstruct its exact authenticated prompt.
   const reviewedPrompt = fixed.prompt.replace(
+    " If that HEAD is a `WIP salvage` commit of a prior Run of this same task and its parent is the reviewed head, the salvaged changes are your own failed attempt's in-progress fixes: validate them against the reports, continue on top of them, and record the reviewed head — the salvage commit's parent — as `sourceHead`. Every other reviewed-head mismatch remains a stop.",
+    "",
+  ).replace(
     "git ls-tree -r --name-only HEAD -- .chain",
     "git ls-files -- .chain",
   );
@@ -373,6 +380,11 @@ test("canonical sync installs the reviewed PR prompt generation while instantiat
     include: { assigneeAgent: true },
     orderBy: { stepIndex: "asc" },
   });
+  assert.equal(
+    templatePromptGenerationDigest(reviewedSteps),
+    LEGACY_TEMPLATE_GENERATIONS[PR_TEMPLATE_NAME].find(({ marker }) => marker === "pre-pr-head-tree-check")!.promptDigest,
+    "the fixture must reconstruct the published reviewed PR generation",
+  );
   const chainId = "pinned-pr-chain";
   const tasks = await Promise.all(reviewedSteps.map((step) => db.task.create({ data: {
     projectId: project.id,

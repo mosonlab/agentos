@@ -1032,6 +1032,12 @@ model Run {
   pushedBranch                  String?
   baseSha                       String?
   headSha                       String?
+  /// The first parent of the WIP salvage commit a failed Run pushed, written
+  /// only on the salvage path. With `headSha` — the salvage commit itself — it
+  /// is what the next Run of the task is told, so an agent that starts on a
+  /// salvaged head can tell whether that salvage sits directly on the head it
+  /// was supposed to work from without reading git history.
+  salvageParentSha              String?
   pushStatus                    PushStatus             @default(NOT_REQUESTED)
   pushRemote                    String?
   pushError                     String?

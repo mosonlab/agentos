@@ -38,6 +38,7 @@ test("the completion input shape is pinned to its shared contract version", () =
     .digest("hex");
   const schemaHashesByVersion: Record<number, string> = {
     1: "fb27fe3f07d0dce703452f1706186bfe61521eb3bcd41fad9d193b51876ad9b7",
+    2: "f5011d9c1544cfa944e5de207d3bd045e3a221eced953677051f4317bae886c7",
   };
 
   assert.equal(schemaHash, schemaHashesByVersion[RUN_COMPLETION_CONTRACT_VERSION]);
@@ -576,4 +577,31 @@ test("the same envelope in EXECUTE is still the protocol drift it was", () => {
   });
   assert.equal(verdict.failureClass, FailureClass.PROTOCOL_ERROR);
   assert.equal(verdict.retryable, true);
+});
+
+test("completeRun applies and caps EXECUTE model-capacity refunds", async () => {
+  for (const providerError of [
+    "Selected model is at capacity. Please try a different model.",
+    "This model is currently at capacity. Please try again.",
+  ]) {
+    const harness = statefulCompletionHarness();
+    let budget = { maxRunsPerTask: 1, budgetGrants: 0 };
+    const original = fetchFailureOutcome();
+    assert.equal(original.case, "provider-failure");
+    if (original.case !== "provider-failure") throw new Error("expected provider failure");
+    const outcome: RunOutcome = {
+      ...original, reason: providerError,
+      envelope: { ...original.envelope, providerError, stderrSummary: null },
+    };
+    for (let runNumber = 1; runNumber <= EXTERNAL_FAILURE_REFUND_CAP + 1; runNumber += 1) {
+      const closed = await harness.complete({ runNumber, ...budget, outcome });
+      const grants = Math.min(runNumber, EXTERNAL_FAILURE_REFUND_CAP);
+      assert.equal(closed.failureClass, FailureClass.TRANSIENT_PROVIDER);
+      assert.equal(closed.budgetGrants, grants);
+      assert.equal(closed.maxRunsPerTask, 1 + grants);
+      budget = { maxRunsPerTask: Number(closed.maxRunsPerTask), budgetGrants: Number(closed.budgetGrants) };
+    }
+    assert.equal(harness.activities.filter(({ metadata }) => metadata?.kind === "externalFailureRefund.granted").length, EXTERNAL_FAILURE_REFUND_CAP);
+    assert.ok(harness.activities.some(({ metadata }) => metadata?.capReached === true));
+  }
 });

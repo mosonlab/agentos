@@ -22,6 +22,12 @@ export type DeliveryResult = {
    *  base on the wrong branch. */
   pushedBranch?: string;
   headSha?: string;
+  /** The salvage commit's first parent, reported only by `salvageWorkspace`.
+   *  The next Run of the task is handed both this and `headSha`, so an agent
+   *  that starts on a salvaged head can tell whether the salvage sits directly
+   *  on the head it was supposed to work from without reconstructing that fact
+   *  from git history. Absent when the salvaged commit has no parent. */
+  salvageParentSha?: string;
   pushError?: string;
   pullRequestUrl?: string;
   pullRequestNumber?: number;
@@ -908,6 +914,11 @@ export const salvageWorkspace = async (
     const head = await command("git", ["rev-parse", "HEAD"]);
     // A clean run branch that never diverged from its base has nothing to push.
     if (head === workspace.baseSha) return null;
+    // `git log` rather than `rev-parse HEAD^`: a root commit has no parent, and
+    // reporting no parent must not turn salvage — the last chance this work
+    // has of surviving — into a failure.
+    const parents = await command("git", ["log", "-1", "--format=%P", "HEAD"]);
+    const parent = parents.trim().split(/\s+/u).find((sha) => sha.length > 0);
     // Plain push, never forced: the run branch is unique per (task, run), so a
     // rejection means something else is there and salvaging must not clobber it.
     await runWithNetworkRetry("git", ["push"],
@@ -919,6 +930,7 @@ export const salvageWorkspace = async (
       pushRemote: remote,
       pushedBranch: branch,
       headSha: head,
+      ...(parent ? { salvageParentSha: parent } : {}),
       deliveryInstructions: `Run failed; its commits were pushed to '${branch}' as work in progress. No pull request was opened.`,
     };
   } catch (error: unknown) {

@@ -2666,6 +2666,7 @@ test("default failed-workspace retention still salvages and records the exact du
     const completion = posts.find((post) => post.path.endsWith("/complete"));
     assert.equal(publication?.body.pushedBranch, salvage);
     assert.equal(completion?.body.pushedBranch, salvage);
+    assert.equal(completion?.body.salvageParentSha, git(root, `--git-dir=${remote}`, "rev-parse", "master").trim());
     assert.equal(completion?.body.cleanupStatus, "RETAINED");
     assert.equal(completion?.body.workspaceRetained, true);
     assert.ok(posts.indexOf(publication!) < posts.indexOf(completion!), "publication must precede terminal completion");

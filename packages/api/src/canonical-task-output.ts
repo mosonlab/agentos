@@ -12,6 +12,7 @@ import {
   REGRESSION_VERIFICATION_OUTPUT_KIND,
   REGRESSION_VERIFICATION_SCHEMA_VERSION,
   RunStatus,
+  runOwnedHead,
   stepRole,
   type CanonicalClosedReviewArtifact,
   type CanonicalFixedImplementationArtifact,
@@ -640,6 +641,26 @@ export const persistSessionTaskOutput = async (
   return { ok: true, output, predecessorOutputs };
 });
 
+/**
+ * The salvage a failed attempt left behind, as the commit the next Run starts
+ * on plus the commit that salvage was made on top of.
+ *
+ * `salvageParentSha` distinguishes salvage from ordinary publication: only
+ * `salvageWorkspace` reports a parent. The Run-owned `pushedBranch` corroborates
+ * ownership; ordinary successful Runs can also publish that ref. Both fields
+ * come from the same completion write.
+ */
+export const salvageResumeEvidence = (
+  taskId: string,
+  previousRunNumber: number,
+  previous: { pushedBranch: string | null; headSha: string | null; salvageParentSha: string | null },
+): { commitSha: string; parentSha: string } | null =>
+  previous.headSha !== null
+    && previous.salvageParentSha !== null
+    && previous.pushedBranch === runOwnedHead(taskId, previousRunNumber)
+    ? { commitSha: previous.headSha, parentSha: previous.salvageParentSha }
+    : null;
+
 export const previousRunHandoffForClaim = async (
   tx: DbTx,
   input: {
@@ -652,9 +673,30 @@ export const previousRunHandoffForClaim = async (
   if (!isCanonicalAgentStep(input.templateStep) || input.runNumber <= 1) return null;
   const previous = await tx.run.findUnique({
     where: { taskId_runNumber: { taskId: input.taskId, runNumber: input.runNumber - 1 } },
-    select: { id: true, status: true, failureReason: true, headSha: true, endedAt: true, updatedAt: true },
+    select: {
+      id: true,
+      status: true,
+      failureReason: true,
+      headSha: true,
+      pushedBranch: true,
+      salvageParentSha: true,
+      endedAt: true,
+      updatedAt: true,
+    },
   });
   if (!previous || previous.id === input.runId) return null;
+  // The resolved clone base may come from an older attempt if the immediate
+  // predecessor never published. Match that ref within this task, rather than
+  // offering stale salvage evidence for a different starting tree.
+  const current = await tx.run.findUniqueOrThrow({
+    where: { id: input.runId },
+    select: { targetBranch: true },
+  });
+  const publication = current.targetBranch === null ? null : await tx.run.findFirst({
+    where: { taskId: input.taskId, runNumber: { lt: input.runNumber }, pushedBranch: current.targetBranch },
+    orderBy: { runNumber: "desc" },
+    select: { runNumber: true, pushedBranch: true, headSha: true, salvageParentSha: true },
+  });
   const output = await tx.taskStepOutput.findUnique({
     where: { taskId: input.taskId },
     select: { runId: true, kind: true, body: true, commitSha: true, metadata: true },
@@ -726,5 +768,6 @@ export const previousRunHandoffForClaim = async (
     output: output?.runId && (output.runId === previous.id || refusedOutputMatchesPreviousHead)
       ? { runId: output.runId, kind: output.kind, body: output.body, commitSha: output.commitSha }
       : null,
+    salvage: publication ? salvageResumeEvidence(input.taskId, publication.runNumber, publication) : null,
   };
 };
