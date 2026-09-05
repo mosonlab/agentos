@@ -180,7 +180,7 @@ test("sync creates the pull-request template when the pre-existing canonical ins
   });
   assert.deepEqual(created.variables, ["branchName"]);
   assert.deepEqual(created.steps.map(({ assigneeAgent }) => assigneeAgent?.name), [
-    "senior-dev-luna", "review-coordinator-sol", "review-coordinator-opus", "senior-dev",
+    "senior-dev-luna", "review-coordinator-sol", "review-coordinator-opus", "senior-dev-astra-low",
   ]);
   assert.equal(JSON.stringify(await prisma.taskTemplate.findMany({
     where: {
@@ -1206,7 +1206,7 @@ test("sync recreates a missing spec revalidator with read-only repository covera
   }), [{ mountPath: repo.mountPath, permissions: RepoPermission.GIT_READ }]);
 });
 
-for (const specialName of ["senior-dev-sol", "senior-dev-opus"] as const) {
+for (const specialName of ["senior-dev-sol", "senior-dev-opus", "senior-dev-astra-low"] as const) {
 test(`sync recreates a missing ${specialName} Agent from senior-dev`, async (t) => {
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
   const specialSource = canonicalRuntime(specialName);

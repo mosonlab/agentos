@@ -109,7 +109,8 @@ The seed installs three templates over these roles: the twelve-step Full
 Assurance chain, the eight-step bound-capable direct chain
 (`direct-engineer-workflow`) — revalidation for bound briefs, implementation by
 `senior-dev-luna` from the task brief, parallel Sol and blind review siblings
-whose findings the fix step adjudicates itself, exact-head regression,
+whose findings the fix step (`senior-dev-astra-low`, the senior-dev prompt at
+Astra low) adjudicates itself, exact-head regression,
 server-side readiness, and mechanical merge — and the four-step pull-request
 chain (`pr-engineer-workflow`), which runs implementation, Sol and blind
 reviews, and review-fix application before ending at an open pull request with
@@ -123,7 +124,9 @@ cross-provider review contract explicitly requires separate identities.
 because they are the explicit implementation tiers named by the
 implementation-assignee routing rules in `docs/governance/task-routing-v1.md`:
 the Sol fallback when the senior-dev model is unavailable, and the Claude
-Opus 5 medium route an operator names to spend Claude capacity. Keep
+Opus 5 medium route an operator names to spend Claude capacity.
+`senior-dev-astra-low` is canonical because every template binds it to the
+review-fix step; it is not an implementation route. Keep
 experiments out of `roles/`; create them as local overlays and archive them
 when no longer needed so a seed cannot silently turn an experiment into a
 release default. Implementation-assignee escalation follows the

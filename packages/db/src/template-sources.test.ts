@@ -268,7 +268,7 @@ test("the pull-request workflow source exposes its exact four-step graph and pro
         name: "Apply review fixes",
         stepIndex: 4,
         layer: 3,
-        agent: "senior-dev",
+        agent: "senior-dev-astra-low",
         approvalGate: false,
         optional: false,
         outputKind: "fixed-implementation",

@@ -67,11 +67,13 @@ test("canonical role frontmatter matches the Prisma seed contract", async () => 
 });
 
 test("canonical OpenAI roles pin their Codex model and runner", async () => {
-  const [reviewCoordinator, reviewCoordinatorSol, librarian, specRevalidator] = await Promise.all([
+  const [reviewCoordinator, reviewCoordinatorSol, librarian, specRevalidator, seniorDev, reviewFix] = await Promise.all([
     roleSource("review-coordinator"),
     roleSource("review-coordinator-sol"),
     roleSource("librarian"),
     roleSource("spec-revalidator"),
+    roleSource("senior-dev"),
+    roleSource("senior-dev-astra-low"),
   ]);
 
   assert.equal(frontmatterValue(reviewCoordinator, "model"), "gpt-6-astra:medium");
@@ -82,6 +84,11 @@ test("canonical OpenAI roles pin their Codex model and runner", async () => {
   assert.equal(frontmatterValue(librarian, "runner"), "codex");
   assert.equal(frontmatterValue(specRevalidator, "model"), "gpt-5.6-luna:xhigh");
   assert.equal(frontmatterValue(specRevalidator, "runner"), "codex");
+  assert.equal(frontmatterValue(seniorDev, "model"), "gpt-6-astra:medium");
+  assert.equal(frontmatterValue(seniorDev, "runner"), "codex");
+  assert.equal(frontmatterValue(reviewFix, "model"), "gpt-6-astra:low");
+  assert.equal(frontmatterValue(reviewFix, "runner"), "codex");
+  assert.equal(reviewFix.rolePrompt, seniorDev.rolePrompt);
 });
 
 test("canonical profiles start at Default and native child capability replaces Agent subprocess profiles", async () => {
@@ -126,6 +133,7 @@ test("named canonical roles use their model catalog runner and retired role name
     "senior-dev",
     "senior-dev-sol",
     "senior-dev-opus",
+    "senior-dev-astra-low",
     "spec-revalidator",
     "implementation-plan-executioner",
   ]) {
@@ -225,7 +233,7 @@ test("the canonical twelve-step layered template sources split review and preser
       { stepIndex: 5, layer: 5, agentName: "implementation-plan-executioner", outputKind: "implementation" },
       { stepIndex: 6, layer: 6, agentName: "review-coordinator-sol", outputKind: "sol-findings" },
       { stepIndex: 7, layer: 6, agentName: "review-coordinator-opus", outputKind: "blind-findings" },
-      { stepIndex: 8, layer: 7, agentName: "senior-dev", outputKind: "fixed-implementation" },
+      { stepIndex: 8, layer: 7, agentName: "senior-dev-astra-low", outputKind: "fixed-implementation" },
       { stepIndex: 9, layer: 8, agentName: "librarian", outputKind: "documentation" },
       { stepIndex: 10, layer: 9, agentName: "regression-verifier", outputKind: "regression-verification-v2" },
       { stepIndex: 11, layer: 10, agentName: "review-coordinator", outputKind: "merge-authorization" },
@@ -316,7 +324,7 @@ test("the direct template sources expose the layered review spine and mechanical
       { stepIndex: 2, layer: 2, agentName: "senior-dev-luna", outputKind: "implementation" },
       { stepIndex: 3, layer: 3, agentName: "review-coordinator-sol", outputKind: "sol-findings" },
       { stepIndex: 4, layer: 3, agentName: "review-coordinator-opus", outputKind: "blind-findings" },
-      { stepIndex: 5, layer: 4, agentName: "senior-dev", outputKind: "fixed-implementation" },
+      { stepIndex: 5, layer: 4, agentName: "senior-dev-astra-low", outputKind: "fixed-implementation" },
       { stepIndex: 6, layer: 5, agentName: "regression-verifier", outputKind: "regression-verification-v2" },
       { stepIndex: 7, layer: 6, agentName: "review-coordinator", outputKind: "merge-authorization" },
       { stepIndex: 8, layer: 7, agentName: "merge-integrator", outputKind: "merge-result" },

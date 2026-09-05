@@ -403,11 +403,11 @@ test("the pull-request workflow has a registered prompt-only generation and curr
   assert.equal(generation.promptDigest, "93a72d354876a6c26020e8638b6c365fb15e4ca4a400a2d6ca80084994f249d6");
   assert.equal(generation.shape.length, 4);
   // The retired graph against the current one, field by field through the
-  // shared table: identical except that its review steps predate opting out of
-  // dependency provisioning, which is what tells the two shapes apart.
+  // shared table: its review steps predate opting out of dependency
+  // provisioning, and its fix step predates the Astra-low review-fix Agent.
   assert.deepEqual(
     asPersisted(current).map((step, index) => retiredStepShapeDifferences(step, generation.shape[index]!)),
-    [[], ["provisionDependencies"], ["provisionDependencies"], []],
+    [[], ["provisionDependencies"], ["provisionDependencies"], ["agent"]],
   );
   assert.equal(templatePromptGenerationDigest(current), CANONICAL_SOURCE_PROMPT_GENERATIONS[PR_TEMPLATE_NAME]);
   assert.equal(matchedLegacyGeneration(PR_TEMPLATE_NAME, asPersisted(current)), null);
@@ -489,16 +489,50 @@ test("optional review omission is a registered prompt-only rollover in both temp
     assert.equal(generation.promptDigest, retiredDigests[templateName]);
     assert.notEqual(generation.promptDigest, templatePromptGenerationDigest(current));
     assert.equal(matchedLegacyGeneration(templateName, asPersisted(current)), null);
-    // The deployed rows carry the outgoing prompts on the current shape: no
-    // optional steps, and the review steps opting out of dependency
-    // provisioning as the source does.
+    // The rows that generation retired carried the outgoing prompts on its
+    // shape: no optional steps, the review steps opting out of dependency
+    // provisioning as the source does, and the fix step still on senior-dev.
     assert.equal(
       legacyGenerationMatches(
         { marker: generation.marker, shape: generation.shape },
-        asPersisted(current).map((step) => ({ ...step, optional: false })),
+        asPersisted(current).map((step) => ({
+          ...step,
+          optional: false,
+          assigneeAgent: step.outputKind === "fixed-implementation" ? { name: "senior-dev" } : step.assigneeAgent,
+        })),
       ),
       true,
     );
+  }
+});
+
+test("the Astra-low review-fix rebinding is a registered structural rollover in every template", async () => {
+  const sources = await loadAllTemplateStepSources();
+  for (const templateName of Object.keys(LEGACY_TEMPLATE_GENERATIONS) as CanonicalTemplateRegistryName[]) {
+    const current = sources.get(templateName);
+    assert.ok(current, `${templateName} must load from source`);
+    const generation = LEGACY_TEMPLATE_GENERATIONS[templateName].at(-1);
+    assert.ok(generation);
+    assert.equal(generation.marker, "pre-astra-low-review-fix");
+    assert.equal(generation.promptDigest, undefined, templateName);
+    assert.deepEqual(generation.successorStepOrdinals, canonicalStepOrdinals(templateName, null), templateName);
+    const fixIndex = current.findIndex((step) => step.outputKind === "fixed-implementation");
+    assert.equal(current[fixIndex]!.agentName, "senior-dev-astra-low", templateName);
+    assert.deepEqual(
+      asPersisted(current).map((step, index) => retiredStepShapeDifferences(step, generation.shape[index]!)),
+      current.map((_step, index) => (index === fixIndex ? ["agent"] : [])),
+      templateName,
+    );
+    // The deployed rows carry the current prompts on the retired binding, so
+    // the structural entry matches them regardless of prompt digest.
+    assert.equal(
+      matchedLegacyGeneration(templateName, asPersisted(current).map((step) => (
+        step.outputKind === "fixed-implementation" ? { ...step, assigneeAgent: { name: "senior-dev" } } : step
+      ))),
+      "pre-astra-low-review-fix",
+      templateName,
+    );
+    assert.equal(matchedLegacyGeneration(templateName, asPersisted(current)), null, templateName);
   }
 });
 

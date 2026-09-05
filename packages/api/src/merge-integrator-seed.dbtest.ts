@@ -260,7 +260,7 @@ test("a fresh seed writes the twelve-step, eight-step, and four-step canonical t
     "Implementation", "Code review (Sol)", "Code review (Opus blind)", "Apply review fixes",
   ]);
   assert.deepEqual(pullRequest.steps.map(({ assigneeAgent }) => assigneeAgent?.name), [
-    "senior-dev-luna", "review-coordinator-sol", "review-coordinator-opus", "senior-dev",
+    "senior-dev-luna", "review-coordinator-sol", "review-coordinator-opus", "senior-dev-astra-low",
   ]);
   assert.deepEqual(pullRequest.steps.map(({ opensPullRequest }) => opensPullRequest), [true, false, false, false]);
   assert.deepEqual(pullRequest.steps.map(({ requiresCommit }) => requiresCommit), [true, false, false, false]);
