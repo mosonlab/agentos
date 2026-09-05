@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, sep } from "node:path";
@@ -274,10 +274,17 @@ export const findReleaseArtifact = ({ deployRoot, revision }) => {
 const run = (program, args, options = {}) => {
   const { reason, captureStderr, ...spawnOptions } = options;
   try {
-    return execFileSync(program, args, {
-      stdio: captureStderr ? ["ignore", "inherit", "pipe"] : "inherit",
-      ...spawnOptions,
-    });
+    if (captureStderr) {
+      const result = spawnSync(program, args, {
+        stdio: ["inherit", "inherit", "pipe"],
+        maxBuffer: 10 * 1024 * 1024,
+        ...spawnOptions,
+      });
+      if (result.error || result.status !== 0) throw result;
+      if (result.stderr) process.stderr.write(result.stderr);
+      return result.stdout;
+    }
+    return execFileSync(program, args, { stdio: "inherit", ...spawnOptions });
   } catch (error) {
     // Captured stderr still belongs in the operator's log; classification is a
     // second reader of it, not its owner.
@@ -292,14 +299,8 @@ const run = (program, args, options = {}) => {
   }
 };
 
-const failureExitStatus = (error) => {
-  if (typeof error?.status === "number") return error.status;
-  const match = /^exit-(?<status>\d+)$/u.exec(typeof error?.detail === "string" ? error.detail : "");
-  return match ? Number(match.groups.status) : undefined;
-};
-
 const isTransientCloneFailure = (error) => {
-  if (failureExitStatus(error) !== 128) return false;
+  if (error?.status !== 128) return false;
   const stderr = typeof error?.stderr === "string" ? error.stderr : error?.stderr?.toString("utf8") ?? "";
   return TRANSIENT_CLONE_STDERR.some((pattern) => pattern.test(stderr));
 };
@@ -320,7 +321,7 @@ const cloneSource = ({ execute, gitBinary, sourceRemote, buildRoot, sleep }) => 
       return attempt;
     } catch (error) {
       if (attempt >= CLONE_ATTEMPT_LIMIT || !isTransientCloneFailure(error)) throw error;
-      sleep(CLONE_RETRY_DELAYS_MS[attempt - 1] ?? CLONE_RETRY_DELAYS_MS.at(-1));
+      sleep(CLONE_RETRY_DELAYS_MS[attempt - 1]);
       // A failed clone can leave a partial tree behind, and git refuses a
       // non-empty destination.
       rmSync(buildRoot, { recursive: true, force: true });

@@ -123,9 +123,12 @@ The final line is `RELEASE-ARTIFACT` followed by release name, commit, digest,
 and the number of source clone attempts. A network-shaped clone failure (TLS
 handshake, connection reset, unresolved host) is retried up to three times with
 backoff; any other clone failure, and an exhausted retry, fail as
-`release-artifact-source-unavailable` with no change to escalation. An existing exact artifact is reverified and reused. Missing output,
-wrong stamps, excluded secret-shaped paths, ambiguous identities, and digest
-drift are named failures; the activator has no fallback for them.
+`release-artifact-source-unavailable` with no change to escalation. Only the
+`git clone` invocation is retried; a lazy blob fetch during checkout still
+escalates on failure. The existing overall build deadline still applies.
+An existing exact artifact is reverified and reused. Missing output, wrong
+stamps, excluded secret-shaped paths, ambiguous identities, and digest drift
+are named failures; the activator has no fallback for them.
 
 ## Read-only verification
 
