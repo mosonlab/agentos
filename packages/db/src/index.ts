@@ -81,6 +81,7 @@ export {
   nativeImplementationSubagentRunConfig,
   openRun,
   pinnedImplementationRange,
+  platformImplementationBaseSha,
   resolveRequeueBase,
   resolveRunBranches,
   runBudgetCeiling,

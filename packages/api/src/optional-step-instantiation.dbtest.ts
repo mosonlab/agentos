@@ -7,6 +7,7 @@ import { after, before, beforeEach, test } from "node:test";
 import {
   DependencyProvisioning,
   DIRECT_TEMPLATE_NAME,
+  enqueueTaskRun,
   INTEGRATOR_TEMPLATE_NAME,
   pinnedImplementationRange,
   PrismaClient,
@@ -177,10 +178,16 @@ test("compound omission preserves exact-ordinal merge predecessors and retained 
   const review = tasks.find((task) => task.templateStep?.stepIndex === 6)!;
   const baseSha = "1".repeat(40);
   const headSha = "2".repeat(40);
+  // Where the implementation started is a platform record, not a body field:
+  // the pinned base comes from the implementation Run, and the body's own
+  // (here deliberately wrong) value is informational.
+  const implementationRun = await db.$transaction((tx) => enqueueTaskRun(tx as never, implementation.id));
+  await db.run.update({ where: { id: implementationRun.id }, data: { baseSha } });
   await db.taskStepOutput.create({ data: {
     taskId: implementation.id,
+    runId: implementationRun.id,
     kind: "implementation",
-    body: JSON.stringify({ schemaVersion: 1, baseSha, headSha, summary: "fixture", testsRun: [] }),
+    body: JSON.stringify({ schemaVersion: 1, baseSha: "3".repeat(40), headSha, summary: "fixture", testsRun: [] }),
     commitSha: headSha,
   } });
   assert.deepEqual(await pinnedImplementationRange(db, review), {

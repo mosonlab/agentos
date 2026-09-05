@@ -22,6 +22,9 @@ const specificationReader = {
 };
 /** The head both reviews were bound to, and the head the fix starts from. */
 const REVIEWED_HEAD = "e".repeat(40);
+/** Where the implementation Task's first Run started: the base the platform
+ *  pins every review to, whatever a later Run or an output body says. */
+const IMPLEMENTATION_BASE = "b".repeat(40);
 const UNIQUE_PREDECESSOR_FINDING = {
   id: "SOL-UNIQUE-1",
   severity: "P1",
@@ -131,26 +134,41 @@ const queueCanonicalStep = async (
   const sourceRun = sourceTask
     ? await db.$transaction((tx) => enqueueTaskRun(tx as never, sourceTask.id))
     : null;
+  // The implementation Task's first Run records where the implementation
+  // started, and that record is what every review is pinned to.
   if (sourceRun) {
     await db.run.update({
       where: { id: sourceRun.id },
-      // Model the exact-head recovery publisher: its workspace starts at the
-      // already-implemented head, while the canonical output retains the
-      // original implementation base.
-      data: { status: "SUCCEEDED", baseSha: "5".padStart(40, "0") },
+      data: { status: RunStatus.SUCCEEDED, baseSha: IMPLEMENTATION_BASE },
     });
   }
+  // Model the exact-head recovery publisher on top of it: a second Run whose
+  // workspace starts at the already-implemented head. It authors the canonical
+  // output, and it must not move the base the reviews are pinned to.
+  const recoveryRun = sourceRun && sourceTask
+    ? await (async () => {
+      await db.task.update({ where: { id: sourceTask.id }, data: { status: "TODO" } });
+      const run = await db.$transaction((tx) => enqueueTaskRun(tx as never, sourceTask.id));
+      await db.run.update({
+        where: { id: run.id },
+        data: { status: RunStatus.SUCCEEDED, baseSha: "5".padStart(40, "0") },
+      });
+      await db.task.update({ where: { id: sourceTask.id }, data: { status: "DONE" } });
+      return run;
+    })()
+    : null;
   await db.taskStepOutput.createMany({ data: priorTasks.map((task) => {
     const headSha = String(task.chainIndex).padStart(40, "0");
-    const implementationSource = task.id === sourceTask?.id && sourceRun;
+    const implementationSource = task.id === sourceTask?.id && recoveryRun;
     return {
       taskId: task.id,
-      ...(implementationSource ? { runId: sourceRun.id } : {}),
+      ...(implementationSource ? { runId: recoveryRun.id } : {}),
       kind: implementationSource ? "implementation" : `step-${task.chainIndex}`,
       body: implementationSource
         ? JSON.stringify({
+          // Informational only: the platform pins from its own Run records.
+          baseSha: IMPLEMENTATION_BASE,
           schemaVersion: 1,
-          baseSha: "b".repeat(40),
           headSha,
           summary: "implemented before exact-head recovery",
           testsRun: ["focused"],
@@ -324,7 +342,7 @@ test("blind session cannot read Sol evidence before or after its immutable repor
   assert.equal(claimed.run.id, blind.run.id);
   assert.deepEqual(claimed.priorOutputs, []);
   assert.equal(claimed.run.pinnedBaseSha, claimed.run.targetBranch);
-  assert.equal(claimed.run.implementationBaseSha, "b".repeat(40));
+  assert.equal(claimed.run.implementationBaseSha, IMPLEMENTATION_BASE);
   assert.equal(claimed.run.implementationHeadSha, claimed.run.targetBranch);
 
   const activityPath = `/session/runs/${blind.run.id}/chain/steps/6/activity`;

@@ -304,9 +304,9 @@ const validatePrReviewHandoff = (
     || fixedOutput.commitSha !== fixed.headSha) {
     throw new Error("canonical PR output commit SHA does not match its body headSha");
   }
+  // Review bases come from platform Run records; the implementation body base is informational.
   if (sol.headSha !== blind.headSha
     || implementation.headSha !== sol.headSha
-    || implementation.baseSha !== sol.reviewedBase
     || sol.reviewedHead !== sol.headSha
     || blind.reviewedHead !== blind.headSha
     || fixed.sourceHead !== sol.headSha
