@@ -66,13 +66,16 @@ test("canonical role frontmatter matches the Prisma seed contract", async () => 
   assert.doesNotThrow(() => assertCanonicalAgentSources(roles));
 });
 
+/** The Markdown body of a role source, without its frontmatter block. */
+const bodyOf = (source: string): string => source.split("---\n").slice(2).join("---\n");
+
 test("canonical OpenAI roles pin their Codex model and runner", async () => {
   const [reviewCoordinator, reviewCoordinatorSol, librarian, specRevalidator, seniorDev, reviewFix] = await Promise.all([
-    roleSource("review-coordinator"),
-    roleSource("review-coordinator-sol"),
-    roleSource("librarian"),
-    roleSource("spec-revalidator"),
-    roleSource("senior-dev"),
+    roleSource("review-coordinator-astra-medium"),
+    roleSource("code-reviewer-sol-high"),
+    roleSource("librarian-luna-xhigh"),
+    roleSource("spec-revalidator-luna-xhigh"),
+    roleSource("senior-dev-astra-medium"),
     roleSource("senior-dev-astra-low"),
   ]);
 
@@ -89,6 +92,29 @@ test("canonical OpenAI roles pin their Codex model and runner", async () => {
   assert.equal(frontmatterValue(reviewFix, "model"), "gpt-6-astra:low");
   assert.equal(frontmatterValue(reviewFix, "runner"), "codex");
   assert.equal(reviewFix.rolePrompt, seniorDev.rolePrompt);
+});
+
+test("canonical role slugs spell role-model-effort and titles name the role only", async () => {
+  const modelShortNames = ["astra", "luna", "sol", "opus", "fable"];
+  const effortWords = ["low", "medium", "high", "xhigh", "max"];
+  const exemptions = new Set(["default", INTEGRATOR_AGENT_NAME]);
+
+  for (const role of (await loadAgentSources()).roles) {
+    const words = role.title.trim().split(/\s+/u);
+    assert.ok(words.length <= 2, `${role.name} title must name the role in at most two words`);
+    for (const word of words) {
+      assert.equal(modelShortNames.includes(word.toLowerCase()), false, `${role.name} title must not name a model`);
+      assert.equal(effortWords.includes(word.toLowerCase()), false, `${role.name} title must not name an effort`);
+    }
+    if (exemptions.has(role.name)) continue;
+    const [modelName, effort] = role.model.split(":");
+    const shortName = modelName!.split("-").find((part) => modelShortNames.includes(part));
+    assert.ok(shortName, `${role.name} must run a catalog model with a known short name`);
+    assert.ok(
+      role.name.endsWith(`-${shortName}-${effort}`),
+      `${role.name} must end in -${shortName}-${effort} to match its model and effort`,
+    );
+  }
 });
 
 test("canonical profiles start at Default and native child capability replaces Agent subprocess profiles", async () => {
@@ -123,19 +149,19 @@ test("template-step dependency provisioning is a non-null true-default migration
 test("named canonical roles use their model catalog runner and retired role names stay absent", async () => {
   const canonical = new Map((await loadAgentSources()).roles.map((role) => [role.name, role]));
   for (const name of [
-    "spec",
-    "review-coordinator-opus",
-    "frontend-dev",
-    "review-coordinator",
-    "review-coordinator-sol",
-    "regression-verifier",
-    "librarian",
-    "senior-dev",
-    "senior-dev-sol",
-    "senior-dev-opus",
+    "spec-opus-high",
+    "code-reviewer-opus-high",
+    "frontend-dev-opus-medium",
+    "review-coordinator-astra-medium",
+    "code-reviewer-sol-high",
+    "regression-verifier-luna-xhigh",
+    "librarian-luna-xhigh",
+    "senior-dev-astra-medium",
+    "senior-dev-sol-high",
+    "senior-dev-opus-medium",
     "senior-dev-astra-low",
-    "spec-revalidator",
-    "implementation-plan-executioner",
+    "spec-revalidator-luna-xhigh",
+    "plan-executor-astra-medium",
   ]) {
     const role = canonical.get(name);
     assert.ok(role, `role source must contain ${name}`);
@@ -147,49 +173,51 @@ test("named canonical roles use their model catalog runner and retired role name
 
 test("the split review prompts enforce persisted-range, blindness, and regression contracts", async () => {
   const [planReview, firstReview, blindReview, regressionVerification] = await Promise.all([
-    roleSource("review-coordinator"),
-    roleSource("review-coordinator-sol"),
-    roleSource("review-coordinator-opus"),
-    roleSource("regression-verifier"),
+    roleSource("review-coordinator-astra-medium"),
+    roleSource("code-reviewer-sol-high"),
+    roleSource("code-reviewer-opus-high"),
+    roleSource("regression-verifier-luna-xhigh"),
   ]);
 
   assert.match(planReview, /never review implementation\s+diffs/u);
   assert.match(planReview, /acceptance criterion fail at the frozen base commit/u);
   assert.match(planReview, /mislabelled risk\s+flags/u);
 
-  assert.match(firstReview, /implementation step's persisted output/u);
-  assert.match(firstReview, /complete\s+`base\.\.\.head` diff/u);
-  assert.match(firstReview, /approved specification at\s+`\.chain\/<chain branch>\/spec\.md`/u);
-  assert.match(firstReview, /only as the Anneal task output/u);
-  assert.doesNotMatch(firstReview, /reviews\/sol-findings\.md/u);
-  assert.match(firstReview, /quote the exact governing\s+specification text/u);
-  assert.match(firstReview, /one session, make two sequential explicit passes over the same reviewed range/u);
-  assert.match(firstReview, /first complete the Standards pass/u);
-  assert.match(firstReview, /only then start a separate Spec pass/u);
-  assert.match(firstReview, /merge both passes into one persisted report/u);
-  assert.doesNotMatch(firstReview, /codex exec review/u);
-  assert.doesNotMatch(firstReview, /service[-_ ]tier/iu);
-  // The 2026-08-25 incident: this role ran the full merge gate inside its review
-  // step, deadlocked the host twice, and recorded the interrupted gate's FAIL
-  // line as review evidence. The gate belongs to the later regression step.
-  assert.match(firstReview, /repository merge gate\s+is not yours to run/u);
-  assert.match(firstReview, /a gate\s+that is interrupted reports no verdict at all/u);
-  assert.match(firstReview, /post-fix regression verification/u);
-  assert.match(firstReview, /entire fix diff as one unit/u);
-  assert.match(firstReview, /exact fixed head/u);
+  // Both reviewer roles share one prompt body: the Sol two-pass discipline, but
+  // taking the reviewed range from the platform-pinned claim metadata so the
+  // blind step can carry the same text without reading another step's output.
+  assert.equal(bodyOf(firstReview), bodyOf(blindReview));
 
-  assert.match(blindReview, /independent blind Opus review coordinator/u);
-  assert.match(blindReview, /Read the approved specification from `\.chain\/<chain branch>\/spec\.md`/u);
-  assert.match(blindReview, /reachable in the tree at `head`/u);
-  assert.match(blindReview, /immutable `blind-findings` task output/u);
-  assert.match(blindReview, /Do not read predecessor task outputs, sibling\s+task outputs/u);
-  assert.match(blindReview, /entire task and provider\s+session, both before and after/u);
-  assert.match(blindReview, /implementationBaseSha|implementation base and head/u);
-  assert.match(blindReview, /repository merge gate is not yours to run/u);
-  assert.doesNotMatch(blindReview, /adjudicat/u);
-  assert.doesNotMatch(blindReview, /merge matrix/u);
-  assert.doesNotMatch(blindReview, /service[-_ ]tier/iu);
-  assert.doesNotMatch(blindReview, /codex exec review/u);
+  for (const review of [firstReview, blindReview]) {
+    assert.match(review, /platform-pinned claim metadata/u);
+    assert.match(review, /`implementationBaseSha` and `implementationHeadSha`/u);
+    assert.match(review, /complete `base\.\.\.head` diff/u);
+    assert.match(review, /approved specification from\s+`\.chain\/<chain branch>\/spec\.md`/u);
+    assert.match(review, /revised slice set from\s+`\.chain\/<chain branch>\/slices\/`/u);
+    assert.match(review, /only as the Anneal task output/u);
+    assert.match(review, /the step prompt names/u);
+    assert.doesNotMatch(review, /reviews\/sol-findings\.md/u);
+    assert.match(review, /quote the exact governing\s+specification text/u);
+    assert.match(review, /one session, make two sequential explicit passes over the same reviewed range/u);
+    assert.match(review, /first complete the Standards pass/u);
+    assert.match(review, /only then start a separate Spec pass/u);
+    assert.match(review, /merge both passes into one persisted report/u);
+    assert.doesNotMatch(review, /codex exec review/u);
+    assert.doesNotMatch(review, /service[-_ ]tier/iu);
+    assert.doesNotMatch(review, /merge matrix/u);
+    // The 2026-08-25 incident: this role ran the full merge gate inside its review
+    // step, deadlocked the host twice, and recorded the interrupted gate's FAIL
+    // line as review evidence. The gate belongs to the later regression step.
+    assert.match(review, /repository merge gate is not yours to run/u);
+    assert.match(review, /a gate\s+that is interrupted reports no verdict at all/u);
+    // The blind step forbids predecessor and sibling evidence, so the shared body
+    // may never send a reviewer to another step's persisted output. Post-fix
+    // regression verification lives in the regression role, not here.
+    assert.doesNotMatch(review, /persisted output/u);
+    assert.doesNotMatch(review, /predecessor|sibling/u);
+    assert.doesNotMatch(review, /post-fix regression verification/u);
+    assert.doesNotMatch(review, /adjudicate findings/u);
+  }
 
   assert.equal(frontmatterValue(regressionVerification, "model"), "gpt-5.6-luna:xhigh");
   assert.equal(frontmatterValue(regressionVerification, "runner"), "codex");
@@ -210,7 +238,7 @@ test("the split review prompts enforce persisted-range, blindness, and regressio
 });
 
 test("the executioner delegates only through platform-pinned native Luna children", async () => {
-  const executioner = await roleSource("implementation-plan-executioner");
+  const executioner = await roleSource("plan-executor-astra-medium");
   assert.equal(frontmatterValue(executioner, "model"), "gpt-6-astra:medium");
   assert.match(executioner, /pins every native child to Luna max/u);
   assert.match(executioner, /eight concurrent child threads/u);
@@ -226,17 +254,17 @@ test("the canonical twelve-step layered template sources split review and preser
   assert.deepEqual(
     templateSteps.map(({ stepIndex, layer, agentName, outputKind }) => ({ stepIndex, layer, agentName, outputKind })),
     [
-      { stepIndex: 1, layer: 1, agentName: "spec", outputKind: "spec" },
-      { stepIndex: 2, layer: 2, agentName: "plan", outputKind: "plan" },
-      { stepIndex: 3, layer: 3, agentName: "review-coordinator", outputKind: "plan-review" },
-      { stepIndex: 4, layer: 4, agentName: "plan-reviser", outputKind: "revised-plan" },
-      { stepIndex: 5, layer: 5, agentName: "implementation-plan-executioner", outputKind: "implementation" },
-      { stepIndex: 6, layer: 6, agentName: "review-coordinator-sol", outputKind: "sol-findings" },
-      { stepIndex: 7, layer: 6, agentName: "review-coordinator-opus", outputKind: "blind-findings" },
+      { stepIndex: 1, layer: 1, agentName: "spec-opus-high", outputKind: "spec" },
+      { stepIndex: 2, layer: 2, agentName: "plan-fable-medium", outputKind: "plan" },
+      { stepIndex: 3, layer: 3, agentName: "review-coordinator-astra-medium", outputKind: "plan-review" },
+      { stepIndex: 4, layer: 4, agentName: "plan-reviser-opus-high", outputKind: "revised-plan" },
+      { stepIndex: 5, layer: 5, agentName: "plan-executor-astra-medium", outputKind: "implementation" },
+      { stepIndex: 6, layer: 6, agentName: "code-reviewer-sol-high", outputKind: "sol-findings" },
+      { stepIndex: 7, layer: 6, agentName: "code-reviewer-opus-high", outputKind: "blind-findings" },
       { stepIndex: 8, layer: 7, agentName: "senior-dev-astra-low", outputKind: "fixed-implementation" },
-      { stepIndex: 9, layer: 8, agentName: "librarian", outputKind: "documentation" },
-      { stepIndex: 10, layer: 9, agentName: "regression-verifier", outputKind: "regression-verification-v2" },
-      { stepIndex: 11, layer: 10, agentName: "review-coordinator", outputKind: "merge-authorization" },
+      { stepIndex: 9, layer: 8, agentName: "librarian-luna-xhigh", outputKind: "documentation" },
+      { stepIndex: 10, layer: 9, agentName: "regression-verifier-luna-xhigh", outputKind: "regression-verification-v2" },
+      { stepIndex: 11, layer: 10, agentName: "review-coordinator-astra-medium", outputKind: "merge-authorization" },
       { stepIndex: 12, layer: 11, agentName: "merge-integrator", outputKind: "merge-result" },
     ],
   );
@@ -320,13 +348,13 @@ test("the direct template sources expose the layered review spine and mechanical
   assert.deepEqual(
     directTemplateSteps.map(({ stepIndex, layer, agentName, outputKind }) => ({ stepIndex, layer, agentName, outputKind })),
     [
-      { stepIndex: 1, layer: 1, agentName: "spec-revalidator", outputKind: "revalidation" },
-      { stepIndex: 2, layer: 2, agentName: "senior-dev-luna", outputKind: "implementation" },
-      { stepIndex: 3, layer: 3, agentName: "review-coordinator-sol", outputKind: "sol-findings" },
-      { stepIndex: 4, layer: 3, agentName: "review-coordinator-opus", outputKind: "blind-findings" },
+      { stepIndex: 1, layer: 1, agentName: "spec-revalidator-luna-xhigh", outputKind: "revalidation" },
+      { stepIndex: 2, layer: 2, agentName: "senior-dev-luna-max", outputKind: "implementation" },
+      { stepIndex: 3, layer: 3, agentName: "code-reviewer-sol-high", outputKind: "sol-findings" },
+      { stepIndex: 4, layer: 3, agentName: "code-reviewer-opus-high", outputKind: "blind-findings" },
       { stepIndex: 5, layer: 4, agentName: "senior-dev-astra-low", outputKind: "fixed-implementation" },
-      { stepIndex: 6, layer: 5, agentName: "regression-verifier", outputKind: "regression-verification-v2" },
-      { stepIndex: 7, layer: 6, agentName: "review-coordinator", outputKind: "merge-authorization" },
+      { stepIndex: 6, layer: 5, agentName: "regression-verifier-luna-xhigh", outputKind: "regression-verification-v2" },
+      { stepIndex: 7, layer: 6, agentName: "review-coordinator-astra-medium", outputKind: "merge-authorization" },
       { stepIndex: 8, layer: 7, agentName: "merge-integrator", outputKind: "merge-result" },
     ],
   );
@@ -455,7 +483,7 @@ test("canonical prompt sync can detect every Markdown-owned structural field", a
 });
 
 test("canonical prompt sync can detect every role frontmatter field", async () => {
-  const role = (await loadAgentSources()).roles.find(({ name }) => name === "librarian")!;
+  const role = (await loadAgentSources()).roles.find(({ name }) => name === "librarian-luna-xhigh")!;
   const persisted: PersistedRoleStructure = {
     name: role.name,
     title: role.title,
@@ -482,8 +510,8 @@ test("the sentinel may bind only step 12, and step 12 only the sentinel", () => 
   const step12 = { stepIndex: INTEGRATOR_STEP_INDEX, outputKind: INTEGRATOR_OUTPUT_KIND, taskTemplate: { name: INTEGRATOR_TEMPLATE_NAME } };
   const step5 = { stepIndex: 5, outputKind: "implementation", taskTemplate: { name: INTEGRATOR_TEMPLATE_NAME } };
   assert.equal(integratorBindingValid(INTEGRATOR_AGENT_NAME, step12), true);
-  assert.equal(integratorBindingValid("senior-dev", step5), true);
+  assert.equal(integratorBindingValid("senior-dev-astra-medium", step5), true);
   assert.equal(integratorBindingValid(INTEGRATOR_AGENT_NAME, step5), false);
-  assert.equal(integratorBindingValid("senior-dev", step12), false);
+  assert.equal(integratorBindingValid("senior-dev-astra-medium", step12), false);
   assert.equal(integratorBindingValid(INTEGRATOR_AGENT_NAME, null), false);
 });

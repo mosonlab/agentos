@@ -1,6 +1,6 @@
 ---
-name: frontend-dev
-title: Frontend Developer
+name: frontend-dev-opus-medium
+title: Frontend Dev
 model: claude-opus-5:medium
 runner: claude
 inboxAccess: false

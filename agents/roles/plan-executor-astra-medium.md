@@ -1,6 +1,6 @@
 ---
-name: implementation-plan-executioner
-title: Implementation Plan Executioner
+name: plan-executor-astra-medium
+title: Plan Executor
 model: gpt-6-astra:medium
 runner: codex
 inboxAccess: true

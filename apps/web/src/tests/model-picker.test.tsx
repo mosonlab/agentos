@@ -85,13 +85,13 @@ test("Chinese custom-model and goal forms render translated runner preference la
 test("the real Create button blocks a contradictory model and runner pair", () => {
   const common = { projectId: "p", onClose: () => undefined, onCreated: () => undefined };
   const mismatch = renderToStaticMarkup(
-    <NewAgent {...common} initial={{ name: "senior-dev", environmentId: "e", model: "gpt-5.6-luna:high", runnerPreference: "CLAUDE" }} />,
+    <NewAgent {...common} initial={{ name: "senior-dev-astra-medium", environmentId: "e", model: "gpt-5.6-luna:high", runnerPreference: "CLAUDE" }} />,
   );
   assert.match(mismatch, /<button[^>]*disabled=""[^>]*>[^<]*Create/);
   assert.match(mismatch, /requires CODEX, but this agent stores CLAUDE/);
 
   const valid = renderToStaticMarkup(
-    <NewAgent {...common} initial={{ name: "senior-dev", environmentId: "e", model: "gpt-5.6-luna:high", runnerPreference: "CODEX" }} />,
+    <NewAgent {...common} initial={{ name: "senior-dev-astra-medium", environmentId: "e", model: "gpt-5.6-luna:high", runnerPreference: "CODEX" }} />,
   );
   assert.doesNotMatch(valid, /<button[^>]*disabled=""[^>]*>[^<]*Create/);
   assert.match(valid, /Codex service tier/u);
@@ -103,7 +103,7 @@ test("the real detail Save button blocks a stored contradiction until the picker
   const { dom, container } = installDom();
   const root = (await reactDom()).createRoot(container);
   const agent: Agent = {
-    id: "a", projectId: "p", environmentId: "e", name: "senior-dev", title: "Senior Developer",
+    id: "a", projectId: "p", environmentId: "e", name: "senior-dev-astra-medium", title: "Senior Developer",
     model: "gpt-5.6-luna:high", codexServiceTier: "DEFAULT", runnerPreference: "CLAUDE", inboxAccess: false, disabledTools: [],
     foundationalPrompt: "foundation", rolePrompt: "role", createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(), archivedAt: null,
@@ -141,7 +141,7 @@ test("the executioner Setup page has no legacy subprocess profile controls", asy
   const { dom, container } = installDom();
   const root = (await reactDom()).createRoot(container);
   const agent: Agent = {
-    id: "a", projectId: "p", environmentId: "e", name: "implementation-plan-executioner", title: "Implementation Plan Executioner",
+    id: "a", projectId: "p", environmentId: "e", name: "plan-executor-astra-medium", title: "Implementation Plan Executioner",
     model: "gpt-5.6-sol:high", codexServiceTier: "DEFAULT", runnerPreference: "CODEX", inboxAccess: true, disabledTools: [],
     foundationalPrompt: "foundation", rolePrompt: "role", createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(), archivedAt: null,
@@ -163,7 +163,7 @@ test("the executioner Setup page has no legacy subprocess profile controls", asy
     const edit = [...dom.window.document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Edit");
     assert.ok(edit);
     await act(async () => edit.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })));
-    const canonicalName = dom.window.document.querySelector('input[value="implementation-plan-executioner"]') as HTMLInputElement | null;
+    const canonicalName = dom.window.document.querySelector('input[value="plan-executor-astra-medium"]') as HTMLInputElement | null;
     assert.ok(canonicalName);
     assert.equal(canonicalName.disabled, true);
   } finally {

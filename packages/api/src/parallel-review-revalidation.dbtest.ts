@@ -37,7 +37,7 @@ test("bound revalidation PATCH becomes implementation spec.md authority for both
     BOUND_SPECIFICATION_BRIEF.replace("Out of scope: compound templates.", "Out of scope: nothing."),
     BOUND_SPECIFICATION_BRIEF.replace("Constraints: existing chains remain unchanged.", "Constraints: compatibility may break."),
     BOUND_SPECIFICATION_BRIEF.replace("Acceptance: bound claims materialize the refreshed brief.", "Acceptance: no verification."),
-    BOUND_SPECIFICATION_BRIEF.replace("Route: implementation=senior-dev", "Route: implementation=frontend-dev"),
+    BOUND_SPECIFICATION_BRIEF.replace("Route: implementation=senior-dev-astra-medium", "Route: implementation=frontend-dev-opus-medium"),
   ]) {
     const refused = await request(
       `/session/runs/${revalidation.run.id}/task`,

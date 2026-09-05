@@ -1,5 +1,5 @@
 ---
-name: merge-resolver
+name: merge-resolver-opus-medium
 title: Merge Resolver
 model: claude-opus-5:medium
 runner: claude

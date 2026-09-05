@@ -1,8 +1,8 @@
 ---
-name: senior-dev-opus
-title: Senior Developer (Opus medium)
-model: claude-opus-5:medium
-runner: claude
+name: senior-dev-astra-medium
+title: Senior Dev
+model: gpt-6-astra:medium
+runner: codex
 inboxAccess: true
 collaborators: []
 ---

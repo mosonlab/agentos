@@ -106,7 +106,7 @@ const seedCompoundImplementationApproval = async (validSuccessor = false) => {
   const executioner = await db.agent.create({ data: {
     projectId: project.id,
     environmentId: environment.id,
-    name: "implementation-plan-executioner",
+    name: "plan-executor-astra-medium",
     title: "Implementation Plan Executioner",
     model: "gpt-5.6-sol:high",
     foundationalPrompt: "foundation",
@@ -261,7 +261,7 @@ test("compound Implementation PATCH rejects every non-executioner assignee witho
   }));
   assert.equal(response.status, 409);
   assert.deepEqual(await response.json(), {
-    error: "Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner",
+    error: "Compound implementation step must remain assigned to the active in-project Agent plan-executor-astra-medium",
     code: COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
   });
   assert.deepEqual(await db.task.findUniqueOrThrow({
@@ -326,7 +326,7 @@ for (const route of ["patch", "inbox"] as const) {
     assert.deepEqual(await response.json(), route === "patch"
       ? { error: "Chain task statuses are controlled by chain execution" }
       : {
-          error: "Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner",
+          error: "Compound implementation step must remain assigned to the active in-project Agent plan-executor-astra-medium",
           code: COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
         });
     assert.deepEqual(await compoundApprovalState(predecessor.id, successor.id, gate.id), before);
@@ -351,7 +351,7 @@ for (const route of ["patch", "inbox"] as const) {
     assert.deepEqual(await response.json(), route === "patch"
       ? { error: "Chain task statuses are controlled by chain execution" }
       : {
-          error: "Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner",
+          error: "Compound implementation step must remain assigned to the active in-project Agent plan-executor-astra-medium",
           code: COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
         });
     assert.deepEqual(await compoundApprovalState(predecessor.id, successor.id, gate.id), before);
@@ -372,7 +372,7 @@ for (const route of ["patch", "inbox"] as const) {
     assert.equal(response.status, 409);
     assert.deepEqual(await response.json(), route === "patch"
       ? { error: "Chain task statuses are controlled by chain execution" }
-      : { error: "Task Implementation assignee implementation-plan-executioner is archived; unarchive the agent to queue this step" });
+      : { error: "Task Implementation assignee plan-executor-astra-medium is archived; unarchive the agent to queue this step" });
     assert.deepEqual(await compoundApprovalState(predecessor.id, successor.id, gate.id), before);
   });
 }
@@ -729,7 +729,7 @@ test("runner completion durably parks a layer successor refused by the compound 
   assert.equal(parked.status, "REVIEW");
   assert.equal(
     parked.failureReason,
-    "Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner",
+    "Compound implementation step must remain assigned to the active in-project Agent plan-executor-astra-medium",
   );
   const refusalActivity = await db.taskActivity.findFirstOrThrow({
     where: { taskId: successor.id, body: { contains: "Run birth was refused" } },

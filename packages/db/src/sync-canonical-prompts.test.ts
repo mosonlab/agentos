@@ -130,12 +130,12 @@ test("full installation refuses an archived canonical Agent before observing a m
       agent: {
         findFirst: async () => {
           events.push("archived-agent-read");
-          return { id: "archived-agent-1", name: "senior-dev" };
+          return { id: "archived-agent-1", name: "senior-dev-astra-medium" };
         },
       },
     }),
   });
 
-  await assert.rejects(main(database, "project-1"), /Project agentos-example: Agent senior-dev \(archived-agent-1\) is archived/u);
+  await assert.rejects(main(database, "project-1"), /Project agentos-example: Agent senior-dev-astra-medium \(archived-agent-1\) is archived/u);
   assert.deepEqual(events, ["project-read", "archived-agent-read"]);
 });

@@ -50,20 +50,26 @@ An Agent or task template whose name is a canonical name is rewritten to the can
 ## Role frontmatter
 
 ```yaml
-name: plan                # Agent.name (unique per project)
-title: Planner            # Agent.title
+name: plan-fable-medium   # Agent.name (unique per project), role-model-effort
+title: Planner            # Agent.title, the role only
 model: claude-fable-5:medium # Agent.model, including its default reasoning effort
 runner: claude               # Agent.runnerPreference (claude | codex | pi)
 inboxAccess: true         # Agent.inboxAccess
 collaborators: []         # AgentCollaboration rows, by agent name
 ```
 
+A canonical role's `name` is the slug `role-model-effort` — the model short name
+(`astra`, `luna`, `sol`, `opus`, `fable`) and its reasoning effort — so two roles
+that do the same job on different models coexist without collision; `default` and
+`merge-integrator` are the two exceptions. `title` names the role only and never
+the model or the effort.
+
 ## Template step frontmatter
 
 ```yaml
 stepIndex: 5
 layer: 5
-agent: implementation-plan-executioner # Agent.name, or null for a human step
+agent: plan-executor-astra-medium # Agent.name, or null for a human step
 approvalGate: false
 optional: false
 outputKind: implementation
@@ -108,8 +114,8 @@ routing contract.
 The seed installs three templates over these roles: the twelve-step Full
 Assurance chain, the eight-step bound-capable direct chain
 (`direct-engineer-workflow`) — revalidation for bound briefs, implementation by
-`senior-dev-luna` from the task brief, parallel Sol and blind review siblings
-whose findings the fix step (`senior-dev-astra-low`, the senior-dev prompt at
+`senior-dev-luna-max` from the task brief, parallel Sol and blind review siblings
+whose findings the fix step (`senior-dev-astra-low`, the senior developer prompt at
 Astra low) adjudicates itself, exact-head regression,
 server-side readiness, and mechanical merge — and the four-step pull-request
 chain (`pr-engineer-workflow`), which runs implementation, Sol and blind
@@ -120,10 +126,10 @@ contracts live in their Markdown directories under `templates/`.
 
 Provider-specific or temporary roles are not canonical defaults unless the
 cross-provider review contract explicitly requires separate identities.
-`senior-dev-sol` and `senior-dev-opus` are canonical rather than experiments
+`senior-dev-sol-high` and `senior-dev-opus-medium` are canonical rather than experiments
 because they are the explicit implementation tiers named by the
 implementation-assignee routing rules in `docs/governance/task-routing-v1.md`:
-the Sol fallback when the senior-dev model is unavailable, and the Claude
+the Sol fallback when the Astra model is unavailable, and the Claude
 Opus 5 medium route an operator names to spend Claude capacity.
 `senior-dev-astra-low` is canonical because every template binds it to the
 review-fix step; it is not an implementation route. Keep

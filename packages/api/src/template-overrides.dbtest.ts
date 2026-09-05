@@ -311,7 +311,7 @@ test("integrator and pinned compound implementation bindings are checked after o
   const seed = await fixture("binding");
   const executioner = await db.agent.create({ data: {
     projectId: seed.project.id, environmentId: (await db.environment.findFirstOrThrow({ where: { projectId: seed.project.id } })).id,
-    name: "implementation-plan-executioner", title: "executioner", model: "gpt-5.6-sol:high",
+    name: "plan-executor-astra-medium", title: "executioner", model: "gpt-5.6-sol:high",
     foundationalPrompt: "foundation", rolePrompt: "role",
   } });
   const sentinel = await db.agent.create({ data: {

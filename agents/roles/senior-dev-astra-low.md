@@ -1,6 +1,6 @@
 ---
 name: senior-dev-astra-low
-title: Senior Developer (Astra low)
+title: Senior Dev
 model: gpt-6-astra:low
 runner: codex
 inboxAccess: true

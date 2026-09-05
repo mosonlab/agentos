@@ -1,7 +1,7 @@
 ---
 stepIndex: 11
 layer: 10
-agent: review-coordinator
+agent: review-coordinator-astra-medium
 approvalGate: false
 optional: false
 outputKind: merge-authorization

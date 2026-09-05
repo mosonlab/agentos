@@ -282,25 +282,25 @@ export const parseResolverResult = (
       ? parsed as Record<string, unknown>
       : null;
   } catch {
-    return { status: "invalid", reason: "merge-resolver output is not valid JSON" };
+    return { status: "invalid", reason: "merge-resolver-opus-medium output is not valid JSON" };
   }
   if (!value || value.schemaVersion !== 1 || (value.outcome !== "resolved" && value.outcome !== "unable")) {
-    return { status: "invalid", reason: "merge-resolver output has an unknown schema or outcome" };
+    return { status: "invalid", reason: "merge-resolver-opus-medium output has an unknown schema or outcome" };
   }
   if (typeof value.startHeadSha !== "string" || !SHA.test(value.startHeadSha)
     || typeof value.targetHeadSha !== "string" || !SHA.test(value.targetHeadSha)) {
-    return { status: "invalid", reason: "merge-resolver output is not bound to well-formed start and target heads" };
+    return { status: "invalid", reason: "merge-resolver-opus-medium output is not bound to well-formed start and target heads" };
   }
   if (value.outcome === "unable") {
     if (typeof value.blockingContradiction !== "string" || value.blockingContradiction.trim().length === 0) {
-      return { status: "invalid", reason: "merge-resolver unable output has no blocking contradiction" };
+      return { status: "invalid", reason: "merge-resolver-opus-medium unable output has no blocking contradiction" };
     }
     return { status: "ok", result: value as ResolverResult };
   }
   if (typeof value.resolvedHeadSha !== "string" || !SHA.test(value.resolvedHeadSha)
     || !Array.isArray(value.tradeOffs) || !value.tradeOffs.every((entry) => typeof entry === "string")
     || !Array.isArray(value.changedTestExpectations) || !value.changedTestExpectations.every((entry) => typeof entry === "string")) {
-    return { status: "invalid", reason: "merge-resolver resolved output is malformed or has no resolved head" };
+    return { status: "invalid", reason: "merge-resolver-opus-medium resolved output is malformed or has no resolved head" };
   }
   return { status: "ok", result: value as ResolverResult };
 };
@@ -345,7 +345,7 @@ const DEFENSE_EXACT = new Set([
   "packages/api/src/github-read.ts",
   "packages/api/src/index.ts",
   "packages/api/src/app.ts",
-  "agents/roles/merge-resolver.md",
+  "agents/roles/merge-resolver-opus-medium.md",
   "agents/roles/merge-integrator.md",
 ]);
 

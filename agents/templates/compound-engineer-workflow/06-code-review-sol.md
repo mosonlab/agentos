@@ -1,7 +1,7 @@
 ---
 stepIndex: 6
 layer: 6
-agent: review-coordinator-sol
+agent: code-reviewer-sol-high
 approvalGate: false
 optional: false
 outputKind: sol-findings

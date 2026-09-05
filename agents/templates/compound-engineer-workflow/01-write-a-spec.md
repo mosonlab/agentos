@@ -1,7 +1,7 @@
 ---
 stepIndex: 1
 layer: 1
-agent: spec
+agent: spec-opus-high
 approvalGate: false
 optional: false
 outputKind: spec

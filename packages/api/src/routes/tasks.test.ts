@@ -351,7 +351,7 @@ test("task PATCH names and rejects an invalid compound implementation assignee b
     });
     assert.equal(response.status, 409);
     assert.deepEqual(await response.json(), {
-      error: "Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner",
+      error: "Compound implementation step must remain assigned to the active in-project Agent plan-executor-astra-medium",
       code: COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
     });
     assert.equal(updates, 0);
@@ -461,7 +461,7 @@ test("operator DONE on an AGENT chain task is refused without closing its gate",
       agentRepoAccess: { findFirst: async () => ({}) },
       // §D-P4 resolves the effective assignee's *name* before allowing a
       // reassignment, because the invariant is stated over the name.
-      agent: { findUnique: async () => ({ name: "senior-dev" }) },
+      agent: { findUnique: async () => ({ name: "senior-dev-astra-medium" }) },
       $transaction: async (operation: (value: unknown) => Promise<unknown>) => operation(tx),
     } as unknown as PrismaClient;
     const response = await createApp(database).request("/tasks/task-1", {
@@ -728,7 +728,7 @@ test("operator retry refuses a compound implementation Step assigned to a non-ex
       runnerPreference: RunnerPreference.CODEX,
       foundationalPrompt: "foundation",
       rolePrompt: "role",
-      name: "senior-dev",
+      name: "senior-dev-astra-medium",
     }, {
       runner: RunnerKind.CODEX,
       stepIndex: 5,
@@ -737,7 +737,7 @@ test("operator retry refuses a compound implementation Step assigned to a non-ex
     });
     assert.equal(response.status, 409);
     assert.deepEqual(await response.json(), {
-      error: "Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner",
+      error: "Compound implementation step must remain assigned to the active in-project Agent plan-executor-astra-medium",
       code: "COMPOUND_IMPLEMENTATION_ASSIGNEE_INVALID",
     });
     assert.equal(created, undefined);

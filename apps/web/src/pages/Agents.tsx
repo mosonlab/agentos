@@ -66,7 +66,7 @@ export const NewAgent = ({ projectId, onClose, onCreated, initial }: {
         <div className={STACK}>
           <div className={FIELD_ROW}>
             <Field label={t("agents.field.name.label")} hint={t("agents.field.name.hint")}>
-              <Input type="text" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="senior-dev" />
+              <Input type="text" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="senior-dev-astra-medium" />
             </Field>
             <Field label={t("agents.field.title")}>
               <Input type="text" value={form.title} onChange={(event) => setForm({ ...form, title: event.target.value })} placeholder={t("agents.field.title.placeholder")} />
@@ -592,7 +592,7 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
               <div className={STACK}>
                 <div className={FIELD_ROW}>
                   <Field label={t("agents.field.name.label")}><Input type="text" value={view.name}
-                    disabled={agent.name === "implementation-plan-executioner"}
+                    disabled={agent.name === "plan-executor-astra-medium"}
                     onChange={(event) => patch({ name: event.target.value })} /></Field>
                   <Field label={t("agents.field.title")}><Input type="text" value={view.title} onChange={(event) => patch({ title: event.target.value })} /></Field>
                 </div>
@@ -606,7 +606,7 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
                     <option value="FAST">{t("serviceTier.FAST")}</option>
                   </Select>
                 </Field>
-                {view.name === "implementation-plan-executioner" ? <div>{t("agents.executioner.outerHint")}</div> : null}
+                {view.name === "plan-executor-astra-medium" ? <div>{t("agents.executioner.outerHint")}</div> : null}
                 <div><Link to="/settings" className="text-[var(--accent)] hover:underline">{t("agents.model.settingsHint")}</Link></div>
                 <div className={ROW}>
                   <Toggle on={view.inboxAccess} onChange={(next) => patch({ inboxAccess: next })} label={t("agents.inbox.label")} />

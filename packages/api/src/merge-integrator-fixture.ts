@@ -83,7 +83,7 @@ export const seedIntegratorChain = async (
     data: { projectId: project.id, name: "local", allowedHosts: [] },
   });
   const agent = await db.agent.create({ data: {
-    projectId: project.id, environmentId: environment.id, name: unique("senior-dev"), title: "Senior dev",
+    projectId: project.id, environmentId: environment.id, name: unique("senior-dev-astra-medium"), title: "Senior dev",
     model: "claude-opus-5:high", foundationalPrompt: "foundation", rolePrompt: "role",
   } });
   const integratorAgent = await db.agent.create({ data: {

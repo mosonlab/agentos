@@ -1,6 +1,6 @@
 ---
-name: senior-dev-sol
-title: Senior Developer (Sol high)
+name: senior-dev-sol-high
+title: Senior Dev
 model: gpt-5.6-sol:high
 runner: codex
 inboxAccess: true

@@ -270,7 +270,7 @@ for (const invariant of [
     templateName: INTEGRATOR_TEMPLATE_NAME,
     stepIndex: 5,
     outputKind: "implementation",
-    expectedReason: /Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner/u,
+    expectedReason: /Compound implementation step must remain assigned to the active in-project Agent plan-executor-astra-medium/u,
     expectedRefusal: "compound-implementation-assignee",
   },
 ] as const) {

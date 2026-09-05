@@ -17,7 +17,7 @@ const keys: CanonicalSyncReportKeys = {
     ["direct", [{ stepIndex: 0 }, { stepIndex: 1 }]],
     ["compound", [{ stepIndex: 0 }]],
   ]),
-  roleNames: ["senior-dev", "reviewer"],
+  roleNames: ["senior-dev-astra-medium", "reviewer"],
 };
 
 const empty = (): CanonicalSyncCounters => emptyCanonicalSyncCounters(keys);
@@ -40,7 +40,7 @@ test("an empty report names every canonical step and role at zero", () => {
     updated: 0,
     preservedTaskAssignments: { archived: 0, nonTodo: 0, started: 0, output: 0 },
     updatedSteps: { direct: { "0": 0, "1": 0 }, compound: { "0": 0 } },
-    updatedRoles: { "senior-dev": 0, reviewer: 0 },
+    updatedRoles: { "senior-dev-astra-medium": 0, reviewer: 0 },
   });
 });
 
@@ -71,7 +71,7 @@ test("totals accumulate every counter across Projects", () => {
   first.adoptedAssignees = 1;
   first.preservedTaskAssignments.started = 1;
   recordStepPromptUpdate(first, "direct", 0, 1);
-  recordRolePromptUpdate(first, "senior-dev", 1);
+  recordRolePromptUpdate(first, "senior-dev-astra-medium", 1);
 
   const second = empty();
   second.templates = 3;
@@ -79,7 +79,7 @@ test("totals accumulate every counter across Projects", () => {
   second.preservedTaskAssignments.started = 2;
   recordStepPromptUpdate(second, "direct", 0, 2);
   recordStepPromptUpdate(second, "compound", 0, 1);
-  recordRolePromptUpdate(second, "senior-dev", 3);
+  recordRolePromptUpdate(second, "senior-dev-astra-medium", 3);
 
   const summary = canonicalSyncSummary([
     { kind: "synced", slug: "first", counters: first },
@@ -90,7 +90,7 @@ test("totals accumulate every counter across Projects", () => {
   assert.equal(summary.totals.adoptedAssignees, 5);
   assert.equal(summary.totals.preservedTaskAssignments.started, 3);
   assert.deepEqual(summary.totals.updatedSteps, { direct: { "0": 3, "1": 0 }, compound: { "0": 1 } });
-  assert.deepEqual(summary.totals.updatedRoles, { "senior-dev": 4, reviewer: 0 });
+  assert.deepEqual(summary.totals.updatedRoles, { "senior-dev-astra-medium": 4, reviewer: 0 });
   assert.equal(summary.totals.updated, 13);
 });
 

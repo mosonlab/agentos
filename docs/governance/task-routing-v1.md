@@ -77,14 +77,14 @@ belongs in Full Assurance, not in assignee escalation.
 
 ## Implementation assignee routing
 
-Keep the template's default implementation assignee. Use `senior-dev` only
+Keep the template's default implementation assignee. Use `senior-dev-astra-medium` only
 for persisted data, a
 defense-list path (merge gate, gate worker, migrations, or merge
-automation), or uncertain classification. Use `senior-dev-sol` for that same
-work only when named explicitly because the senior-dev model is unavailable;
-it is never a default. Use `senior-dev-opus` when the operator names it to
+automation), or uncertain classification. Use `senior-dev-sol-high` for that same
+work only when named explicitly because the Astra model is unavailable;
+it is never a default. Use `senior-dev-opus-medium` when the operator names it to
 spend Claude capacity on the implementation instead of Codex capacity; it is
-never a default either. Use `frontend-dev` for work primarily
+never a default either. Use `frontend-dev-opus-medium` for work primarily
 consisting of a new or redesigned web page or UI surface. The defense-list rule
 wins when both apply. The review-fix step keeps its template assignee
 `senior-dev-astra-low` on every route; routing does not move it.

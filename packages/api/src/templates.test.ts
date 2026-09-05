@@ -74,23 +74,23 @@ test("composed task descriptions derive the prior-output reminder from declared 
 });
 
 test("implementation route parsing accepts the machine-readable name before an optional reason", () => {
-  assert.equal(parseImplementationRoute("Build it\nRoute: implementation=senior-dev\n"), "senior-dev");
-  assert.equal(parseImplementationRoute("Route: implementation=frontend-dev"), "frontend-dev");
+  assert.equal(parseImplementationRoute("Build it\nRoute: implementation=senior-dev-astra-medium\n"), "senior-dev-astra-medium");
+  assert.equal(parseImplementationRoute("Route: implementation=frontend-dev-opus-medium"), "frontend-dev-opus-medium");
   assert.equal(parseImplementationRoute("Route: implementation=project_specific.implementer"), "project_specific.implementer");
-  assert.equal(parseImplementationRoute("Route: implementation=senior-dev - step renumbering crosses contracts"), "senior-dev");
+  assert.equal(parseImplementationRoute("Route: implementation=senior-dev-astra-medium - step renumbering crosses contracts"), "senior-dev-astra-medium");
   assert.equal(parseImplementationRoute("Route: implementation= - reason given"), null);
-  assert.equal(parseImplementationRoute("Route: implementation=senior-dev - "), null);
-  assert.equal(parseImplementationRoute("Route: implementation=senior-dev "), null);
+  assert.equal(parseImplementationRoute("Route: implementation=senior-dev-astra-medium - "), null);
+  assert.equal(parseImplementationRoute("Route: implementation=senior-dev-astra-medium "), null);
   assert.equal(parseImplementationRoute("Route: implementation=unknown"), "unknown");
   assert.equal(parseImplementationRoute(undefined), null);
-  assert.equal(findMalformedRouteLine("Build it\nRoute: implementation=senior-dev\n"), null);
-  assert.equal(findMalformedRouteLine("Route: implementation=senior-dev - reason given"), null);
+  assert.equal(findMalformedRouteLine("Build it\nRoute: implementation=senior-dev-astra-medium\n"), null);
+  assert.equal(findMalformedRouteLine("Route: implementation=senior-dev-astra-medium - reason given"), null);
   assert.equal(findMalformedRouteLine("Route: implementation= - reason given"), "Route: implementation= - reason given");
-  assert.equal(findMalformedRouteLine("Route: implementation=senior-dev - "), "Route: implementation=senior-dev - ");
+  assert.equal(findMalformedRouteLine("Route: implementation=senior-dev-astra-medium - "), "Route: implementation=senior-dev-astra-medium - ");
   assert.equal(findMalformedRouteLine("Route: implementation=unknown"), null);
-  assert.equal(findMalformedRouteLine("Route: senior-dev - missing the implementation= key"), "Route: senior-dev - missing the implementation= key");
-  assert.equal(findMalformedRouteLine("Route: implementation=senior-dev "), "Route: implementation=senior-dev ");
-  assert.equal(findMalformedRouteLine("Build it\nRoute:implementation=senior-dev"), "Route:implementation=senior-dev");
+  assert.equal(findMalformedRouteLine("Route: senior-dev-astra-medium - missing the implementation= key"), "Route: senior-dev-astra-medium - missing the implementation= key");
+  assert.equal(findMalformedRouteLine("Route: implementation=senior-dev-astra-medium "), "Route: implementation=senior-dev-astra-medium ");
+  assert.equal(findMalformedRouteLine("Build it\nRoute:implementation=senior-dev-astra-medium"), "Route:implementation=senior-dev-astra-medium");
   assert.equal(findMalformedRouteLine(undefined), null);
 });
 
@@ -622,17 +622,17 @@ test("step override structural refusals happen before template reads and carry s
 
 test("direct Route overrides implementation while non-direct templates refuse Route lines", async () => {
   let templateName = "direct-engineer-workflow";
-  let lockedRouteAgentName = "senior-dev";
+  let lockedRouteAgentName = "senior-dev-astra-medium";
   const revalidator = {
-    id: "agent-revalidator", name: "spec-revalidator", projectId: "project-1", archivedAt: null,
+    id: "agent-revalidator", name: "spec-revalidator-luna-xhigh", projectId: "project-1", archivedAt: null,
     model: "openai-codex/gpt-5.6-luna:xhigh", foundationalPrompt: "foundation", rolePrompt: "role",
   };
   const canonical = {
-    id: "agent-luna", name: "senior-dev-luna", projectId: "project-1", archivedAt: null,
+    id: "agent-luna", name: "senior-dev-luna-max", projectId: "project-1", archivedAt: null,
     model: "gpt-5.6-luna:max", foundationalPrompt: "foundation", rolePrompt: "role",
   };
   const routed = {
-    id: "agent-senior", name: "senior-dev", projectId: "project-1", archivedAt: null,
+    id: "agent-senior", name: "senior-dev-astra-medium", projectId: "project-1", archivedAt: null,
     model: "gpt-5.6-sol:high", foundationalPrompt: "foundation", rolePrompt: "role",
   };
   const steps = [
@@ -698,7 +698,7 @@ test("direct Route overrides implementation while non-direct templates refuse Ro
     repoId: "repo-1",
     variables: {},
     name: "routed implementation",
-    description: "Build it\nRoute: implementation=senior-dev\n",
+    description: "Build it\nRoute: implementation=senior-dev-astra-medium\n",
   });
 
   assert.equal(result.tasks.length, 2);
@@ -712,7 +712,7 @@ test("direct Route overrides implementation while non-direct templates refuse Ro
       repoId: "repo-1",
       variables: {},
       name: "route conflict",
-      description: "Build it\nRoute: implementation=senior-dev\n",
+      description: "Build it\nRoute: implementation=senior-dev-astra-medium\n",
       stepOverrides: { "2": { assigneeAgentId: routed.id } },
     }),
     "implementation_route_conflicts_with_step_override",
@@ -724,7 +724,7 @@ test("direct Route overrides implementation while non-direct templates refuse Ro
       repoId: "repo-1",
       variables: {},
       name: "route renamed",
-      description: "Build it\nRoute: implementation=senior-dev\n",
+      description: "Build it\nRoute: implementation=senior-dev-astra-medium\n",
     }),
     "implementation_route_agent_renamed",
   );
@@ -735,7 +735,7 @@ test("direct Route overrides implementation while non-direct templates refuse Ro
       repoId: "repo-1",
       variables: {},
       name: "route malformed",
-      description: "Build it\nRoute: senior-dev - missing the implementation= key\n",
+      description: "Build it\nRoute: senior-dev-astra-medium - missing the implementation= key\n",
     }),
     "implementation_route_malformed",
   );
@@ -744,7 +744,7 @@ test("direct Route overrides implementation while non-direct templates refuse Ro
     templateName = nonDirectName;
     const originalOutputKind = steps[1]!.outputKind;
     if (nonDirectName === "compound-engineer-workflow") steps[1]!.outputKind = "documentation";
-    for (const route of ["senior-dev", "unknown-agent"]) {
+    for (const route of ["senior-dev-astra-medium", "unknown-agent"]) {
       await assertTemplateRefusal(
         () => instantiateTemplate(db, "project-1", "template-1", {
           repoId: "repo-1",
@@ -760,7 +760,7 @@ test("direct Route overrides implementation while non-direct templates refuse Ro
       repoId: "repo-1",
       variables: {},
       name: "malformed route prose",
-      description: "Route: senior-dev - Route-looking prose is not parsed here",
+      description: "Route: senior-dev-astra-medium - Route-looking prose is not parsed here",
     });
     assert.equal(malformedTolerated.tasks.length, 3, `${nonDirectName} must ignore malformed Route prose`);
     steps[1]!.outputKind = originalOutputKind;

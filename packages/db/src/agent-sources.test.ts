@@ -68,16 +68,16 @@ test("the extracted loader still reads the whole contract the internal seed cons
 test("the loader exposes the two independent review roles exactly once", async () => {
   const sources = await loadAgentSources();
   const reviewRoles = sources.roles.filter(({ name }) => (
-    name === "review-coordinator-sol"
-    || name === "review-coordinator-opus"
+    name === "code-reviewer-sol-high"
+    || name === "code-reviewer-opus-high"
   ));
   assert.deepEqual(reviewRoles.map(({ name }) => name).sort(), [
-    "review-coordinator-opus",
-    "review-coordinator-sol",
+    "code-reviewer-opus-high",
+    "code-reviewer-sol-high",
   ]);
   // The adjudication role is archived: the fix step dispositions both reports itself.
   assert.equal(sources.roles.some(({ name }) => name === "review-adjudicator-opus"), false);
-  const blind = reviewRoles.find(({ name }) => name === "review-coordinator-opus");
+  const blind = reviewRoles.find(({ name }) => name === "code-reviewer-opus-high");
   assert.ok(blind);
   assert.equal(blind.runnerPreference, RunnerPreference.CLAUDE);
 });

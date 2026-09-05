@@ -76,20 +76,20 @@ it can.
 
 Implementation has five routes:
 
-- **senior-dev-luna** (template default): a brief with mechanical Acceptance
+- **senior-dev-luna-max** (template default): a brief with mechanical Acceptance
   is work that tier finishes under the chain's review and regression tail.
-- **senior-dev**, with the reason on the same line, when the hazard is one
+- **senior-dev-astra-medium**, with the reason on the same line, when the hazard is one
   the acceptance suite cannot witness even when stated: concurrency and
   transaction-boundary semantics, lock or lease ownership windows,
-  cross-module contract migrations. A senior-dev route without a reason is a
+  cross-module contract migrations. A senior-dev-astra-medium route without a reason is a
   brief defect.
-- **senior-dev-sol**, with the reason on the same line, only when the
-  senior-dev model is unavailable for that work. It is never a default.
-- **senior-dev-opus**, with the reason on the same line, when the operator
+- **senior-dev-sol-high**, with the reason on the same line, only when the
+  Astra model is unavailable for that work. It is never a default.
+- **senior-dev-opus-medium**, with the reason on the same line, when the operator
   chooses to spend Claude capacity on that work instead of Codex capacity.
   It is the same senior-developer prompt on Claude Opus 5 medium; it is
   never a default, and the chain keeps its Sol and blind reviews unchanged.
-- **frontend-dev** for frontend implementation work (UI components, pages,
+- **frontend-dev-opus-medium** for frontend implementation work (UI components, pages,
   client-side behavior).
 
 Tier answers how hard the diff is; chain shape answers how settled the spec

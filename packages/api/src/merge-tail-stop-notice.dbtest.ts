@@ -61,7 +61,7 @@ const seedInvalidHandoffRegression = async () => {
   const agent = await db.agent.create({ data: {
     projectId: project.id,
     environmentId: environment.id,
-    name: "review-coordinator-sol",
+    name: "code-reviewer-sol-high",
     title: "Regression",
     model: "claude",
     foundationalPrompt: "foundation",

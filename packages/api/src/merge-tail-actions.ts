@@ -504,9 +504,9 @@ export const settleMergeTailCompletion = async (
     const bindingError = parsedResolver.status === "invalid"
       ? parsedResolver.reason
       : parsedResolver.result.startHeadSha !== expectedStart || parsedResolver.result.targetHeadSha !== expectedTarget
-        ? "merge-resolver output is bound to stale start or target heads"
+        ? "merge-resolver-opus-medium output is bound to stale start or target heads"
         : parsedResolver.result.outcome === "resolved" && parsedResolver.result.resolvedHeadSha !== input.body.headSha
-          ? "merge-resolver output resolved head does not match the delivered run head"
+          ? "merge-resolver-opus-medium output resolved head does not match the delivered run head"
           : null;
     if (bindingError) {
       repairUnable = true;
@@ -644,7 +644,7 @@ export const createMergeTailRepairTask = async (
       ? [
         `Resolve the refresh conflict between chain head ${input.headSha} and target head ${input.baseHeadSha}.`,
         input.summary,
-        `Re-run the merge, preserve both intents under the merge-resolver role contract, commit the resolution, and persist the role's versioned JSON bound to start ${input.headSha} and target ${input.baseHeadSha}.`,
+        `Re-run the merge, preserve both intents under the merge-resolver-opus-medium role contract, commit the resolution, and persist the role's versioned JSON bound to start ${input.headSha} and target ${input.baseHeadSha}.`,
       ]
       : [
         `Repair the autonomous merge tail failure at ${input.headSha} against target ${input.baseHeadSha}.`,
@@ -723,7 +723,7 @@ export const mergeTailRepairAgentName = async (
     repairKind: "refresh-conflict" | "gate-fix" | "review-fix";
   },
 ): Promise<string> => {
-  if (input.repairKind === "refresh-conflict") return "merge-resolver";
+  if (input.repairKind === "refresh-conflict") return "merge-resolver-opus-medium";
   const fixTask = await tx.task.findFirst({
     where: {
       projectId: input.projectId,
@@ -733,7 +733,7 @@ export const mergeTailRepairAgentName = async (
     },
     select: { assigneeAgent: { select: { name: true } } },
   });
-  return fixTask?.assigneeAgent?.name ?? "senior-dev";
+  return fixTask?.assigneeAgent?.name ?? "senior-dev-astra-medium";
 };
 
 export const handleRegressionCompletion = async (

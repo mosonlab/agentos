@@ -1,7 +1,7 @@
 ---
 stepIndex: 4
 layer: 4
-agent: plan-reviser
+agent: plan-reviser-opus-high
 approvalGate: false
 optional: false
 outputKind: revised-plan

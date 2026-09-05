@@ -71,18 +71,21 @@ trailer，你可以直接在 git log 里核对哪些提交出自链。
 <details>
 <summary><b>完整十二步</b>——每一步的角色、runner、模型与档位</summary>
 
+Agent 的 title 只写角色本身——Planner、Code Reviewer、Senior Dev；slug 则写成
+`role-model-effort`，同一个角色跑在不同模型上时一眼可辨。
+
 | # | 步骤 | Agent 角色 | 做什么 | Runner | 模型 · 档位 |
 | --- | --- | --- | --- | --- | --- |
-| 1 | 写 spec | `spec` | 把任务转为正式规格 | Claude | Claude Opus 5 · high |
-| 2 | 计划 | `plan` | 把规格切成可并行的垂直切片 | Claude | Claude Fable 5 · medium |
-| 3 | 计划评审 | `review-coordinator` | 对照规格与冻结基线评审每个切片 | Codex | GPT-6 Astra · medium |
-| 4 | 修订计划 | `plan-reviser` | 在全新会话中按评审发现修订切片集 | Claude | Claude Opus 5 · high |
-| 5 | 实现 | `implementation-plan-executioner` | 按依赖前沿执行切片集并开出 pull request | Codex | GPT-6 Astra · medium，子代理 GPT-5.6 Luna · max |
-| 6 | 代码评审 | `review-coordinator-sol` | 在钉住的 base 与 head 上评审集成后的 diff | Codex | GPT-5.6 Sol · high |
-| 7 | 盲评 | `review-coordinator-opus` | 对同一 diff 再评一次，看不到第 6 步的发现 | Claude | Claude Opus 5 · high |
-| 8 | 落地评审修复 | `senior-dev` | 裁决两轮评审的全部发现并落地采纳项 | Codex | GPT-6 Astra · medium |
-| 9 | 文档 | `librarian` | 让内部文档与交付代码保持一致 | Codex | GPT-5.6 Luna · xhigh |
-| 10 | 回归验证 | `regression-verifier` | 刷新到目标分支并重跑回归 | Codex | GPT-5.6 Luna · xhigh |
+| 1 | 写 spec | `spec-opus-high` | 把任务转为正式规格 | Claude | Claude Opus 5 · high |
+| 2 | 计划 | `plan-fable-medium` | 把规格切成可并行的垂直切片 | Claude | Claude Fable 5 · medium |
+| 3 | 计划评审 | `review-coordinator-astra-medium` | 对照规格与冻结基线评审每个切片 | Codex | GPT-6 Astra · medium |
+| 4 | 修订计划 | `plan-reviser-opus-high` | 在全新会话中按评审发现修订切片集 | Claude | Claude Opus 5 · high |
+| 5 | 实现 | `plan-executor-astra-medium` | 按依赖前沿执行切片集并开出 pull request | Codex | GPT-6 Astra · medium，子代理 GPT-5.6 Luna · max |
+| 6 | 代码评审 | `code-reviewer-sol-high` | 在钉住的 base 与 head 上评审集成后的 diff | Codex | GPT-5.6 Sol · high |
+| 7 | 盲评 | `code-reviewer-opus-high` | 对同一 diff 再评一次，看不到第 6 步的发现 | Claude | Claude Opus 5 · high |
+| 8 | 落地评审修复 | `senior-dev-astra-low` | 裁决两轮评审的全部发现并落地采纳项 | Codex | GPT-6 Astra · low |
+| 9 | 文档 | `librarian-luna-xhigh` | 让内部文档与交付代码保持一致 | Codex | GPT-5.6 Luna · xhigh |
+| 10 | 回归验证 | `regression-verifier-luna-xhigh` | 刷新到目标分支并重跑回归 | Codex | GPT-5.6 Luna · xhigh |
 | 11 | 合并就绪 | — | 重算 head，要求与该 head 绑定的回归 PASS 证据并通过服务端 ancestry 校验，签发精确到 head 的授权 | — | 机械步骤，无模型运行 |
 | 12 | 合并执行 | `merge-integrator` | 对照线上 pull request 复核全部前置条件后合并 | — | 机械步骤，无模型运行 |
 

@@ -39,7 +39,7 @@ test("runtime-coupled documentation selects the full gate", () => {
     "docs/demos/templates-release-demo.md",
     "docs/runbooks/merge-executor.md",
     "docs/runbooks/quiet-window-auto-deploy.md",
-    "agents/roles/senior-dev.md",
+    "agents/roles/senior-dev-astra-medium.md",
   ]) {
     assert.equal(classifyDiff({ nameStatus: changes("M", path) }), "full", path);
   }

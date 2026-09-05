@@ -157,8 +157,8 @@ const seedReadiness = async () => {
     rolePrompt: "role",
   } });
   const [regressionAgent, reviewAgent, integratorAgent] = await Promise.all([
-    makeAgent("review-coordinator-sol"),
-    makeAgent("review-coordinator"),
+    makeAgent("code-reviewer-sol-high"),
+    makeAgent("review-coordinator-astra-medium"),
     makeAgent("merge-integrator", INTEGRATOR_SENTINEL_MODEL),
   ]);
   const repo = await db.repo.create({ data: {

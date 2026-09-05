@@ -1,7 +1,7 @@
 ---
 stepIndex: 1
 layer: 1
-agent: senior-dev-luna
+agent: senior-dev-luna-max
 approvalGate: false
 optional: false
 outputKind: implementation

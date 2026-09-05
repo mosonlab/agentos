@@ -191,9 +191,9 @@ const agentSnapshot = async (projectIds: string[]) => db.agent.findMany({
 /* ------------------------------------------------------ the fresh-seed negative */
 
 /** Every registered legacy generation still bound its review-fix step to
- * senior-dev; a fixture that rebuilds one from current rows restores that. */
+ * senior-dev-astra-medium; a fixture that rebuilds one from current rows restores that. */
 const rebindFixStepToRetiredSeniorDev = async (projectId: string, templateId: string): Promise<void> => {
-  const seniorDev = await db.agent.findUniqueOrThrow({ where: { projectId_name: { projectId, name: "senior-dev" } } });
+  const seniorDev = await db.agent.findUniqueOrThrow({ where: { projectId_name: { projectId, name: "senior-dev-astra-medium" } } });
   await db.taskTemplateStep.updateMany({
     where: { taskTemplateId: templateId, outputKind: "fixed-implementation" },
     data: { assigneeAgentId: seniorDev.id },
@@ -217,7 +217,7 @@ test("a fresh seed writes the twelve-step, eight-step, and four-step canonical t
   assert.equal(step.spawnPolicy, null);
   assert.equal(step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 7)?.attachmentsFromPrevious, false);
   assert.equal(step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 9)?.assigneeAgentId,
-    (await db.agent.findFirstOrThrow({ where: { name: "librarian" } })).id);
+    (await db.agent.findFirstOrThrow({ where: { name: "librarian-luna-xhigh" } })).id);
   assert.equal(step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 10)?.attachmentsFromPrevious, true);
   assert.match(step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 10)?.prompt ?? "", /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" prepare/u);
   assert.match(step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 10)?.prompt ?? "", /finalize exit 77[\s\S]*Repeat the full semantic verification/u);
@@ -242,11 +242,11 @@ test("a fresh seed writes the twelve-step, eight-step, and four-step canonical t
 
   const direct = await directTemplate();
   assert.equal(direct.steps.length, 8);
-  assert.equal(direct.steps[0]?.assigneeAgent?.name, "spec-revalidator");
+  assert.equal(direct.steps[0]?.assigneeAgent?.name, "spec-revalidator-luna-xhigh");
   assert.equal(direct.steps[0]?.opensPullRequest, false);
   assert.equal(direct.steps[0]?.requiresCommit, false);
   assert.equal(direct.steps[0]?.outputKind, "revalidation");
-  assert.equal(direct.steps[1]?.assigneeAgent?.name, "senior-dev-luna");
+  assert.equal(direct.steps[1]?.assigneeAgent?.name, "senior-dev-luna-max");
   assert.equal(direct.steps[1]?.opensPullRequest, true);
   assert.equal(direct.steps[1]?.requiresCommit, true);
   assert.match(direct.steps[1]?.prompt ?? "", /brief is the specification of record/u);
@@ -257,7 +257,7 @@ test("a fresh seed writes the twelve-step, eight-step, and four-step canonical t
   assert.equal(direct.steps[7]?.assigneeAgent?.name, INTEGRATOR_AGENT_NAME);
   assert.equal(direct.steps[7]?.outputKind, INTEGRATOR_OUTPUT_KIND);
   assert.match(direct.steps[5]?.prompt ?? "", /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" finalize/u);
-  const resolver = await db.agent.findFirstOrThrow({ where: { projectId: step.taskTemplate.projectId, name: "merge-resolver" } });
+  const resolver = await db.agent.findFirstOrThrow({ where: { projectId: step.taskTemplate.projectId, name: "merge-resolver-opus-medium" } });
   assert.equal(resolver.model, "claude-opus-5:medium");
   assert.equal(resolver.runnerPreference, "CLAUDE");
 
@@ -270,7 +270,7 @@ test("a fresh seed writes the twelve-step, eight-step, and four-step canonical t
     "Implementation", "Code review (Sol)", "Code review (Opus blind)", "Apply review fixes",
   ]);
   assert.deepEqual(pullRequest.steps.map(({ assigneeAgent }) => assigneeAgent?.name), [
-    "senior-dev-luna", "review-coordinator-sol", "review-coordinator-opus", "senior-dev-astra-low",
+    "senior-dev-luna-max", "code-reviewer-sol-high", "code-reviewer-opus-high", "senior-dev-astra-low",
   ]);
   assert.deepEqual(pullRequest.steps.map(({ opensPullRequest }) => opensPullRequest), [true, false, false, false]);
   assert.deepEqual(pullRequest.steps.map(({ requiresCommit }) => requiresCommit), [true, false, false, false]);
@@ -297,24 +297,24 @@ test("re-seeding preserves an operator-selected model and runner", async () => {
   assert.equal((await seed()).code, 0);
   const project = await db.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
   await db.agent.update({
-    where: { projectId_name: { projectId: project.id, name: "spec" } },
+    where: { projectId_name: { projectId: project.id, name: "spec-opus-high" } },
     data: { model: "claude-opus-5:medium", runnerPreference: "CLAUDE", runtimeConfigCustomized: true },
   });
 
   const reseeded = await seed();
   assert.equal(reseeded.code, 0, reseeded.output);
   const spec = await db.agent.findUniqueOrThrow({
-    where: { projectId_name: { projectId: project.id, name: "spec" } },
+    where: { projectId_name: { projectId: project.id, name: "spec-opus-high" } },
     select: { model: true, runnerPreference: true, runtimeConfigCustomized: true },
   });
   assert.deepEqual(spec, { model: "claude-opus-5:medium", runnerPreference: "CLAUDE", runtimeConfigCustomized: true });
 });
 
-test("canonical sync restores step, merge-resolver role, and foundational prompts when structure matches", async () => {
+test("canonical sync restores step, merge-resolver-opus-medium role, and foundational prompts when structure matches", async () => {
   assert.equal((await seed()).code, 0);
   const direct = await directTemplate();
   const step = direct.steps[0]!;
-  const agent = await db.agent.findFirstOrThrow({ where: { name: "merge-resolver" } });
+  const agent = await db.agent.findFirstOrThrow({ where: { name: "merge-resolver-opus-medium" } });
   await Promise.all([
     db.taskTemplateStep.update({ where: { id: step.id }, data: { prompt: "step prompt drift" } }),
     db.agent.update({ where: { id: agent.id }, data: { foundationalPrompt: "foundation drift", rolePrompt: "role drift" } }),
@@ -324,7 +324,7 @@ test("canonical sync restores step, merge-resolver role, and foundational prompt
   assert.equal(synced.code, 0, synced.output);
   const expectedStep = (await loadTemplateStepSources(DIRECT_TEMPLATE_NAME))[0]!;
   const sources = await loadAgentSources();
-  const expectedRole = sources.roles.find(({ name }) => name === "merge-resolver")!;
+  const expectedRole = sources.roles.find(({ name }) => name === "merge-resolver-opus-medium")!;
   const [persistedStep, persistedAgent] = await Promise.all([
     db.taskTemplateStep.findUniqueOrThrow({ where: { id: step.id } }),
     db.agent.findUniqueOrThrow({ where: { id: agent.id } }),
@@ -493,7 +493,7 @@ test("canonical sync rolls quiescent adjudication-era graphs only after active R
     // The adjudicator role is archived, so the seed no longer creates its
     // Agent row; production still carries the row the old node was bound to.
     const opus = await db.agent.findFirstOrThrow({
-      where: { projectId: template.projectId, name: "review-coordinator-opus" },
+      where: { projectId: template.projectId, name: "code-reviewer-opus-high" },
     });
     const adjudicator = await db.agent.upsert({
       where: { projectId_name: { projectId: template.projectId, name: "review-adjudicator-opus" } },
@@ -621,7 +621,7 @@ test("canonical sync refuses to mutate instantiated canonical steps", async () =
     compound.steps.find(({ outputKind }) => outputKind === "regression-verification-v2")!,
   ];
   const opus = await db.agent.findFirstOrThrow({
-    where: { projectId: direct.projectId, name: "review-coordinator-opus" },
+    where: { projectId: direct.projectId, name: "code-reviewer-opus-high" },
   });
   await Promise.all(regressionSteps.map((step) => db.taskTemplateStep.update({
     where: { id: step.id }, data: { assigneeAgentId: opus.id, prompt: "previous release prompt" },
@@ -647,8 +647,8 @@ test("canonical sync refuses to mutate instantiated canonical steps", async () =
     db.taskTemplateStep.findMany({ where: { id: { in: regressionSteps.map(({ id }) => id) } }, include: { assigneeAgent: true } }),
     db.task.findMany({ where: { id: { in: existingTasks.map(({ id }) => id) } }, include: { assigneeAgent: true } }),
   ]);
-  assert.deepEqual(adoptedSteps.map(({ assigneeAgent }) => assigneeAgent?.name), ["review-coordinator-opus", "review-coordinator-opus"]);
-  assert.deepEqual(migratedTasks.map(({ assigneeAgent }) => assigneeAgent?.name), ["review-coordinator-opus", "review-coordinator-opus"]);
+  assert.deepEqual(adoptedSteps.map(({ assigneeAgent }) => assigneeAgent?.name), ["code-reviewer-opus-high", "code-reviewer-opus-high"]);
+  assert.deepEqual(migratedTasks.map(({ assigneeAgent }) => assigneeAgent?.name), ["code-reviewer-opus-high", "code-reviewer-opus-high"]);
 });
 
 test("canonical sync rejects template structure drift without applying its prompt", async () => {
@@ -668,7 +668,7 @@ test("canonical sync rejects template structure drift without applying its promp
 
 test("canonical sync rejects role structure drift without applying its prompts", async () => {
   assert.equal((await seed()).code, 0);
-  const agent = await db.agent.findFirstOrThrow({ where: { name: "librarian" } });
+  const agent = await db.agent.findFirstOrThrow({ where: { name: "librarian-luna-xhigh" } });
   await db.agent.update({
     where: { id: agent.id },
     data: { inboxAccess: !agent.inboxAccess, foundationalPrompt: "foundation drift", rolePrompt: "role drift" },
@@ -692,10 +692,10 @@ test("canonical sync restores Agent prompts in every Project and preserves custo
     where: { projectId_name: { projectId: canonicalProject.id, name: "default" } },
   });
   const uncustomized = await db.agent.findUniqueOrThrow({
-    where: { projectId_name: { projectId: second.project.id, name: "senior-dev-luna" } },
+    where: { projectId_name: { projectId: second.project.id, name: "senior-dev-luna-max" } },
   });
   const customized = await db.agent.findUniqueOrThrow({
-    where: { projectId_name: { projectId: second.project.id, name: "review-coordinator-sol" } },
+    where: { projectId_name: { projectId: second.project.id, name: "code-reviewer-sol-high" } },
   });
   const uncustomizedSource = sourceByName.get(uncustomized.name)!;
   const customizedSource = sourceByName.get(customized.name)!;
@@ -787,7 +787,7 @@ test("canonical sync isolates foreign Agent structure drift and still updates ca
     where: { projectId_name: { projectId: canonicalProject.id, name: "default" } },
   });
   const foreign = await db.agent.findUniqueOrThrow({
-    where: { projectId_name: { projectId: second.project.id, name: "senior-dev-luna" } },
+    where: { projectId_name: { projectId: second.project.id, name: "senior-dev-luna-max" } },
   });
   await db.agent.update({ where: { id: canonical.id }, data: { rolePrompt: "canonical role prompt drift" } });
   await db.agent.update({
@@ -818,7 +818,7 @@ test("canonical sync isolates a foreign invalid runtime pair and still updates c
     where: { projectId_name: { projectId: canonicalProject.id, name: "default" } },
   });
   const foreign = await db.agent.findUniqueOrThrow({
-    where: { projectId_name: { projectId: second.project.id, name: "senior-dev-luna" } },
+    where: { projectId_name: { projectId: second.project.id, name: "senior-dev-luna-max" } },
   });
   await db.agent.update({ where: { id: canonical.id }, data: { rolePrompt: "canonical role prompt drift" } });
   await db.agent.update({
@@ -914,7 +914,7 @@ const negatives: Array<{ name: string; break: () => Promise<void>; expect: RegEx
   {
     name: "role frontmatter drift",
     break: async () => {
-      const agent = await db.agent.findFirstOrThrow({ where: { name: "librarian" } });
+      const agent = await db.agent.findFirstOrThrow({ where: { name: "librarian-luna-xhigh" } });
       await db.agent.update({ where: { id: agent.id }, data: { inboxAccess: !agent.inboxAccess } });
     },
     expect: /inboxAccess/u,
@@ -922,14 +922,14 @@ const negatives: Array<{ name: string; break: () => Promise<void>; expect: RegEx
   {
     name: "foundational prompt drift",
     break: async () => {
-      await db.agent.updateMany({ where: { name: "librarian" }, data: { foundationalPrompt: "drift" } });
+      await db.agent.updateMany({ where: { name: "librarian-luna-xhigh" }, data: { foundationalPrompt: "drift" } });
     },
     expect: /foundational prompt/u,
   },
   {
     name: "role prompt drift",
     break: async () => {
-      await db.agent.updateMany({ where: { name: "librarian" }, data: { rolePrompt: "drift" } });
+      await db.agent.updateMany({ where: { name: "librarian-luna-xhigh" }, data: { rolePrompt: "drift" } });
     },
     expect: /role prompt/u,
   },
@@ -959,9 +959,9 @@ test("re-seeding a historical ten-step template preserves and queues its in-flig
   // review, fix, docs, human approval, then physical step-10 mechanical merge.
   await db.taskTemplateStep.deleteMany({ where: { taskTemplateId: templateId, stepIndex: { in: [11, 12] } } });
   const historicalTail = [
-    [6, "review-coordinator", AssigneeType.AGENT, "code-review"],
-    [7, "senior-dev", AssigneeType.AGENT, "fixed-implementation"],
-    [8, "librarian", AssigneeType.AGENT, "documentation"],
+    [6, "review-coordinator-astra-medium", AssigneeType.AGENT, "code-review"],
+    [7, "senior-dev-astra-medium", AssigneeType.AGENT, "fixed-implementation"],
+    [8, "librarian-luna-xhigh", AssigneeType.AGENT, "documentation"],
     [9, null, AssigneeType.HUMAN, "approval"],
     [10, INTEGRATOR_AGENT_NAME, AssigneeType.AGENT, INTEGRATOR_OUTPUT_KIND],
   ] as const;
@@ -1052,14 +1052,14 @@ test("re-seeding a historical nine-step template preserves its in-flight task se
     where: { taskTemplateId: templateId, stepIndex: { in: [10, 11, 12] } },
   });
   const historicalContract = [
-    [1, "Write a spec", "spec", AssigneeType.AGENT, "spec", true],
-    [2, "Plan", "plan", AssigneeType.AGENT, "plan", false],
-    [3, "Plan review", "review-coordinator", AssigneeType.AGENT, "plan-review", false],
-    [4, "Revise plan", "plan-reviser", AssigneeType.AGENT, "revised-plan", true],
-    [5, "Implementation", "implementation-plan-executioner", AssigneeType.AGENT, "implementation", false],
-    [6, "Code review", "review-coordinator", AssigneeType.AGENT, "code-review", false],
-    [7, "Apply review fixes", "senior-dev", AssigneeType.AGENT, "fixed-implementation", false],
-    [8, "Librarian", "librarian", AssigneeType.AGENT, "documentation", false],
+    [1, "Write a spec", "spec-opus-high", AssigneeType.AGENT, "spec", true],
+    [2, "Plan", "plan-fable-medium", AssigneeType.AGENT, "plan", false],
+    [3, "Plan review", "review-coordinator-astra-medium", AssigneeType.AGENT, "plan-review", false],
+    [4, "Revise plan", "plan-reviser-opus-high", AssigneeType.AGENT, "revised-plan", true],
+    [5, "Implementation", "plan-executor-astra-medium", AssigneeType.AGENT, "implementation", false],
+    [6, "Code review", "review-coordinator-astra-medium", AssigneeType.AGENT, "code-review", false],
+    [7, "Apply review fixes", "senior-dev-astra-medium", AssigneeType.AGENT, "fixed-implementation", false],
+    [8, "Librarian", "librarian-luna-xhigh", AssigneeType.AGENT, "documentation", false],
     [9, "Human PR review", null, AssigneeType.HUMAN, "approval", true],
   ] as const;
   for (const [stepIndex, name, agentName, assigneeType, outputKind, approvalGate] of historicalContract) {
@@ -1139,7 +1139,7 @@ test("re-seeding a historical nine-step template preserves its in-flight task se
   assert.equal(preserved.templateStepId, reviewStep.id);
   assert.equal(preserved.templateStep?.taskTemplate.name, legacyNineStepTemplateName(templateId));
   assert.equal(preserved.templateStep?.name, "Code review");
-  assert.equal(preserved.templateStep?.assigneeAgent?.name, "review-coordinator");
+  assert.equal(preserved.templateStep?.assigneeAgent?.name, "review-coordinator-astra-medium");
   assert.equal(preserved.templateStep?.outputKind, "code-review");
   assert.equal(preserved.stepOutput?.kind, "code-review");
 });

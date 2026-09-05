@@ -263,8 +263,8 @@ const downgradeDirectToHistoricalSevenStep = async (projectId: string): Promise<
       },
     });
   }
-  // The retired seven-step graph still bound its review-fix step to senior-dev.
-  const seniorDev = await prisma.agent.findUniqueOrThrow({ where: { projectId_name: { projectId, name: "senior-dev" } } });
+  // The retired seven-step graph still bound its review-fix step to senior-dev-astra-medium.
+  const seniorDev = await prisma.agent.findUniqueOrThrow({ where: { projectId_name: { projectId, name: "senior-dev-astra-medium" } } });
   await prisma.taskTemplateStep.updateMany({
     where: { taskTemplateId: template.id, outputKind: "fixed-implementation" },
     data: { assigneeAgentId: seniorDev.id },
@@ -300,7 +300,7 @@ after(async () => {
 
 test("ordinary sync covers active canonical Agents in every Project and preserves partial inventories", async (t) => {
   const project = await createProject(`a2-agents-${randomBytes(4).toString("hex")}`);
-  const names = ["senior-dev", "review-coordinator-sol", "default"] as const;
+  const names = ["senior-dev-astra-medium", "code-reviewer-sol-high", "default"] as const;
   await createAgents(project, names);
   const canonicalDefault = await prisma.agent.findUniqueOrThrow({
     where: { projectId_name: { projectId: canonicalProject.id, name: "default" } },
@@ -336,11 +336,11 @@ test("ordinary sync covers active canonical Agents in every Project and preserve
   });
 
   const secondSenior = await prisma.agent.findUniqueOrThrow({
-    where: { projectId_name: { projectId: project.id, name: "senior-dev" } },
+    where: { projectId_name: { projectId: project.id, name: "senior-dev-astra-medium" } },
     select: { id: true },
   });
   const secondSol = await prisma.agent.findUniqueOrThrow({
-    where: { projectId_name: { projectId: project.id, name: "review-coordinator-sol" } },
+    where: { projectId_name: { projectId: project.id, name: "code-reviewer-sol-high" } },
     select: { id: true },
   });
   const compatibleCustomized = { model: "openai-codex/gpt-5.6-luna:max", runnerPreference: RunnerPreference.PI };
@@ -374,27 +374,27 @@ test("ordinary sync covers active canonical Agents in every Project and preserve
   });
   assert.deepEqual(syncedSenior, {
     foundationalPrompt: sources.foundationalPrompt,
-    rolePrompt: role("senior-dev").rolePrompt,
-    model: role("senior-dev").model,
-    runnerPreference: role("senior-dev").runnerPreference,
+    rolePrompt: role("senior-dev-astra-medium").rolePrompt,
+    model: role("senior-dev-astra-medium").model,
+    runnerPreference: role("senior-dev-astra-medium").runnerPreference,
   });
   const customized = await prisma.agent.findUniqueOrThrow({
     where: { id: secondSol.id },
     select: { model: true, runnerPreference: true, runtimeConfigCustomized: true, runtimeConfigDriftNoticeFingerprint: true },
   });
   const expectedFingerprint = JSON.stringify({
-    canonical: { model: role("review-coordinator-sol").model, runnerPreference: role("review-coordinator-sol").runnerPreference },
+    canonical: { model: role("code-reviewer-sol-high").model, runnerPreference: role("code-reviewer-sol-high").runnerPreference },
     production: compatibleCustomized,
   });
   assert.deepEqual(customized, { ...compatibleCustomized, runtimeConfigCustomized: true, runtimeConfigDriftNoticeFingerprint: expectedFingerprint });
-  assert.equal(await prisma.agent.count({ where: { projectId: project.id, name: "implementation-plan-executioner" } }), 0);
-  assert.equal(await prisma.agent.count({ where: { projectId: project.id, name: "regression-verifier" } }), 0);
-  assert.equal(await prisma.agent.count({ where: { projectId: project.id, name: "spec-revalidator" } }), 0);
+  assert.equal(await prisma.agent.count({ where: { projectId: project.id, name: "plan-executor-astra-medium" } }), 0);
+  assert.equal(await prisma.agent.count({ where: { projectId: project.id, name: "regression-verifier-luna-xhigh" } }), 0);
+  assert.equal(await prisma.agent.count({ where: { projectId: project.id, name: "spec-revalidator-luna-xhigh" } }), 0);
   const summary = parseCanonicalSyncSummary(synced.output);
   assertSummaryShape(summary);
   assert.equal(summary.projects[project.slug]!.adoptedAgentDefaults, 1);
   assert.equal(summary.projects[project.slug]!.runtimeDriftNotices, 1);
-  assert.equal(summary.projects[project.slug]!.updatedRoles["senior-dev"], 1);
+  assert.equal(summary.projects[project.slug]!.updatedRoles["senior-dev-astra-medium"], 1);
   assert.equal(summary.projects[canonicalProject.slug]!.updatedRoles.default, 1);
 });
 
@@ -581,7 +581,7 @@ test("partial template rows synchronize across Projects, leave missing rows vali
   const directStep7 = await prisma.taskTemplateStep.findUniqueOrThrow({
     where: { taskTemplateId_stepIndex: { taskTemplateId: direct.id, stepIndex: 7 } },
   });
-  const oldAssignee = transitionAgents.get("review-coordinator-sol")!;
+  const oldAssignee = transitionAgents.get("code-reviewer-sol-high")!;
   const directStep6 = await prisma.taskTemplateStep.findUniqueOrThrow({
     where: { taskTemplateId_stepIndex: { taskTemplateId: direct.id, stepIndex: 6 } },
   });
@@ -616,13 +616,13 @@ test("partial template rows synchronize across Projects, leave missing rows vali
     (await canonicalTemplate("pr-engineer-workflow")).steps[0]!.prompt);
   assert.equal(await prisma.taskTemplate.count({ where: { projectId: partial.id, name: { in: ["compound-engineer-workflow", "direct-engineer-workflow"] } } }), 0);
   assert.equal(await prisma.taskTemplate.count({ where: { projectId: empty.id } }), 0);
-  assert.equal(await prisma.taskTemplateStep.findUniqueOrThrow({ where: { id: compoundStep10.id } }).then(({ assigneeAgentId }) => assigneeAgentId), transitionAgents.get("regression-verifier"));
+  assert.equal(await prisma.taskTemplateStep.findUniqueOrThrow({ where: { id: compoundStep10.id } }).then(({ assigneeAgentId }) => assigneeAgentId), transitionAgents.get("regression-verifier-luna-xhigh"));
   assert.equal((await prisma.taskTemplateStep.findUniqueOrThrow({ where: { id: compoundStep6.id } })).baseFromStepIndex, 5);
   assert.equal((await prisma.taskTemplateStep.findUniqueOrThrow({ where: { id: compoundStep11.id } })).name, "Merge authorization");
-  assert.equal((await prisma.taskTemplateStep.findUniqueOrThrow({ where: { id: directStep1.id } })).assigneeAgentId, transitionAgents.get("spec-revalidator"));
+  assert.equal((await prisma.taskTemplateStep.findUniqueOrThrow({ where: { id: directStep1.id } })).assigneeAgentId, transitionAgents.get("spec-revalidator-luna-xhigh"));
   assert.equal((await prisma.taskTemplateStep.findUniqueOrThrow({ where: { id: directStep3.id } })).baseFromStepIndex, 2);
   assert.equal((await prisma.taskTemplateStep.findUniqueOrThrow({ where: { id: directStep7.id } })).name, "Merge authorization");
-  assert.equal((await prisma.task.findUniqueOrThrow({ where: { id: task.id } })).assigneeAgentId, transitionAgents.get("regression-verifier"));
+  assert.equal((await prisma.task.findUniqueOrThrow({ where: { id: task.id } })).assigneeAgentId, transitionAgents.get("regression-verifier-luna-xhigh"));
   assert.equal(await prisma.taskActivity.count({ where: { taskId: task.id, body: { contains: "Canonical routing reassigned" } } }), 1);
   const summary = parseCanonicalSyncSummary(synced.output);
   assertSummaryShape(summary);
@@ -637,7 +637,7 @@ test("partial template rows synchronize across Projects, leave missing rows vali
 
 test("full installation fills only the addressed Project's missing inventory and is idempotent", async (t) => {
   const project = await createProject(`a2-install-full-${randomBytes(4).toString("hex")}`);
-  const existingNames = ["senior-dev-luna", "review-coordinator-sol", "review-coordinator-opus", "senior-dev"] as const;
+  const existingNames = ["senior-dev-luna-max", "code-reviewer-sol-high", "code-reviewer-opus-high", "senior-dev-astra-medium"] as const;
   const directNames = await templateAssigneeNames("direct-engineer-workflow");
   const initialNames = [...new Set([...existingNames, ...directNames])];
   const agents = await createAgents(project, initialNames);
@@ -649,7 +649,7 @@ test("full installation fills only the addressed Project's missing inventory and
   await prisma.taskTemplateStep.update({ where: { id: prStep.id }, data: { prompt: "operator PR prompt drift" } });
   const customized = { model: "openai-codex/gpt-5.6-luna:max", runnerPreference: RunnerPreference.PI };
   await prisma.agent.update({
-    where: { id: agents.get("review-coordinator-sol")! },
+    where: { id: agents.get("code-reviewer-sol-high")! },
     data: { ...customized, runtimeConfigCustomized: true },
   });
   const direct = await copyTemplate(project, "direct-engineer-workflow", agents);
@@ -961,7 +961,7 @@ test("sync refusal classes include every available Project and object identifier
 test("summary reports every Project, nested canonical keys, lexical slugs, and field-wise totals", async (t) => {
   const active = await createProject(`aaa-a2-summary-${randomBytes(4).toString("hex")}`);
   const activeNames = new Set([
-    "senior-dev",
+    "senior-dev-astra-medium",
     ...await templateAssigneeNames("pr-engineer-workflow"),
     ...await templateAssigneeNames("compound-engineer-workflow"),
   ]);
@@ -972,7 +972,7 @@ test("summary reports every Project, nested canonical keys, lexical slugs, and f
     where: { taskTemplateId_stepIndex: { taskTemplateId: template.id, stepIndex: 1 } },
   });
   await prisma.taskTemplateStep.update({ where: { id: firstStep.id }, data: { prompt: "summary prompt drift" } });
-  const senior = await prisma.agent.findUniqueOrThrow({ where: { id: agents.get("senior-dev")! } });
+  const senior = await prisma.agent.findUniqueOrThrow({ where: { id: agents.get("senior-dev-astra-medium")! } });
   await prisma.agent.update({
     where: { id: senior.id },
     data: {
@@ -983,11 +983,11 @@ test("summary reports every Project, nested canonical keys, lexical slugs, and f
     },
   });
   const regressionStepIndex = templateSources.get("compound-engineer-workflow")!
-    .find(({ agentName }) => agentName === "regression-verifier")!.stepIndex;
+    .find(({ agentName }) => agentName === "regression-verifier-luna-xhigh")!.stepIndex;
   const regressionStep = await prisma.taskTemplateStep.findUniqueOrThrow({
     where: { taskTemplateId_stepIndex: { taskTemplateId: compound.id, stepIndex: regressionStepIndex } },
   });
-  const previousAssigneeId = agents.get("review-coordinator-sol")!;
+  const previousAssigneeId = agents.get("code-reviewer-sol-high")!;
   const createPreservedTask = async (
     name: string,
     data: Pick<Prisma.TaskUncheckedCreateInput, "status" | "archivedAt">,
@@ -1037,7 +1037,7 @@ test("summary reports every Project, nested canonical keys, lexical slugs, and f
       ...zeroSteps(),
       "pr-engineer-workflow": { ...zeroSteps()["pr-engineer-workflow"], "1": 1 },
     },
-    updatedRoles: { ...zeroRoles(), "senior-dev": 1 },
+    updatedRoles: { ...zeroRoles(), "senior-dev-astra-medium": 1 },
   };
   const canonicalCounters: CanonicalSyncCounters = { ...zeroCounters(), templates: canonicalTemplateNames().length };
   const totals: CanonicalSyncCounters = {

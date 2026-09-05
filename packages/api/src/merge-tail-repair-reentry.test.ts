@@ -339,7 +339,7 @@ test("operator recovery repair maps a gate verdict onto the gate-fix budget", as
 });
 
 test("operator recovery repair reports task creation failures with their own code", async () => {
-  const observed = scenario({ repairRefusal: "required repair agent senior-dev is absent or archived" });
+  const observed = scenario({ repairRefusal: "required repair agent senior-dev-astra-medium is absent or archived" });
 
   const result = await request(observed);
 

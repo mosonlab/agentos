@@ -38,7 +38,7 @@ export const BOUND_SPECIFICATION_BRIEF = [
   "",
   "Acceptance: bound claims materialize the refreshed brief.",
   "",
-  "Route: implementation=senior-dev - claim-time materialization",
+  "Route: implementation=senior-dev-astra-medium - claim-time materialization",
 ].join("\n");
 
 /**

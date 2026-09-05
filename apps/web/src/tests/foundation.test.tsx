@@ -9,7 +9,7 @@ import { AgentDetailPage, NewAgent } from "../pages/Agents";
 import { installDom, installFetchFunction, reactDom } from "./dom-harness";
 
 const value: Agent = {
-  id: "a", projectId: "p", environmentId: "e", name: "senior-dev", title: "Senior Developer",
+  id: "a", projectId: "p", environmentId: "e", name: "senior-dev-astra-medium", title: "Senior Developer",
   model: "claude-opus-5:high", codexServiceTier: "DEFAULT", runnerPreference: "CLAUDE", inboxAccess: false, disabledTools: [],
   foundationalPrompt: "the canonical foundation", rolePrompt: "role", createdAt: "2026-08-16T00:00:00.000Z",
   updatedAt: "2026-08-16T00:00:00.000Z", archivedAt: null,

@@ -1,7 +1,7 @@
 ---
 stepIndex: 1
 layer: 1
-agent: spec-revalidator
+agent: spec-revalidator-luna-xhigh
 approvalGate: false
 optional: false
 outputKind: revalidation

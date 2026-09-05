@@ -323,7 +323,7 @@ const negativeRegressionVerdict = (
 
 const addRepairAgent = async (
   seeded: Awaited<ReturnType<typeof seedTask>>,
-  agentName: "senior-dev" | "merge-resolver",
+  agentName: "senior-dev-astra-medium" | "merge-resolver-opus-medium",
 ) => {
   const repairAgent = await db.agent.create({ data: {
     projectId: seeded.project.id,
@@ -492,9 +492,9 @@ test("every authored Regression stop verdict releases its chain lease", async ()
 
 test("a retryable protocol failure consumes its durable negative Regression verdict exactly once", async () => {
   for (const [outcome, repairKind, agentName] of [
-    ["review-fail", "review-fix", "senior-dev"],
-    ["gate-fail", "gate-fix", "senior-dev"],
-    ["refresh-conflict", "refresh-conflict", "merge-resolver"],
+    ["review-fail", "review-fix", "senior-dev-astra-medium"],
+    ["gate-fail", "gate-fix", "senior-dev-astra-medium"],
+    ["refresh-conflict", "refresh-conflict", "merge-resolver-opus-medium"],
   ] as const) {
     await resetTestDb(db);
     const seeded = await seedTask(REGRESSION_STEP);
@@ -557,7 +557,7 @@ test("a retryable protocol failure consumes its durable negative Regression verd
 
 test("a current v2 gate-fail with gate proof is consumed after protocol failure", async () => {
   const seeded = await seedTask(REGRESSION_V2_STEP);
-  await addRepairAgent(seeded, "senior-dev");
+  await addRepairAgent(seeded, "senior-dev-astra-medium");
   const runId = await enqueue(seeded.task.id);
   const claimed = await claimRun(runId, "runner-v2-durable-gate-fail");
   const written = await call("PUT", `/session/runs/${runId}/output`, claimed.sessionToken, {
@@ -587,9 +587,9 @@ test("a current v2 gate-fail with gate proof is consumed after protocol failure"
 
 test("current v2 durable negative verdicts survive lease-loss reconciliation without a Regression retry", async () => {
   for (const [outcome, repairKind, agentName] of [
-    ["review-fail", "review-fix", "senior-dev"],
-    ["gate-fail", "gate-fix", "senior-dev"],
-    ["refresh-conflict", "refresh-conflict", "merge-resolver"],
+    ["review-fail", "review-fix", "senior-dev-astra-medium"],
+    ["gate-fail", "gate-fix", "senior-dev-astra-medium"],
+    ["refresh-conflict", "refresh-conflict", "merge-resolver-opus-medium"],
   ] as const) {
     await resetTestDb(db);
     const seeded = await seedTask(REGRESSION_V2_STEP);
