@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  legacyTemplateName,
   Prisma,
   type PrismaClient,
 } from "@anneal/db";
@@ -141,6 +142,45 @@ test("template step replacement requires optional and rejects unknown fields bef
         body: JSON.stringify(body),
       });
       assert.equal(response.status, 400, JSON.stringify(body));
+    }
+  });
+});
+
+test("listed and single templates carry retired, true only for a renamed retired generation", async () => {
+  await withTokens(async () => {
+    const row = (id: string, name: string) => ({
+      id, name, projectId: "project-1", description: "", variables: [], steps: [],
+    });
+    const rows = [
+      row("template-1", "direct-engineer-workflow"),
+      row("template-2", legacyTemplateName("direct-engineer-workflow", "pre-adjudication", "template-1")),
+      row("template-3", "my own clone of the direct chain"),
+    ];
+    const database = {
+      taskTemplate: {
+        findMany: async () => rows,
+        findUnique: async ({ where }: { where: { id: string } }) => rows.find((candidate) => candidate.id === where.id) ?? null,
+      },
+    } as unknown as PrismaClient;
+    const app = createApp(database);
+    const headers = { Authorization: "Bearer operator-unit-token" };
+
+    const listed = await app.request("/projects/project-1/task-templates", { headers });
+    assert.equal(listed.status, 200);
+    const listedRows = await listed.json() as Array<{ id: string; name: string; retired: boolean }>;
+    // Ordering and every other field of the row are unchanged by the new field.
+    assert.deepEqual(listedRows.map((template) => template.id), ["template-1", "template-2", "template-3"]);
+    assert.deepEqual(listedRows.map((template) => template.retired), [false, true, false]);
+    for (const [index, listedRow] of listedRows.entries()) {
+      const { retired, ...rest } = listedRow;
+      assert.deepEqual(rest, rows[index]);
+      assert.equal(typeof retired, "boolean");
+    }
+
+    for (const expected of rows.map((candidate, index) => ({ id: candidate.id, retired: index === 1 }))) {
+      const single = await app.request(`/task-templates/${expected.id}`, { headers });
+      assert.equal(single.status, 200);
+      assert.equal((await single.json() as { retired: boolean }).retired, expected.retired, expected.id);
     }
   });
 });

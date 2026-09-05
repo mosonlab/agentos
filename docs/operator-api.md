@@ -1025,6 +1025,13 @@ unreadable read-back, body mismatch, failed cleanup, or retained tracked
 ### GET `/projects/:projectId/task-templates`
 
 - Required path parameter: `projectId`.
+- Rows are ordered by `createdAt` ascending.
+- Every row carries `retired`: true when the row is a retired canonical
+  generation, which canonical sync renamed to
+  `<name>-legacy-<marker>-<id>` so the chains instantiated under it keep their
+  history. A current canonical template and an operator's own clone are both
+  false. The field is derived from the row's name at read time and never
+  stored.
 
 ```sh
 curl "$BASE_URL/projects/$PROJECT_ID/task-templates" -H "Authorization: Bearer $OPERATOR_TOKEN"
@@ -1108,6 +1115,8 @@ curl -X PUT "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/steps" \
 ### GET `/task-templates/:templateId`
 
 - Required path parameter: `templateId`.
+- Carries the same derived `retired` field as
+  `GET /projects/:projectId/task-templates`.
 
 ```sh
 curl "$BASE_URL/task-templates/$TEMPLATE_ID" -H "Authorization: Bearer $OPERATOR_TOKEN"
