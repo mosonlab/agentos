@@ -1625,7 +1625,7 @@ test("three Codex resume attempts exhaust on the fourth disconnect and preserve 
 
     // The fourth evidence is classified independently of whether the optional
     // Codex capability is exposed; the resume loop must not alter the verdict.
-    const { isInRunResumeCandidate: _capability, ...withoutCapability } = adapters.CODEX;
+    const { isProviderDisconnect: _capability, ...withoutCapability } = adapters.CODEX;
     assert.equal(withoutCapability.classifyError(fourthEvidence).failureClass, expectedClass);
     assert.equal(outputStatusReads, 2, "the terminal-product probe runs once, followed by the settling-path read");
   } finally {
@@ -1641,9 +1641,12 @@ type NoResumeCase = {
   withoutCapability?: boolean;
 };
 
-// The exit shapes a Codex disconnect is disqualified by are the adapter's own
-// question, proven in adapters.test.ts. These two cases prove the wiring: a
-// refusal from the relaunch gate stops the loop before any second child.
+// The provider-shaped wording a Codex disconnect is disqualified by is the
+// adapter's own question, proven in adapters.test.ts, and the exit record's
+// own shape is `agentExitVerdict`'s, proven in run-outcome.test.ts. These
+// three cases prove the wiring: the loop starts no second child when the
+// verdict is not a drop, when the adapter offers no reading, or when the
+// relaunch gate refuses.
 const noResumeCases: NoResumeCase[] = [
   {
     name: "a missing provider conversation id",
@@ -1654,6 +1657,12 @@ const noResumeCases: NoResumeCase[] = [
     name: "an adapter without the optional capability",
     evidence: reconnectEvidence(),
     withoutCapability: true,
+  },
+  {
+    // Codex disconnect wording on an exit the runner itself ended: the shared
+    // verdict calls it `stopped`, so the adapter is never consulted.
+    name: "an exit the shared verdict does not call a drop",
+    evidence: reconnectEvidence({ terminationReason: "cancelled" }),
   },
 ];
 
@@ -1671,7 +1680,7 @@ for (const noResumeCase of noResumeCases) {
         providerResumeBackoff: async () => assert.fail("a disqualified exit must not wait before resuming"),
         ...(noResumeCase.withoutCapability ? {
           adapter: (claim, calls) => {
-            const { isInRunResumeCandidate: _capability, ...adapter } = fakeCodexAdapter(claim, [{
+            const { isProviderDisconnect: _capability, ...adapter } = fakeCodexAdapter(claim, [{
               evidence: noResumeCase.evidence,
               providerConversationId: noResumeCase.providerConversationId === undefined
                 ? "thread-resume"
