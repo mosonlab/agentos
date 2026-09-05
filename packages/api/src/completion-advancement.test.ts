@@ -39,7 +39,7 @@ const facts = (overrides: Partial<CompletionAdvancementFacts> = {}): CompletionA
   ...overrides,
 });
 
-const templateTask = (overrides: Partial<NonNullable<CompletionAdvancementFacts["task"]>> = {}) => ({
+const templateTask = (overrides: Partial<CompletionAdvancementFacts["task"]> = {}) => ({
   templateId: "template-1",
   chainId: "chain-1",
   approvalGate: false,
@@ -189,13 +189,6 @@ test("a negative Regression verdict on a Task with no template parks rather than
       reportedFailureReason: "stream closed",
     })),
     { case: "park-task", status: "REVIEW", failureReason: "stream closed" },
-  );
-});
-
-test("a successful Run whose Task row is absent parks rather than advancing anything", () => {
-  assert.deepEqual(
-    completionAdvancement(facts({ task: null })),
-    { case: "park-task", status: "REVIEW", failureReason: null },
   );
 });
 

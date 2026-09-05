@@ -1224,7 +1224,7 @@ export const completeRun = async (
           break;
         default: {
           const unhandled: never = advancement;
-          return unhandled;
+          throw new Error(`Run ${run.id} decided an unhandled completion advancement ${JSON.stringify(unhandled)}`);
         }
       }
       const activityBody = completionActivityBody(advancementFacts);

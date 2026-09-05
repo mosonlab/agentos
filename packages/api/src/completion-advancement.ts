@@ -17,12 +17,15 @@ export type CompletionAdvancementFacts = {
   /** The Step is the integrator's: its own outcome branch already advanced or
    *  stopped the chain from the merge result the executor persisted. */
   mechanical: boolean;
+  /** The Task row read with the fenced Run. `completeRun` throws before it
+   *  decides anything when a Run names a task the include did not carry, so
+   *  there is no absent-Task case to decide. */
   task: {
     templateId: string | null;
     chainId: string | null;
     approvalGate: boolean;
     regressionVerificationStep: boolean;
-  } | null;
+  };
   /** A failed completion that nevertheless published a qualified negative
    *  Regression verdict for this Run and head. */
   durableNegativeRegressionVerdict: boolean;
@@ -101,11 +104,11 @@ const parkFailureReason = (facts: CompletionAdvancementFacts): string | null => 
 
 export const completionAdvancement = (facts: CompletionAdvancementFacts): CompletionAdvancement => {
   const { task } = facts;
-  if (facts.durableNegativeRegressionVerdict && task?.templateId) {
+  if (facts.durableNegativeRegressionVerdict && task.templateId) {
     return { case: "repair-after-negative-regression" };
   }
   if (facts.succeeded && facts.mechanical) return { case: "mechanical-merge-already-recorded" };
-  if (facts.succeeded && task?.templateId) {
+  if (facts.succeeded && task.templateId) {
     if (facts.outputRefusal) return { case: "stop-with-output-refusal", reason: facts.outputRefusal };
     if (task.regressionVerificationStep) return { case: "settle-regression-verdict" };
     return {
@@ -114,7 +117,7 @@ export const completionAdvancement = (facts: CompletionAdvancementFacts): Comple
       mergeTailRecoverySourceRunId: facts.mergeTailRecoverySourceRunId,
     };
   }
-  if (facts.succeeded && task && (task.chainId || facts.mergeTailAuxiliary)) {
+  if (facts.succeeded && (task.chainId || facts.mergeTailAuxiliary)) {
     if (facts.mergeTailHandled) return { case: "merge-tail-settled" };
     if (task.approvalGate) return { case: "ask-approval-gate-question" };
     return {
@@ -146,7 +149,7 @@ export const completionActivityBody = (facts: CompletionAdvancementFacts): strin
     return `${run} failed after publishing a negative Regression verdict; repair queued`;
   }
   if (facts.outputRefusal) return `${run} succeeded but canonical task output was refused`;
-  if (facts.succeeded && (facts.task?.templateId || facts.task?.chainId || facts.mergeTailAuxiliary)) {
+  if (facts.succeeded && (facts.task.templateId || facts.task.chainId || facts.mergeTailAuxiliary)) {
     return `${run} succeeded; chain advanced or awaiting approval`;
   }
   if (facts.succeeded) return `${run} succeeded; task moved to review`;
