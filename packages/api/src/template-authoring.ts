@@ -64,13 +64,14 @@ export type TemplateAuthoringWarningCode =
   | "no_review_step"
   | "same_agent_implements_and_reviews"
   | "pull_request_without_regression"
-  | "staffing_profile_entry_dropped";
+  | "staffing_profile_entry_dropped"
+  | "staffing_profile_assignee_dropped";
 
 export type TemplateAuthoringWarning = {
   code: TemplateAuthoringWarningCode;
   message: string;
   stepIndex?: number;
-  /** Set only by `staffing_profile_entry_dropped`: the kind that was dropped. */
+  /** Set by the two staffing warnings: the output kind whose opinion changed. */
   outputKind?: string;
 };
 
@@ -610,12 +611,28 @@ export const replaceTemplateSteps = async (
 
   // Profiles point at output kinds, not step rows, so a replacement remaps
   // them by exact kind. An entry whose kind the new graph does not produce is
-  // dropped rather than reassigned, and the response says so: a silently
-  // re-pointed staffing decision is worse than a visible gap.
-  const droppedEntries = await remapStaffingProfiles(tx, {
+  // dropped rather than reassigned, and one the new graph no longer allows its
+  // Agent on loses that Agent; the response says so, because a silently
+  // re-pointed staffing decision is worse than a visible gap, and a saved
+  // profile no chain can instantiate is worse than both.
+  const replacementSteps = await tx.taskTemplateStep.findMany({
+    where: { taskTemplateId: templateId },
+    orderBy: { stepIndex: "asc" },
+    select: {
+      stepIndex: true,
+      name: true,
+      outputKind: true,
+      optional: true,
+      assigneeType: true,
+      assigneeAgentId: true,
+      runner: true,
+    },
+  });
+  const staffingLosses = await remapStaffingProfiles(tx, {
+    projectId,
     taskTemplateId: templateId,
-    outputKinds: normalizedSteps.map((step) => step.outputKind),
-    optionalOutputKinds: normalizedSteps.filter((step) => step.optional).map((step) => step.outputKind),
+    templateName: template.name,
+    steps: replacementSteps,
   });
 
   const savedTemplate = await tx.taskTemplate.findUniqueOrThrow({
@@ -631,11 +648,19 @@ export const replaceTemplateSteps = async (
     template: savedTemplate,
     warnings: [
       ...validation.warnings,
-      ...droppedEntries.map(({ profileName, outputKind }): TemplateAuthoringWarning => ({
-        code: "staffing_profile_entry_dropped",
-        message: `Staffing profile ${profileName} entry ${outputKind} was dropped: the replacement graph has no step producing it`,
-        outputKind,
-      })),
+      ...staffingLosses.map(({ kind, profileName, outputKind, reason }): TemplateAuthoringWarning => (
+        kind === "entry-dropped"
+          ? {
+            code: "staffing_profile_entry_dropped",
+            message: `Staffing profile ${profileName} entry ${outputKind} was dropped: ${reason}`,
+            outputKind,
+          }
+          : {
+            code: "staffing_profile_assignee_dropped",
+            message: `Staffing profile ${profileName} entry ${outputKind} lost its Agent: ${reason}`,
+            outputKind,
+          }
+      )),
     ],
   };
 });

@@ -464,12 +464,14 @@ test("replace remaps staffing entries by exact output kind and reports the orpha
     orderBy: { outputKind: "asc" },
   });
   // The surviving kinds keep their exact opinions; the orphan is gone rather
-  // than re-pointed at a step the operator never chose.
+  // than re-pointed at a step the operator never chose. `sol-findings` became
+  // optional in the replacement, so it gains the default opinion instead of
+  // staying an optional step the profile says nothing about (R3).
   assert.deepEqual(
     entries.map(({ outputKind, assigneeAgentId, include }) => ({ outputKind, assigneeAgentId, include })),
     [
       { outputKind: "implementation", assigneeAgentId: seed.agents[0]!.id, include: null },
-      { outputKind: "sol-findings", assigneeAgentId: seed.agents[1]!.id, include: null },
+      { outputKind: "sol-findings", assigneeAgentId: seed.agents[1]!.id, include: true },
     ],
   );
 });
@@ -514,5 +516,102 @@ test("replace clears an include flag from a step that stopped being optional", a
     (await db.staffingProfileEntry.findMany({ where: { profile: { taskTemplateId: seed.template.id } } }))
       .map(({ outputKind, include }) => ({ outputKind, include })),
     [{ outputKind: "sol-findings", include: null }],
+  );
+});
+
+test("replace clears a staffing opinion the new graph no longer allows", async () => {
+  const seed = await seedTemplate("replace-staffing-invalid");
+  await db.staffingProfile.create({
+    data: {
+      projectId: seed.project.id,
+      taskTemplateId: seed.template.id,
+      name: "Default",
+      isDefault: true,
+      entries: {
+        create: [
+          { outputKind: "implementation", assigneeAgentId: seed.agents[0]!.id, include: null },
+          { outputKind: "sol-findings", assigneeAgentId: seed.agents[1]!.id, include: null },
+        ],
+      },
+    },
+  });
+
+  // The review step becomes a human handover under the same output kind. The
+  // entry survives the remap by kind, but its Agent no longer belongs there:
+  // left alone it would refuse every instantiation of the default profile with
+  // `staffing_profile_step_not_agent`.
+  const result = await request(seed.project.id, seed.template.id, {
+    steps: [
+      replacementStep(seed),
+      {
+        name: "Human review",
+        assigneeType: AssigneeType.HUMAN,
+        assigneeAgentId: null,
+        prompt: "Review the implementation",
+        approvalGate: false,
+        optional: false,
+        attachmentsFromPrevious: true,
+        priorOutputKinds: ["implementation"],
+        spawnPolicy: null,
+        runner: null,
+        outputKind: "sol-findings",
+        opensPullRequest: false,
+        requiresCommit: false,
+        baseFromStepIndex: 1,
+        layer: 2,
+      },
+    ],
+  });
+
+  assert.equal(result.status, 200, JSON.stringify(result.body));
+  const dropped = result.body.warnings
+    .filter((warning: { code: string }) => warning.code === "staffing_profile_assignee_dropped");
+  assert.equal(dropped.length, 1, JSON.stringify(result.body.warnings));
+  assert.equal(dropped[0].outputKind, "sol-findings");
+  assert.match(dropped[0].message, /Staffing profile Default entry sol-findings lost its Agent/u);
+  assert.match(dropped[0].message, /only AGENT steps may be staffed/u);
+
+  assert.deepEqual(
+    (await db.staffingProfileEntry.findMany({
+      where: { profile: { taskTemplateId: seed.template.id } },
+      orderBy: { outputKind: "asc" },
+    })).map(({ outputKind, assigneeAgentId, include }) => ({ outputKind, assigneeAgentId, include })),
+    [
+      { outputKind: "implementation", assigneeAgentId: seed.agents[0]!.id, include: null },
+      { outputKind: "sol-findings", assigneeAgentId: null, include: null },
+    ],
+  );
+});
+
+test("replace clears a staffing opinion whose Agent was archived meanwhile", async () => {
+  const seed = await seedTemplate("replace-staffing-archived");
+  await db.staffingProfile.create({
+    data: {
+      projectId: seed.project.id,
+      taskTemplateId: seed.template.id,
+      name: "Default",
+      isDefault: true,
+      entries: { create: [{ outputKind: "implementation", assigneeAgentId: seed.agents[0]!.id, include: null }] },
+    },
+  });
+  await db.agent.update({ where: { id: seed.agents[0]!.id }, data: { archivedAt: new Date() } });
+
+  // The compound implementation-root rule is checked by the same predicate but
+  // cannot be reached from this route: a compound graph is canonical, and
+  // canonical templates refuse step replacement outright.
+  const result = await request(seed.project.id, seed.template.id, {
+    steps: [{ ...replacementStep(seed), assigneeAgentId: seed.agents[1]!.id }],
+  });
+
+  assert.equal(result.status, 200, JSON.stringify(result.body));
+  assert.deepEqual(
+    result.body.warnings.filter((warning: { code: string }) => warning.code === "staffing_profile_assignee_dropped")
+      .map(({ outputKind }: { outputKind: string }) => outputKind),
+    ["implementation"],
+  );
+  assert.deepEqual(
+    (await db.staffingProfileEntry.findMany({ where: { profile: { taskTemplateId: seed.template.id } } }))
+      .map(({ outputKind, assigneeAgentId }) => ({ outputKind, assigneeAgentId })),
+    [{ outputKind: "implementation", assigneeAgentId: null }],
   );
 });

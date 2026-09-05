@@ -134,6 +134,74 @@ export const compoundImplementationCapable = (
 };
 
 /**
+ * Whether one step may be staffed by one Agent, and why not.
+ *
+ * Stated once because two callers ask it: a profile write, which refuses, and
+ * the step-graph replacement sweep, which drops the opinion the new graph
+ * invalidated. `null` assignee means the profile states no opinion and the
+ * step's own binding stands, which is always allowed.
+ */
+export const staffingAssigneeRefusal = (
+  assigneeAgentId: string | null,
+  step: ValidationStep,
+  agents: ReadonlyMap<string, ValidationAgent>,
+  context: { projectId: string; templateName: string },
+): StaffingProfileRefusal | null => {
+  if (assigneeAgentId === null) return null;
+  if (step.assigneeType !== AssigneeType.AGENT) {
+    return refuse(
+      "staffing_profile_step_not_agent",
+      `Step ${step.name} (${step.outputKind}) has assigneeType ${step.assigneeType}; only AGENT steps may be staffed`,
+      step.outputKind,
+    );
+  }
+  const agent = agents.get(assigneeAgentId);
+  if (!agent || agent.projectId !== context.projectId) {
+    return refuse(
+      "staffing_profile_agent_not_found",
+      `Agent ${assigneeAgentId} for output kind ${step.outputKind} was not found in this project`,
+      step.outputKind,
+    );
+  }
+  if (agent.archivedAt !== null) {
+    return refuse(
+      "staffing_profile_agent_archived",
+      `Agent ${agent.name} for output kind ${step.outputKind} is archived`,
+      step.outputKind,
+    );
+  }
+  // Two-sided, as the platform predicate defines it: the sentinel binds
+  // only a merge-execution step, and a merge-execution step binds only the
+  // sentinel. Checked for every step the profile takes responsibility for,
+  // so neither half can be introduced one entry at a time.
+  const bindingRefusal = integratorBindingRefusal(agent.name, {
+    stepIndex: step.stepIndex,
+    outputKind: step.outputKind,
+    taskTemplateName: context.templateName,
+  });
+  if (bindingRefusal) {
+    return refuse(
+      "staffing_profile_integrator_binding",
+      `Step ${step.name} (${step.outputKind}): ${bindingRefusal}`,
+      step.outputKind,
+    );
+  }
+  const compoundRoot = isCompoundImplementationStep({
+    stepIndex: step.stepIndex,
+    outputKind: step.outputKind,
+    taskTemplate: { name: context.templateName },
+  });
+  if (compoundRoot && !compoundImplementationCapable(agent, step)) {
+    return refuse(
+      "staffing_profile_compound_implementation",
+      `Step ${step.name} (${step.outputKind}) is the compound implementation root and requires a Codex runner with a gpt-* model; ${agent.name} runs ${agent.model}`,
+      step.outputKind,
+    );
+  }
+  return null;
+};
+
+/**
  * Validate one profile's entries against a template graph and the Agent rows
  * already read under the Agent mutex. Pure: it opens no transaction and reads
  * nothing, so the caller decides what is locked before it runs.
@@ -169,68 +237,29 @@ export const validateStaffingEntries = (
       );
     }
     const assigneeAgentId = entry.assigneeAgentId ?? null;
-    const include = entry.include ?? null;
-
-    if (include !== null && !step.optional) {
+    // R3: a stored profile carries a boolean for every optional step and null
+    // for every other one. An entry that states no opinion about an optional
+    // step means "keep it", which is what instantiation does with no entry at
+    // all; stating one about a step the template does not mark optional is a
+    // refusal, because there is nothing for the flag to decide.
+    if (entry.include !== undefined && entry.include !== null && !step.optional) {
       throw refuse(
         "staffing_profile_include_not_optional",
         `Step ${step.name} (${entry.outputKind}) is not optional, so it cannot carry an include flag`,
         entry.outputKind,
       );
     }
-    if (assigneeAgentId !== null) {
-      if (step.assigneeType !== AssigneeType.AGENT) {
-        throw refuse(
-          "staffing_profile_step_not_agent",
-          `Step ${step.name} (${entry.outputKind}) has assigneeType ${step.assigneeType}; only AGENT steps may be staffed`,
-          entry.outputKind,
-        );
-      }
-      const agent = agents.get(assigneeAgentId);
-      if (!agent || agent.projectId !== context.projectId) {
-        throw refuse(
-          "staffing_profile_agent_not_found",
-          `Agent ${assigneeAgentId} for output kind ${entry.outputKind} was not found in this project`,
-          entry.outputKind,
-        );
-      }
-      if (agent.archivedAt !== null) {
-        throw refuse(
-          "staffing_profile_agent_archived",
-          `Agent ${agent.name} for output kind ${entry.outputKind} is archived`,
-          entry.outputKind,
-        );
-      }
-      // Two-sided, as the platform predicate defines it: the sentinel binds
-      // only a merge-execution step, and a merge-execution step binds only the
-      // sentinel. Checked for every step the profile takes responsibility for,
-      // so neither half can be introduced one entry at a time.
-      const bindingRefusal = integratorBindingRefusal(agent.name, {
-        stepIndex: step.stepIndex,
-        outputKind: step.outputKind,
-        taskTemplateName: context.templateName,
-      });
-      if (bindingRefusal) {
-        throw refuse(
-          "staffing_profile_integrator_binding",
-          `Step ${step.name} (${entry.outputKind}): ${bindingRefusal}`,
-          entry.outputKind,
-        );
-      }
-      const compoundRoot = isCompoundImplementationStep({
-        stepIndex: step.stepIndex,
-        outputKind: step.outputKind,
-        taskTemplate: { name: context.templateName },
-      });
-      if (compoundRoot && !compoundImplementationCapable(agent, step)) {
-        throw refuse(
-          "staffing_profile_compound_implementation",
-          `Step ${step.name} (${entry.outputKind}) is the compound implementation root and requires a Codex runner with a gpt-* model; ${agent.name} runs ${agent.model}`,
-          entry.outputKind,
-        );
-      }
-    }
+    const include = step.optional ? entry.include ?? true : null;
+    const assigneeRefusal = staffingAssigneeRefusal(assigneeAgentId, step, agents, context);
+    if (assigneeRefusal) throw assigneeRefusal;
     normalized.push({ outputKind: entry.outputKind, assigneeAgentId, include });
+  }
+
+  // Every optional step the caller did not name gets its default opinion here,
+  // so the saved profile is the whole plan rather than the part that was typed.
+  for (const step of steps) {
+    if (!step.optional || seen.has(step.outputKind)) continue;
+    normalized.push({ outputKind: step.outputKind, assigneeAgentId: null, include: true });
   }
 
   // A warning describes the plan being saved and never blocks it.
@@ -578,42 +607,98 @@ export const copyStaffingProfiles = async (
 };
 
 /**
+ * One opinion a step-graph replacement could not keep.
+ *
+ * `entry-dropped` names an entry whose output kind the new graph does not
+ * produce; `assignee-dropped` names an entry the new graph keeps but whose
+ * Agent it no longer allows there — the step became `HUMAN`, or the binding
+ * now violates the integrator or compound-root rule. Both are reported rather
+ * than refused: the operator is rewriting their own graph, and a saved profile
+ * that no chain can instantiate is worse than a visible gap.
+ */
+export type StaffingProfileRemapLoss = {
+  kind: "entry-dropped" | "assignee-dropped";
+  profileName: string;
+  outputKind: string;
+  reason: string;
+};
+
+/**
  * Remap every profile of a template after its step graph was replaced.
  *
  * Entries survive by exact output kind only — a replacement is an operator
  * rewriting the graph, not a protocol version moving underneath it — and an
- * entry with no surviving step is dropped rather than reassigned. Each drop is
- * returned as a warning so the replace response says what was lost.
+ * entry with no surviving step is dropped rather than reassigned.
+ *
+ * What survives is then validated against the new graph exactly as a profile
+ * write would be, and every optional step ends with a boolean `include` (R3).
+ * Without that, a replacement that turned a step HUMAN, or changed the
+ * compound implementation root, left the template's default profile saved but
+ * uninstantiable, and the operator only learned of it at the next chain.
  */
 export const remapStaffingProfiles = async (
   tx: Tx,
-  input: { taskTemplateId: string; outputKinds: readonly string[]; optionalOutputKinds: readonly string[] },
-): Promise<Array<{ profileName: string; outputKind: string }>> => {
-  const kinds = new Set(input.outputKinds);
-  const optional = new Set(input.optionalOutputKinds);
+  input: { projectId: string; taskTemplateId: string; templateName: string; steps: readonly ValidationStep[] },
+): Promise<StaffingProfileRemapLoss[]> => {
+  const stepsByKind = new Map(input.steps.map((step) => [step.outputKind, step]));
   const profiles = await tx.staffingProfile.findMany({
     where: { taskTemplateId: input.taskTemplateId },
     orderBy: { name: "asc" },
-    select: { id: true, name: true, entries: { select: { outputKind: true }, orderBy: { outputKind: "asc" } } },
+    select: {
+      id: true,
+      name: true,
+      entries: {
+        select: { outputKind: true, assigneeAgentId: true, include: true },
+        orderBy: { outputKind: "asc" },
+      },
+    },
   });
-  const dropped: Array<{ profileName: string; outputKind: string }> = [];
+  const assigneeIds = [...new Set(profiles.flatMap((profile) => profile.entries.flatMap((entry) => (
+    entry.assigneeAgentId === null ? [] : [entry.assigneeAgentId]
+  ))))].sort();
+  const agents = new Map((assigneeIds.length === 0
+    ? []
+    : await tx.agent.findMany({ where: { id: { in: assigneeIds } }, select: agentSelect })
+  ).map((agent) => [agent.id, agent]));
+
+  const losses: StaffingProfileRemapLoss[] = [];
   for (const profile of profiles) {
-    const orphans = profile.entries
-      .map((entry) => entry.outputKind)
-      .filter((outputKind) => !kinds.has(outputKind));
-    if (orphans.length > 0) {
-      await tx.staffingProfileEntry.deleteMany({
-        where: { profileId: profile.id, outputKind: { in: orphans } },
+    const entries: StaffingProfileEntryContract[] = [];
+    for (const entry of profile.entries) {
+      const step = stepsByKind.get(entry.outputKind);
+      if (!step) {
+        losses.push({
+          kind: "entry-dropped",
+          profileName: profile.name,
+          outputKind: entry.outputKind,
+          reason: "the replacement graph has no step producing it",
+        });
+        continue;
+      }
+      const refusal = staffingAssigneeRefusal(entry.assigneeAgentId, step, agents, {
+        projectId: input.projectId,
+        templateName: input.templateName,
       });
-      for (const outputKind of orphans) dropped.push({ profileName: profile.name, outputKind });
+      if (refusal) {
+        losses.push({
+          kind: "assignee-dropped",
+          profileName: profile.name,
+          outputKind: entry.outputKind,
+          reason: refusal.message,
+        });
+      }
+      entries.push({
+        outputKind: entry.outputKind,
+        assigneeAgentId: refusal ? null : entry.assigneeAgentId,
+        include: step.optional ? entry.include ?? true : null,
+      });
     }
-    // A step that stopped being optional cannot keep an include flag, and one
-    // that became optional has no opinion yet; both are corrected in place so
-    // the saved profile stays a valid one.
-    await tx.staffingProfileEntry.updateMany({
-      where: { profileId: profile.id, outputKind: { notIn: [...optional] }, include: { not: null } },
-      data: { include: null },
-    });
+    const named = new Set(entries.map((entry) => entry.outputKind));
+    for (const step of input.steps) {
+      if (!step.optional || named.has(step.outputKind)) continue;
+      entries.push({ outputKind: step.outputKind, assigneeAgentId: null, include: true });
+    }
+    await writeEntries(tx, profile.id, entries);
   }
-  return dropped;
+  return losses;
 };
