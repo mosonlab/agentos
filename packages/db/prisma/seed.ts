@@ -12,11 +12,14 @@ import {
   INTEGRATOR_AGENT_NAME,
   INTEGRATOR_OUTPUT_KIND,
   INTEGRATOR_TEMPLATE_NAME,
+} from "../src/merge-integrator.js";
+import {
   legacyHumanTwelveStepTemplateName,
   legacyNineStepTemplateName,
   legacyRegressionFirstThirteenStepTemplateName,
   legacyTenStepTemplateName,
-} from "../src/merge-integrator.js";
+  legacyHumanSixStepTemplateName,
+} from "../src/canonical-template-transition.js";
 import { loadAllTemplateStepSources } from "../src/template-sources.js";
 
 // The loader this seed used to carry moved to `packages/db/src/agent-sources.ts`
@@ -63,7 +66,7 @@ const historicalSeedLegacyName = (
     return existing.steps.length === 6
       && existing.steps[5]?.assigneeType === AssigneeType.HUMAN
       && existing.steps[5]?.outputKind === "approval"
-      ? `${templateName}-legacy-human-6-${existing.id}`
+      ? legacyHumanSixStepTemplateName(existing.id)
       : null;
   }
 

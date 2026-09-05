@@ -746,25 +746,22 @@ test("board cost preserves its estimate when cache creation is split from cached
   assert.equal(card.taskCost?.cacheCreationInputTokens, 50);
 });
 
-test("mixed-model native subagent Runs use the pinned Luna estimate", () => {
-  const card = boardCard(row({ runs: [{
-    id: "r1", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol:high", codexServiceTier: "DEFAULT", budgetGrants: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null,
+test("an observed native-child Run is estimated at its own root model", () => {
+  const cardFor = (model: string): ReturnType<typeof boardCard> => boardCard(row({ runs: [{
+    id: "r1", runNumber: 1, status: "SUCCEEDED", model, codexServiceTier: "DEFAULT", budgetGrants: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null,
     subagentModel: "gpt-5.6-luna:max",
     session: session({ nativeChildUsed: true, inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 100_000 }),
   }] }), null, moveContext);
-  assert.equal(card.taskCost?.costUsd, "0.32");
-  assert.equal(card.taskCost?.estimated, true);
-  assert.equal(card.taskCost?.inputTokens, 1_000_000);
-});
 
-test("a native subagent grant without an observed child uses the root estimate", () => {
-  const card = boardCard(row({ runs: [{
-    id: "r1", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol:high", codexServiceTier: "DEFAULT", budgetGrants: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null,
-    subagentModel: "gpt-5.6-luna:max",
-    session: session({ nativeChildUsed: false, inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 100_000 }),
-  }] }), null, moveContext);
-  assert.equal(card.taskCost?.costUsd, "8");
-  assert.equal(card.taskCost?.estimated, true);
+  // 1M uncached input and 100k output: $5 + $3 at Sol, $10 + $5 at Astra.
+  const sol = cardFor("gpt-5.6-sol:high");
+  assert.equal(sol.taskCost?.costUsd, "8");
+  assert.equal(sol.taskCost?.estimated, true);
+  assert.equal(sol.taskCost?.inputTokens, 1_000_000);
+
+  const astra = cardFor("gpt-6-astra:high");
+  assert.equal(astra.taskCost?.costUsd, "15");
+  assert.equal(astra.taskCost?.estimated, true);
 });
 
 test("the assignee carries the model spec the card shows", () => {

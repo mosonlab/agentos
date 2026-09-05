@@ -164,7 +164,7 @@ test("an aggregate board card carries the stranded salvage count from its member
 
 test("the hold pill and Resume follow the persisted hold, running or held", () => {
   const running = renderToStaticMarkup(<ChainAggregateCard aggregate={aggregate()} />);
-  assert.match(running, />Stop after current step<\/button>/u);
+  assert.match(running, />Hold<\/button>/u);
 
   const held = renderToStaticMarkup(<ChainAggregateCard aggregate={aggregate({
     activation: {
@@ -216,7 +216,7 @@ test("the card and the Doing column head offer Hold for exactly the same chains"
     const projection = aggregate({ activation, status: "DOING" });
     const card = renderToStaticMarkup(<ChainAggregateCard aggregate={projection} />);
     const head = holdColumn(boardEntries([chainStep("step-3", 3, "DOING", projection)]));
-    const onCard = offersButton(card, translate("en", activation.state === "running" ? "tasks.aggregate.stopAfter" : "tasks.aggregate.hold"));
+    const onCard = offersButton(card, translate("en", "tasks.aggregate.hold"));
     assert.equal(onCard, offered, `card, ${activation.state}`);
     assert.equal(offersButton(head, translate("en", "tasks.holdAll")), offered, `column head, ${activation.state}`);
   }

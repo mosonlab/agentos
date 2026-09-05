@@ -149,7 +149,7 @@ export const ChainAggregateCard = ({ aggregate, members = [], representativeTask
           data-chain-hold=""
           onClick={(event) => { event.stopPropagation(); handlers.onHold(controlAction.taskId); }}
         >
-          {t(state === "running" ? "tasks.aggregate.stopAfter" : "tasks.aggregate.hold")}
+          {t("tasks.aggregate.hold")}
         </Button>,
       ] : []),
       ...(controlAction?.kind === "resume" ? [

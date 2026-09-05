@@ -3072,7 +3072,7 @@ export const installStagedSystemdAutoDeploy = ({
     units: entries.map((entry) => entry.unit),
     entries: entries.map((entry) => entry.path),
   });
-  const systemctl = systemctlPath ?? systemdCommandPath("systemctl", null, execute);
+  const systemctl = systemdCommandPath("systemctl", systemctlPath, execute);
   for (const entry of entries) {
     recognizeInstalledEntry({ entry, reason: "systemd-auto-deploy" });
     if (!revert) assertStagedSource(entry);
