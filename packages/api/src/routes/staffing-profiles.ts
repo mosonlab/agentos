@@ -14,6 +14,7 @@ import {
   resetStaffingProfile,
   setStaffingProfileDefault,
 } from "../staffing-profiles.js";
+import { STAFFING_PROFILE_NAME_LIMIT } from "../templates.js";
 import {
   id,
   readJson,
@@ -27,7 +28,7 @@ const entryInput = z.object({
   include: z.boolean().nullable().optional(),
 }).strict();
 const entriesInput = z.array(entryInput).max(64);
-const profileName = z.string().trim().min(1).max(200);
+const profileName = z.string().trim().min(1).max(STAFFING_PROFILE_NAME_LIMIT);
 
 const createProfileInput = z.object({
   name: profileName,

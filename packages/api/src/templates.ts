@@ -109,11 +109,20 @@ export const findMalformedRouteLine = (description: string | undefined): string 
 
 const staffingProfileLine = /^Staffing: (.+)$/mu;
 
-/** Read the machine-readable staffing selection from a brief description. */
+/** The longest profile name `POST/PUT …/staffing-profiles` accepts. */
+export const STAFFING_PROFILE_NAME_LIMIT = 200;
+
+/**
+ * Read the machine-readable staffing selection from a brief description.
+ *
+ * The length bound is the profile API's own (200 characters): a name the
+ * operator was allowed to save must remain selectable, and a stricter parser
+ * would report a legitimate profile as a malformed line.
+ */
 export const parseStaffingProfileName = (description: string | undefined): string | null => {
   const value = description?.match(staffingProfileLine)?.[1];
   if (!value) return null;
-  return value.length <= 120 && value.trim() === value ? value : null;
+  return value.length <= STAFFING_PROFILE_NAME_LIMIT && value.trim() === value ? value : null;
 };
 
 /**

@@ -2,6 +2,7 @@ import { AssigneeType, CodexServiceTier, PrismaClient } from "@prisma/client";
 
 import { DIRECT_TEMPLATE_NAME, PR_TEMPLATE_NAME } from "../src/agent-contract.js";
 import { loadAgentSources } from "../src/agent-sources.js";
+import { findCanonicalAgent } from "../src/canonical-agent-lookup.js";
 import {
   applyCanonicalInstallation,
   planCanonicalInstallation,
@@ -129,12 +130,10 @@ const main = async (): Promise<void> => {
     // Canonical identity is `canonicalRole`, not `name`: the operator may rename
     // an Agent, and the seed still has to find the row it installed. A row that
     // predates the column is adopted by name once, on this pass.
-    const existing = await prisma.agent.findFirst({
-      where: {
-        projectId: project.id,
-        OR: [{ canonicalRole: role.canonicalRole }, { canonicalRole: null, name: role.name }],
-      },
-      select: { id: true, customizedFields: true },
+    const existing = await findCanonicalAgent(prisma, {
+      projectId: project.id,
+      canonicalRole: role.canonicalRole,
+      activeOnly: false,
     });
     const customized = new Set(existing?.customizedFields ?? []);
     const canonical = <T>(field: string, value: T): { [key: string]: T } | Record<string, never> => (

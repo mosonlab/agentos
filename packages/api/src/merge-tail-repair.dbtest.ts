@@ -48,6 +48,8 @@ type RegressionSeedOptions = {
   withLibrarianHistory?: boolean;
   templateName?: string;
   gateFailureExcerpt?: string;
+  /** Give the canonical conflict resolver an operator-chosen name, as R9 allows. */
+  renamedResolver?: boolean;
 };
 
 const seedRegression = async (options: RegressionSeedOptions = {}) => {
@@ -64,6 +66,13 @@ const seedRegression = async (options: RegressionSeedOptions = {}) => {
     makeAgent("code-reviewer-sol-high"), makeAgent("merge-resolver-opus-medium"), makeAgent("senior-dev-astra-medium"),
     makeAgent("review-coordinator-astra-medium"), makeAgent("librarian-luna-xhigh"),
   ]);
+  if (options.renamedResolver) {
+    await db.agent.update({ where: { id: resolverAgent.id }, data: {
+      canonicalRole: "merge-resolver-opus-medium",
+      name: "conflict-resolver",
+      customizedFields: ["name"],
+    } });
+  }
   const repo = await db.repo.create({ data: {
     projectId: project.id, name: "widgets", remoteUrl: "https://github.com/acme/widgets.git",
     mountPath: "/repo", defaultBranch: "main", dependencyProvisioning: DependencyProvisioning.NONE,
@@ -181,7 +190,7 @@ const seedRegression = async (options: RegressionSeedOptions = {}) => {
     runId: run.id, projectId: project.id, agentId: regressionAgent.id, taskId: regression.id,
     runner: "CODEX", executionStatus: "SUCCEEDED",
   } });
-  return { project, template, repo, regressionAgent, reviewAgent, readinessStep, regression, librarian, fix, run, session };
+  return { project, template, repo, regressionAgent, resolverAgent, reviewAgent, readinessStep, regression, librarian, fix, run, session };
 };
 
 const verdict = (outcome: RegressionOutcome, headSha: string = HEAD, gateFailureExcerpt?: string) => JSON.stringify(outcome === "refresh-conflict"
@@ -590,6 +599,22 @@ test("a refresh conflict creates exactly one resolver and its completion re-runs
   assert.equal(await db.$transaction((tx) => handleRegressionCompletion(tx, seeded.input)), "handled");
   assert.equal(await repairCount(seeded), 1);
   assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), 0);
+});
+
+test("a renamed canonical resolver still receives the refresh-conflict repair", async () => {
+  // R9: `canonicalRole` is the Agent's identity and `name` is the operator's
+  // label. Addressing the resolver by name meant a legitimate rename turned
+  // every refresh conflict into "required repair agent absent".
+  const seeded = await exercise("refresh-conflict", { renamedResolver: true });
+  const repair = await repairFor(seeded, "refresh-conflict");
+
+  assert.equal(repair.assigneeAgentId, seeded.resolverAgent.id);
+  const assignee = await db.agent.findUniqueOrThrow({ where: { id: repair.assigneeAgentId! } });
+  assert.equal(assignee.name, "conflict-resolver");
+  assert.equal(assignee.canonicalRole, "merge-resolver-opus-medium");
+  assert.equal(await db.inboxMessage.count({
+    where: { taskId: seeded.regression.id, body: { startsWith: "Autonomous merge tail stopped:" } },
+  }), 0);
 });
 
 test("a gate FAIL is repaired twice and the third FAIL escalates with both heads in activity", async () => {

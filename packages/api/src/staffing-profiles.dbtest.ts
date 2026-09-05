@@ -166,8 +166,10 @@ test("profiles are created, listed, replaced, reset and deleted", async () => {
   });
   assert.equal(replaced.status, 200, JSON.stringify(replaced.body));
   assert.equal(replaced.body.profile.name, "Renamed");
-  // Whole replacement: the omitted kinds lose their opinions.
+  // Whole replacement: the omitted kinds lose their opinions, except that the
+  // optional step keeps a boolean, because a profile always states one (R3).
   assert.deepEqual(replaced.body.profile.entries, [
+    { outputKind: "blind-findings", assigneeAgentId: null, include: true },
     { outputKind: "sol-findings", assigneeAgentId: fixture.reviewer.id, include: null },
   ]);
 
@@ -387,6 +389,47 @@ test("saving a profile waits on the Agent-row mutex archive takes", async () => 
   await holder;
   const saved = await save;
   assert.deepEqual(saved.profile.entries, [
+    { outputKind: "blind-findings", assigneeAgentId: null, include: true },
     { outputKind: "implementation", assigneeAgentId: fixture.implementer.id, include: null },
+  ]);
+});
+
+test("a stored profile carries a boolean include for every optional step", async () => {
+  const fixture = await seed();
+
+  // Nothing said about the optional step at all.
+  const silent = await createProfile(fixture, { name: "Silent", entries: minimalEntries(fixture) });
+  assert.equal(silent.status, 201, JSON.stringify(silent.body));
+  assert.deepEqual(silent.body.profile.entries, [
+    { outputKind: "blind-findings", assigneeAgentId: null, include: true },
+    { outputKind: "implementation", assigneeAgentId: fixture.implementer.id, include: null },
+  ]);
+
+  // Named, but with no opinion: staffing the step is not skipping it.
+  const staffed = await createProfile(fixture, {
+    name: "Staffed",
+    entries: [{ outputKind: "blind-findings", assigneeAgentId: fixture.reviewer.id }],
+  });
+  assert.equal(staffed.status, 201, JSON.stringify(staffed.body));
+  assert.deepEqual(staffed.body.profile.entries, [
+    { outputKind: "blind-findings", assigneeAgentId: fixture.reviewer.id, include: true },
+  ]);
+
+  // An explicit null is the same absence of an opinion, and a stated false survives.
+  const explicit = await createProfile(fixture, {
+    name: "Explicit",
+    entries: [{ outputKind: "blind-findings", include: null }],
+  });
+  assert.equal(explicit.status, 201, JSON.stringify(explicit.body));
+  assert.deepEqual(explicit.body.profile.entries, [
+    { outputKind: "blind-findings", assigneeAgentId: null, include: true },
+  ]);
+  const skipped = await call("PUT", `/staffing-profiles/${explicit.body.profile.id}`, {
+    name: "Explicit",
+    entries: [{ outputKind: "blind-findings", include: false }],
+  });
+  assert.equal(skipped.status, 200, JSON.stringify(skipped.body));
+  assert.deepEqual(skipped.body.profile.entries, [
+    { outputKind: "blind-findings", assigneeAgentId: null, include: false },
   ]);
 });

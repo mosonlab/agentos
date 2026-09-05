@@ -452,7 +452,7 @@ export const registerAgentsRoutes = (app: RouteApp, deps: RouteDeps): void => {
    */
   app.post("/agents/:agentId/duplicate", async (context) => {
     const agentId = id.parse(context.req.param("agentId"));
-    const body = await readJson(context.req.raw, z.object({ name: agentFields.name }));
+    const body = await readJson(context.req.raw, z.object({ name: agentFields.name }).strict());
     const result = await db.$transaction(async (tx) => {
       const source = await tx.agent.findUnique({
         where: { id: agentId },

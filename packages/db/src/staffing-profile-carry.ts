@@ -56,23 +56,40 @@ const dropLine = (drop: StaffingProfileCarryDrop): string => (
     : `Staffing profile ${drop.profileName}: entry ${drop.outputKind} dropped; the new graph has no step producing it`
 );
 
+/** One step of the graph a carry lands on: its kind, and whether the chain may
+ *  skip it. Optionality travels with the kind because it decides what an
+ *  entry's `include` may be. */
+export type StaffingProfileCarryTarget = Readonly<{ outputKind: string; optional: boolean }>;
+
 /**
  * Decide what each profile of a retired template row becomes on the new row.
  *
- * `targetOutputKinds` is the new graph's kinds, in step order. Entries that
- * match nothing are dropped and reported; profile names, default membership
- * and the surviving entries' opinions are carried unchanged.
+ * `targetSteps` is the new graph, in step order. Entries that match nothing are
+ * dropped and reported; profile names, default membership and the surviving
+ * entries' assignees are carried unchanged.
+ *
+ * `include` is carried against the *target's* optionality, not the source's
+ * (R3): a step that became optional gains the default opinion `true`, one that
+ * stopped being optional loses its flag, and every optional step of the new
+ * graph ends with a boolean even if the retired profile never named it.
  */
 export const planStaffingProfileCarry = (
   profiles: readonly StaffingProfileCarrySource[],
-  targetOutputKinds: readonly string[],
+  targetSteps: readonly StaffingProfileCarryTarget[],
 ): StaffingProfileCarryPlan => {
+  const targetOutputKinds = targetSteps.map((step) => step.outputKind);
+  const optionalTargets = new Set(targetSteps.filter((step) => step.optional).map((step) => step.outputKind));
   const targets = new Set(targetOutputKinds);
   const byBase = new Map<string, string[]>();
   for (const kind of targetOutputKinds) {
     const base = staffingOutputKindBase(kind);
     byBase.set(base, [...byBase.get(base) ?? [], kind]);
   }
+  const carryEntry = (entry: StaffingProfileCarryEntry, outputKind: string): StaffingProfileCarryEntry => ({
+    outputKind,
+    assigneeAgentId: entry.assigneeAgentId,
+    include: optionalTargets.has(outputKind) ? entry.include ?? true : null,
+  });
 
   const carried: StaffingProfileCarrySource[] = [];
   const dropped: StaffingProfileCarryDrop[] = [];
@@ -85,14 +102,14 @@ export const planStaffingProfileCarry = (
     );
     for (const entry of profile.entries) {
       if (targets.has(entry.outputKind)) {
-        entries.push({ ...entry });
+        entries.push(carryEntry(entry, entry.outputKind));
         continue;
       }
       const sameBase = byBase.get(staffingOutputKindBase(entry.outputKind)) ?? [];
       const candidates = sameBase.filter((kind) => !claimed.has(kind));
       if (candidates.length === 1) {
         claimed.add(candidates[0]!);
-        entries.push({ ...entry, outputKind: candidates[0]! });
+        entries.push(carryEntry(entry, candidates[0]!));
         continue;
       }
       dropped.push({
@@ -100,6 +117,11 @@ export const planStaffingProfileCarry = (
         outputKind: entry.outputKind,
         reason: sameBase.length === 0 ? "unknown-kind" : "ambiguous-kind",
       });
+    }
+    const named = new Set(entries.map((entry) => entry.outputKind));
+    for (const outputKind of optionalTargets) {
+      if (named.has(outputKind)) continue;
+      entries.push({ outputKind, assigneeAgentId: null, include: true });
     }
     carried.push({ name: profile.name, isDefault: profile.isDefault, entries });
   }

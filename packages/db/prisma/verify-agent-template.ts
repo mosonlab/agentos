@@ -38,6 +38,7 @@ type VerificationContext = {
 type AgentRow = {
   id: string;
   name: string;
+  canonicalRole: string | null;
   title: string;
   model: string;
   customizedFields: string[];
@@ -83,6 +84,16 @@ type TemplateRow = {
 };
 
 /**
+ * The Agent columns canonical sync adopts until the operator marks them, and
+ * therefore the columns whose difference from canonical Markdown is an
+ * operator decision rather than drift (R9). `name` is among them: an Agent may
+ * be renamed, which is why the verifier finds it by role.
+ */
+const CUSTOMIZABLE_AGENT_FIELDS: readonly string[] = ["name", "title", "model", "runnerPreference"];
+
+const isCustomizableAgentField = (field: string): boolean => CUSTOMIZABLE_AGENT_FIELDS.includes(field);
+
+/**
  * The compound implementation root is a capability, not a name: the step that
  * drives implementation from a plan must bind an Agent that runs on the Codex
  * runner with a `gpt-*` model. This is the same predicate Run open enforces, so
@@ -124,17 +135,29 @@ const verifyAgent = (
   foundationalPrompt: string,
   context: VerificationContext,
 ): void => {
-  const differences = roleSourceStructureDifferences(agent, expected);
-  const runtimeDifferences = differences.filter((difference) => difference === "model" || difference === "runnerPreference");
-  const structuralDifferences = differences.filter((difference) => difference !== "model" && difference !== "runnerPreference");
+  // `canonicalRole` is how this row was found, so comparing it here would only
+  // restate the lookup; a row that predates the column carries null and is
+  // still the role it was installed as. Everything else the Markdown owns is
+  // compared, and the four fields an operator may customize (R9) are drift
+  // only when `customizedFields` does not claim them.
+  const differences = roleSourceStructureDifferences({
+    name: agent.name,
+    title: agent.title,
+    model: agent.model,
+    runnerPreference: agent.runnerPreference,
+    inboxAccess: agent.inboxAccess,
+    collaborators: agent.collaborators,
+  }, expected);
+  const customizableDifferences = differences.filter((difference) => isCustomizableAgentField(difference));
+  const structuralDifferences = differences.filter((difference) => !isCustomizableAgentField(difference));
   if (structuralDifferences.length > 0) {
     throw new Error(scopedError(context, `${agentReference(context, agent)} differs from canonical Markdown structure: ${structuralDifferences.join(", ")}`));
   }
-  const unmarkedRuntimeDifferences = runtimeDifferences.filter(
+  const unmarkedDifferences = customizableDifferences.filter(
     (difference) => !agent.customizedFields.includes(difference),
   );
-  if (unmarkedRuntimeDifferences.length > 0) {
-    const message = `runtime ${unmarkedRuntimeDifferences.join("/")} differs from canonical defaults without an operator override`;
+  if (unmarkedDifferences.length > 0) {
+    const message = `${unmarkedDifferences.join("/")} differs from canonical defaults without an operator override`;
     throw new Error(scopedError(context, `${agentReference(context, agent)} ${message}`));
   }
   if (agent.foundationalPrompt !== foundationalPrompt) {
@@ -294,16 +317,25 @@ const main = async (): Promise<void> => {
 
   const partial = requestedProjectId !== null;
   const context: VerificationContext = { project, partial };
-  const expectedByName = new Map(agentSources.roles.map((agent) => [agent.name, agent]));
+  // Identity is the role, not the name: an operator may rename an Agent, and
+  // the row this verifier means is still the one installed from that role file.
+  // A row that predates the column carries its role in its name, and only while
+  // no row claims that role — otherwise the same-named row is somebody else's
+  // Agent that happens to collide with a freed canonical slug.
+  const expectedByRole = new Map(agentSources.roles.map((agent) => [agent.canonicalRole, agent]));
+  const canonicalRoles = [...expectedByRole.keys()];
   const activeAgents = await prisma.agent.findMany({
     where: {
       projectId: project.id,
       archivedAt: null,
-      ...(partial ? { name: { in: [...expectedByName.keys()] } } : {}),
+      ...(partial
+        ? { OR: [{ canonicalRole: { in: canonicalRoles } }, { canonicalRole: null, name: { in: canonicalRoles } }] }
+        : {}),
     },
     select: {
       id: true,
       name: true,
+      canonicalRole: true,
       title: true,
       model: true,
       customizedFields: true,
@@ -315,14 +347,26 @@ const main = async (): Promise<void> => {
     },
     orderBy: { name: "asc" },
   });
-  const actualNames = activeAgents.map((agent) => agent.name).sort();
-  const expectedNames = [...expectedByName.keys()].sort();
-  if (!partial && JSON.stringify(actualNames) !== JSON.stringify(expectedNames)) {
-    throw new Error(`active agents differ from canonical contract: expected ${expectedNames.join(", ")}; found ${actualNames.join(", ")}`);
+  const claimedRoles = new Set(activeAgents.flatMap((agent) => (
+    agent.canonicalRole === null ? [] : [agent.canonicalRole]
+  )));
+  const roleOf = (agent: AgentRow): string | null => (
+    agent.canonicalRole ?? (claimedRoles.has(agent.name) ? null : agent.name)
+  );
+  // The inventory comparison uses the row's own identity rather than the
+  // matched role, so a custom row squatting on a freed canonical name is a
+  // duplicate here instead of disappearing from the count.
+  const actualRoles = activeAgents.map((agent) => agent.canonicalRole ?? agent.name).sort();
+  const expectedRoles = [...canonicalRoles].sort();
+  if (!partial && JSON.stringify(actualRoles) !== JSON.stringify(expectedRoles)) {
+    throw new Error(`active agents differ from canonical contract: expected ${expectedRoles.join(", ")}; found ${actualRoles.join(", ")}`);
   }
-  for (const agent of activeAgents) {
-    const expected = expectedByName.get(agent.name);
-    if (!expected) continue;
+  const canonicalAgents = activeAgents.flatMap((agent) => {
+    const role = roleOf(agent);
+    const expected = role === null ? undefined : expectedByRole.get(role);
+    return expected === undefined ? [] : [{ agent, expected }];
+  });
+  for (const { agent, expected } of canonicalAgents) {
     verifyAgent(agent, expected, agentSources.foundationalPrompt, context);
   }
 
@@ -378,7 +422,7 @@ const main = async (): Promise<void> => {
   if (direct) verifyDirectSpecialChecks(direct, context);
 
   const stepCount = templates.reduce((sum, template) => sum + template.steps.length, 0);
-  process.stdout.write(`Agent/template contract verified for ${activeAgents.length} active agents and ${stepCount} steps across ${templates.length} templates.\n`);
+  process.stdout.write(`Agent/template contract verified for ${canonicalAgents.length} active agents and ${stepCount} steps across ${templates.length} templates.\n`);
 };
 
 try {

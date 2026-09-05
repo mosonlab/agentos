@@ -456,7 +456,8 @@ curl -X POST "$BASE_URL/agents/$AGENT_ID/unarchive" -H "Authorization: Bearer $O
 ### POST `/agents/:agentId/duplicate`
 
 - Required path parameter: `agentId`.
-- Required JSON field: `name`, unused in this project.
+- Required JSON field: `name`, the copy's Agent name; it must be free in the
+  project. Unknown fields are rejected with `400 Bad Request`.
 - Copies the setup, not the history: prompts, `model`, `runnerPreference`,
   `codexServiceTier`, `disabledTools`, `environmentId`, `inboxAccess`, the
   collaborators this Agent may talk to, and its repository, skill, MCP, secret and
@@ -1081,10 +1082,20 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/clone" 
   name an existing, non-archived Agent in the addressed project. Repo grants
   are not checked while authoring; the instantiation route checks the grant
   against its selected Repo. Warning codes are
-  `no_review_step`, `same_agent_implements_and_reviews`, and
-  `pull_request_without_regression`; warnings are non-blocking, describe the
+  `no_review_step`, `same_agent_implements_and_reviews`,
+  `pull_request_without_regression`, `staffing_profile_entry_dropped`, and
+  `staffing_profile_assignee_dropped`; warnings are non-blocking, describe the
   complete resulting graph, and are ephemeral (they are not persisted or
   returned by template reads).
+- This template's staffing profiles are remapped onto the replacement graph in
+  the same transaction. An entry survives by exact `outputKind`; one whose kind
+  the new graph does not produce is dropped
+  (`staffing_profile_entry_dropped`). A surviving entry is then revalidated
+  against the new step, and an Agent the new graph no longer allows there — the
+  step became `HUMAN`, or the binding would violate the merge-execution or
+  compound-implementation rule — is cleared
+  (`staffing_profile_assignee_dropped`). Both are reported rather than refused,
+  so a replacement never leaves a saved profile no chain can instantiate.
 
 ```sh
 curl -X PUT "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/steps" \
@@ -1210,8 +1221,17 @@ step rows' own bindings.
 Entries key on the step's exact `outputKind`. `foo` and `foo-v2` are different
 steps of a custom graph and therefore different entries; nothing is normalised
 on this surface. `assigneeAgentId` null means the profile has no opinion and
-the canonical binding stands. `include` is meaningful only for a step the
-template marks `optional` and must be `null` for every other step.
+the canonical binding stands.
+
+`include` is the profile's decision about an optional step, and a stored
+profile always carries a boolean for every step the template marks `optional`
+and `null` for every other step. A write may omit the flag, or the entry
+altogether: an optional step nobody stated an opinion about is stored as
+`include: true`, the same step the chain would run. Stating `include` on a step
+the template does not mark optional is refused. Create, replace, reset, a step
+graph replacement and a canonical rollover all leave the profile in this form,
+so a step that becomes optional gains the default opinion and one that stops
+being optional loses its flag.
 
 Every write takes the template row mutex and then the Agent-row mutex that
 archive and chain instantiation take, so a profile cannot be saved against an
@@ -1250,8 +1270,11 @@ curl "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/staffing-profil
 ### POST `/projects/:projectId/task-templates/:templateId/staffing-profiles`
 
 - Required path parameters: `projectId`, `templateId`.
-- Required JSON fields: `name` (trimmed, non-empty, at most 200 characters) and
-  `entries` (at most 64, each `{ "outputKind", "assigneeAgentId"?, "include"? }`).
+- Required JSON fields: `name` (trimmed, non-empty, at most 200 characters;
+  the same bound the `Staffing:` brief line accepts) and `entries` (at most 64,
+  each `{ "outputKind", "assigneeAgentId"?, "include"? }`). The saved entry list
+  is the submitted one plus an `include: true` entry for every optional step it
+  did not name.
 - Optional JSON field: `isDefault`. The first profile of a template is always
   its default regardless of this field; setting it on a later profile clears
   the previous default in the same transaction.
@@ -1271,7 +1294,8 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/staffin
 - Required path parameter: `profileId`.
 - Required JSON fields: `name` and `entries`. The entry list replaces the
   stored one whole; an omitted output kind loses its opinion rather than
-  keeping the previous one.
+  keeping the previous one, except that every optional step of the template is
+  still stored with a boolean `include`, defaulting to `true`.
 - Default membership is not part of this body; `PATCH` owns that transition.
 - Returns `200 OK` with `{ "profile": <profile>, "warnings": [...] }`.
 - Refusals: `404 Not Found` with code `staffing_profile_not_found`;
@@ -2089,8 +2113,10 @@ session and the `/runner/...` machine protocol are intentionally not listed:
 the authentication middleware denies those prefixes to the operator principal.
 The two revalidation routes below are session-only capabilities; they are
 listed here so their authorization boundary is explicit even though operators
-cannot call them directly. A `spec-revalidator-luna-xhigh` session on a bound direct chain
-is the only caller accepted.
+cannot call them directly. Authorization is keyed on the template step, not on
+the executing Agent: the caller must be the live Run of the bound direct
+chain's revalidation step (`direct-engineer-workflow` step 1, output kind
+`revalidation`), whichever Agent a staffing profile put there.
 
 The machine-only `/session/runs/:runId/status` projection is run-bound and is
 not an operator read route. Its `task.outputEvidence` is the server's decided
@@ -2181,10 +2207,10 @@ curl -X POST "$BASE_URL/runs/$RUN_ID/cancel" \
 
 - Session bearer authentication must name the same `runId` as the path.
 - Required JSON fields: `fencingToken`, `description`.
-- Only the bound chain's `spec-revalidator-luna-xhigh` Run may call this route. The
-  implementation task is derived server-side; no task ID or chain ID is
-  accepted. The fenced write replaces the brief while preserving the
-  platform-authored prompt and output instructions. The server rejects changes
+- Only the bound chain's revalidation-step Run may call this route, whichever
+  Agent staffs that step. The implementation task is derived server-side; no
+  task ID or chain ID is accepted. The fenced write replaces the brief while
+  preserving the platform-authored prompt and output instructions. The server rejects changes
   to Goal, Changes-item intent, Out of scope, Constraints, Acceptance, Route,
   or the section structure; only Background and code-shaped descriptive
   references inside Changes may drift with the tree.
@@ -2193,11 +2219,12 @@ curl -X POST "$BASE_URL/runs/$RUN_ID/cancel" \
 
 - Session bearer authentication must name the same `runId` as the path.
 - Required JSON field: `fencingToken`.
-- Only the bound chain's `spec-revalidator-luna-xhigh` Run may call this route, and only
-  after the same Run's premise-collapse Inbox question has an answered
-  `cancel-chain` decision. It records cancellation intent for the current Run,
-  parks every unfinished task in the bound chain, and revokes the session token;
-  the owning runner then performs provider cleanup and terminalization. A retry
+- Only the bound chain's revalidation-step Run may call this route, whichever
+  Agent staffs that step, and only after the same Run's premise-collapse Inbox
+  question has an answered `cancel-chain` decision. It records cancellation
+  intent for the current Run, parks every unfinished task in the bound chain,
+  and revokes the session token; the owning runner then performs provider
+  cleanup and terminalization. A retry
   with the same session token and fencing token replays the committed result
   without repeating chain or activity mutations; the revoked token remains
   unauthorized for every other session route.

@@ -83,7 +83,10 @@ export type TaskTemplate<DateTime = string> = {
  * `foo` and `foo-v2` are separate steps in a custom graph and therefore
  * separate entries. `assigneeAgentId` null means the profile has no opinion
  * and the canonical step binding stands. `include` is meaningful only for a
- * step the template marks optional and is null everywhere else.
+ * step the template marks optional and is null everywhere else; a stored
+ * profile carries a boolean for every optional step of its template, because a
+ * profile is the whole plan for the optional steps rather than the part an
+ * operator happened to type (R3).
  */
 export type StaffingProfileEntry = {
   outputKind: string;
@@ -107,7 +110,10 @@ export type StaffingProfile<DateTime = string> = {
 
 /** The entry shape a write accepts. Both opinion fields are optional so a
  *  caller can name a step without staffing it, or staff it without touching
- *  the include flag. */
+ *  the include flag. An omitted `include` on an optional step is stored as
+ *  `true` — the step is kept — and an optional step no entry names is stored
+ *  the same way; stating `include` on a step the template does not mark
+ *  optional is refused. */
 export type StaffingProfileEntryInput = {
   outputKind: string;
   assigneeAgentId?: string | null;
