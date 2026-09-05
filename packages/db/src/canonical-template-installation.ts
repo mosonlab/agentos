@@ -131,6 +131,7 @@ export const planCanonicalInstallation = (
   return plan;
 };
 
+/** Writes one canonical template row and its steps, and answers its id. */
 const writeCanonicalTemplate = async (
   tx: Prisma.TransactionClient,
   projectId: string,
@@ -138,7 +139,7 @@ const writeCanonicalTemplate = async (
   steps: readonly TemplateStepSource[],
   currentRowId: string | null = null,
   scopedError: (projectId: string, message: string) => Error = (_projectId, message) => new Error(message),
-): Promise<void> => {
+): Promise<string> => {
   const metadata = canonicalTemplateSourceSpec(templateName);
   const template = currentRowId === null
     ? await tx.taskTemplate.create({
@@ -182,6 +183,7 @@ const writeCanonicalTemplate = async (
       create: { taskTemplateId: template.id, stepIndex: step.stepIndex, ...data },
     });
   }
+  return template.id;
 };
 
 /** Apply one precomputed plan inside the caller's transaction. */
@@ -255,7 +257,22 @@ export const applyCanonicalInstallation = async (
       }
       await tx.taskTemplate.update({ where: { id: action.rowId }, data: { name: action.legacyName } });
     }
-    await writeCanonicalTemplate(tx, action.projectId, action.templateName, sourceSteps, null, scopedError);
+    const installedTemplateId = await writeCanonicalTemplate(
+      tx,
+      action.projectId,
+      action.templateName,
+      sourceSteps,
+      null,
+      scopedError,
+    );
+    if (action.kind === "rollover") {
+      // TODO-for-integrator: staffing profiles follow the graph across a
+      // rollover. Call L1's carry helper here, where both row ids are known:
+      //   await carryStaffingProfiles(tx, action.rowId, installedTemplateId);
+      // imported from "./staffing-profile-carry.js"; the helper is absent on
+      // this lane's branch.
+      void installedTemplateId;
+    }
     created += 1;
   }
   return { created };
