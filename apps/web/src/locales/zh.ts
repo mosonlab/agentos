@@ -539,7 +539,6 @@ export const zh = {
   "projects.details.mergeGateDefault": "合并前需要审批",
   "projects.details.minutes": "{n} 分钟",
   "projects.details.noSpendCap": "—（订阅制 runner，DECISIONS #12）",
-  "projects.details.skipOptionalSteps": "跳过可选模板步骤",
   "projects.details.slug": "Slug",
   "projects.details.specGateDefault": "规格完成后需要审批",
   "projects.details.spendCap": "花费上限",

@@ -542,7 +542,6 @@ export const en = {
   "projects.details.mergeGateDefault": "Require approval before merge",
   "projects.details.minutes": "{n} min",
   "projects.details.noSpendCap": "— (subscription runners, DECISIONS #12)",
-  "projects.details.skipOptionalSteps": "Skip optional template steps",
   "projects.details.slug": "Slug",
   "projects.details.specGateDefault": "Require approval after specification",
   "projects.details.spendCap": "Spend cap",

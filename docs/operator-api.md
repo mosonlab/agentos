@@ -163,16 +163,13 @@ curl "$BASE_URL/projects" -H "Authorization: Bearer $OPERATOR_TOKEN"
 
 - Required JSON fields: `name`, `slug` (lowercase hyphenated form).
 - Optional JSON field: `yamlDocument` (default `""`).
-- `skipOptionalSteps` is not a create input; a newly created Project uses its
-  database default of `false`.
 - A successful request creates the Project and, in the same transaction, one
   `local` Environment with `networking` `OPEN` and `allowedHosts` `[]`, four
   Agents (`senior-dev-luna-max`, `code-reviewer-sol-high`,
   `code-reviewer-opus-high`, and `senior-dev-astra-low`) bound to that Environment, and
   the canonical `pr-engineer-workflow` TaskTemplate with its four steps.
-  The returned Project read shape includes `specGateDefault`,
-  `mergeGateDefault`, and `skipOptionalSteps`, all `false` for a newly created
-  project.
+  The returned Project read shape includes `specGateDefault` and
+  `mergeGateDefault`, both `false` for a newly created project.
 - A duplicate slug returns `409 Conflict` with code `project-slug-taken`.
 
 ```sh
@@ -185,9 +182,9 @@ curl -X POST "$BASE_URL/projects" \
 
 - Required path parameter: `projectId`.
 - The Project read shape includes the independent boolean fields
-  `specGateDefault`, `mergeGateDefault`, and `skipOptionalSteps`. All three are
-  `false` for a newly created project and are returned by this route,
-  `GET /projects`, and the project PATCH response.
+  `specGateDefault` and `mergeGateDefault`. Both are `false` for a newly created
+  project and are returned by this route, `GET /projects`, and the project PATCH
+  response.
 
 ```sh
 curl "$BASE_URL/projects/$PROJECT_ID" -H "Authorization: Bearer $OPERATOR_TOKEN"
@@ -197,11 +194,14 @@ curl "$BASE_URL/projects/$PROJECT_ID" -H "Authorization: Bearer $OPERATOR_TOKEN"
 
 - Required path parameter: `projectId`.
 - Required JSON: at least one of `name`, `slug`, `yamlDocument`,
-  `specGateDefault`, `mergeGateDefault`, or `skipOptionalSteps`.
-- `specGateDefault`, `mergeGateDefault`, and `skipOptionalSteps` are optional
-  booleans. Omission preserves the stored value, and changing one does not
-  change either of the others. The response is the complete Project read
-  shape, including all three settings.
+  `specGateDefault`, or `mergeGateDefault`.
+- `specGateDefault` and `mergeGateDefault` are optional booleans. Omission
+  preserves the stored value, and changing one does not change the other. The
+  response is the complete Project read shape, including both settings.
+- The request schema is strict: a body carrying any other key, including the
+  retired `skipOptionalSteps` switch, returns `400 Bad Request` and writes
+  nothing. Optional-step omission is now a staffing decision made per
+  instantiation.
 
 ```sh
 curl -X PATCH "$BASE_URL/projects/$PROJECT_ID" \
@@ -1121,8 +1121,9 @@ curl -X PATCH "$BASE_URL/task-templates/$TEMPLATE_ID" \
   must not be blank), and `name` (the chain's title; constraints and refusal
   codes below).
 - Optional JSON fields: `autoStart` (default `false`), `afterTaskId`,
-  `description`, `stepOverrides` (map of positive step indexes to
-  `{assigneeAgentId}`), and `gates` (a strict object with optional boolean
+  `description`, `stepOverrides` (map of positive step indexes to a strict
+  object carrying `assigneeAgentId`, `include`, or both — at least one),
+  `staffingProfileId`, and `gates` (a strict object with optional boolean
   fields `spec` and `merge`). `afterTaskId` cannot be combined with
   `autoStart:true`.
 - A missing, blank, or whitespace-only `name` returns `400 Bad Request` with
@@ -1138,12 +1139,38 @@ curl -X PATCH "$BASE_URL/task-templates/$TEMPLATE_ID" \
   Every other step keeps its template frontmatter value. The resolved values
   are persisted on the created tasks; later project-default changes do not
   change an existing Chain.
-- When the addressed project's `skipOptionalSteps` is `true`, optional template
-  steps are omitted. This omission is resolved once at instantiation; a later
-  change to the project setting does not alter an existing Chain. Retained
-  steps keep their template `stepIndex`, so the resulting Chain's `chainIndex`
-  values may be sparse. If no instantiable step remains, the request is refused
-  with `400 Bad Request` and code `template_has_no_instantiable_steps`.
+- Each step's assignee resolves in exactly this order: the `stepOverrides`
+  entry for that step index, then the selected staffing profile's entry for the
+  step's exact `outputKind`, then the template step's own `assigneeAgentId`.
+  Whether a step the template marks `optional` is instantiated resolves in the
+  same order: the override's `include`, then the profile entry's `include`,
+  then inclusion. An `include` naming a step the template does not mark
+  optional returns `400 Bad Request` with code
+  `step_override_include_not_optional`.
+- The staffing profile is selected by `staffingProfileId`, by a
+  `Staffing: <profile name>` line in `description`, or, when neither is given,
+  by the template's default profile. A template with no profiles is staffed
+  entirely from its canonical bindings. An id that is not a profile of this
+  template and a name no profile of this template has both return
+  `400 Bad Request` with code `staffing_profile_not_found`; a `Staffing`-shaped
+  line that does not match the grammar returns
+  `staffing_profile_line_malformed`; an id and a line selecting different
+  profiles returns `staffing_profile_conflicts_with_selection`. A profile whose
+  agent is archived, belongs to another project, is missing, binds a non-agent
+  step, violates the integrator or compound-implementation binding, or lacks a
+  grant for the addressed Repo is refused under its own code
+  (`staffing_profile_agent_archived`, `staffing_profile_agent_foreign`,
+  `staffing_profile_agent_not_found`, `staffing_profile_step_not_agent`,
+  `staffing_profile_integrator_binding`,
+  `staffing_profile_compound_implementation`,
+  `staffing_profile_missing_repo_grant`), never under the template's.
+- An omitted optional step is resolved once, at instantiation: the chain has no
+  task for it and no later change to any profile alters an existing Chain. The
+  chain root's activity metadata records `staffingProfileId` and
+  `staffingProfileName` when a profile was used. Retained steps keep their
+  template `stepIndex`, so the resulting Chain's `chainIndex` values may be
+  sparse. If no instantiable step remains, the request is refused with
+  `400 Bad Request` and code `template_has_no_instantiable_steps`.
 - A supplied `gates.spec` for a template without a specification step returns
   `400 Bad Request` with code `gates_spec_step_absent`; a supplied `gates.merge`
   for a template without a merge readiness step returns `400 Bad Request` with
@@ -1159,7 +1186,9 @@ curl -X PATCH "$BASE_URL/task-templates/$TEMPLATE_ID" \
   configured assignee; remove the line or use `stepOverrides` to assign that
   template. On `direct-engineer-workflow`, a route-shaped line that does not
   match the grammar returns `implementation_route_malformed`. Other templates
-  do not parse malformed Route-looking prose.
+  do not parse malformed Route-looking prose. The Route line conflicts with an
+  explicit `stepOverrides` assignee for the implementation step, never with the
+  selected staffing profile, which it simply outranks for that step.
 - An `afterTaskId` binding is released only by `DELETE /tasks/:taskId/chain`
   on the bound chain; archiving the bound chain does not release it.
 

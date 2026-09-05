@@ -286,9 +286,12 @@ const createParallelReviewHarness = ({
 
   const instantiateOptionalDirect = async (brief = SPECIFICATION_BRIEF): Promise<OptionalDirectFixture> => {
     const installation = await canonicalInstallation();
-    await getDb().project.update({
-      where: { id: installation.projectId },
-      data: { skipOptionalSteps: true },
+    // Optional-step omission is a per-instantiation staffing decision now, so
+    // the fixture excludes the step it wants absent instead of switching a
+    // project-wide setting.
+    const optionalStep = await getDb().taskTemplateStep.findFirstOrThrow({
+      where: { taskTemplateId: installation.directTemplateId, optional: true },
+      select: { stepIndex: true },
     });
     const branchName = `parallel/optional-${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
     const chain = await instantiateTemplate(getDb(), installation.projectId, installation.directTemplateId, {
@@ -297,6 +300,7 @@ const createParallelReviewHarness = ({
       name: "parallel optional direct",
       description: brief,
       autoStart: true,
+      stepOverrides: { [String(optionalStep.stepIndex)]: { include: false } },
     });
     const { taskFor, omits } = await chainTasks(installation.directTemplateId, chain.tasks);
     assert.equal(chain.tasks.length, 6);
