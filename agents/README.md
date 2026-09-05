@@ -119,9 +119,11 @@ contracts live in their Markdown directories under `templates/`.
 
 Provider-specific or temporary roles are not canonical defaults unless the
 cross-provider review contract explicitly requires separate identities.
-`senior-dev-sol` is canonical rather than an experiment because it is the
-explicit fallback implementation tier named by the implementation-assignee
-routing rules in `docs/governance/task-routing-v1.md`. Keep
+`senior-dev-sol` and `senior-dev-opus` are canonical rather than experiments
+because they are the explicit implementation tiers named by the
+implementation-assignee routing rules in `docs/governance/task-routing-v1.md`:
+the Sol fallback when the senior-dev model is unavailable, and the Claude
+Opus 5 medium route an operator names to spend Claude capacity. Keep
 experiments out of `roles/`; create them as local overlays and archive them
 when no longer needed so a seed cannot silently turn an experiment into a
 release default. Implementation-assignee escalation follows the
