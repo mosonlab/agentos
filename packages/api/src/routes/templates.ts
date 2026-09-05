@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 
 import {
   AssigneeType,
+  canonicalTemplateIdentity,
   Prisma,
   RunnerKind,
   SecretPurpose,
@@ -112,6 +113,19 @@ type TriggerResponse = SerializesTo<TriggerContract<Date>, TriggerContract>;
 type TriggerDetailResponse = SerializesTo<TriggerDetailContract<Date>, TriggerDetailContract>;
 type TriggerFireResponse = SerializesTo<TriggerFireContract<Date>, TriggerFireContract>;
 
+/**
+ * Whether a listed template is a retired canonical generation, derived at read
+ * time and never stored.
+ *
+ * Canonical sync renames a retired graph rather than deleting it, so the row
+ * keeps its chains' history and the console has no other way to tell the two
+ * apart. `canonicalTemplateIdentity` answers a generation marker only for such
+ * a renamed row: the current canonical name resolves to `generation: null`, and
+ * an operator's own clone resolves to no identity at all. Both are current.
+ */
+const isRetiredTemplate = (name: string): boolean =>
+  canonicalTemplateIdentity(name)?.generation != null;
+
 export const registerTemplateRoutes = (app: RouteApp, { db }: RouteDeps): (() => void) => {
   app.use("/hooks/templates/:templateId", bodyLimit({
     maxSize: 1024 * 1024,
@@ -163,17 +177,22 @@ export const registerTemplateRoutes = (app: RouteApp, { db }: RouteDeps): (() =>
   // template and trigger routes so app.ts can register them after /goals and
   // preserve the ordered route table asserted by app-routes.test.ts.
   return (): void => {
-    app.get("/projects/:projectId/task-templates", async (context) => context.json(await db.taskTemplate.findMany({
-      where: { projectId: id.parse(context.req.param("projectId")) },
-      include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
-      orderBy: { createdAt: "asc" },
-    })));
+    app.get("/projects/:projectId/task-templates", async (context) => {
+      const templates = await db.taskTemplate.findMany({
+        where: { projectId: id.parse(context.req.param("projectId")) },
+        include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
+        orderBy: { createdAt: "asc" },
+      });
+      return context.json(templates.map((template) => ({ ...template, retired: isRetiredTemplate(template.name) })));
+    });
     app.get("/task-templates/:templateId", async (context) => {
       const template = await db.taskTemplate.findUnique({
         where: { id: id.parse(context.req.param("templateId")) },
         include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
       });
-      return template ? context.json(template) : context.json({ error: "Template not found" }, 404);
+      return template
+        ? context.json({ ...template, retired: isRetiredTemplate(template.name) })
+        : context.json({ error: "Template not found" }, 404);
     });
     app.post("/projects/:projectId/task-templates/:templateId/clone", async (context) => {
       const projectId = id.parse(context.req.param("projectId"));

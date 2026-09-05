@@ -56,6 +56,7 @@ const template: TaskTemplate = {
   name: "Delivery",
   description: "",
   variables: [],
+  retired: false,
   steps: [
     step(1, "Implementation", "implementation", { assigneeAgentId: implementer.id, assigneeAgent: implementer }),
     step(2, "Review", "review", { optional: true, assigneeAgentId: reviewer.id, assigneeAgent: reviewer }),

@@ -99,15 +99,54 @@ const seedOf = (profile: StaffingProfile): string =>
 
 /* ------------------------------------------------------------ template list */
 
+/** The rows the list may render. A read that landed with something else is a
+ *  failure the operator must see: rendering the readable part of an unknown
+ *  shape would silently claim the project has fewer templates than it has. */
+const isTemplateList = (value: unknown): value is TaskTemplate[] =>
+  Array.isArray(value) && value.every((row) =>
+    typeof row === "object" && row !== null
+    && typeof (row as TaskTemplate).id === "string"
+    && typeof (row as TaskTemplate).name === "string"
+    && typeof (row as TaskTemplate).retired === "boolean"
+    && Array.isArray((row as TaskTemplate).steps));
+
+/** Current templates first and by name, retired generations after them in the
+ *  order the control plane listed them. Retirement is the API's `retired`
+ *  field and never a guess from the name: the console does not own that rule. */
+export const partitionTemplates = (templates: TaskTemplate[]): { current: TaskTemplate[]; retired: TaskTemplate[] } => ({
+  current: templates.filter((template) => !template.retired)
+    .sort((left, right) => left.name.localeCompare(right.name)),
+  retired: templates.filter((template) => template.retired),
+});
+
+const TemplateRow = ({ template }: { template: TaskTemplate }): ReactNode => {
+  const t = useT();
+  return (
+    <TableRow data-template-row={template.id} className="cursor-pointer" onClick={(event) => {
+      if (!event.defaultPrevented) navigate(`/workflows/${template.id}`);
+    }}>
+      <TableCell className={TABLE_NAME}>
+        <Link to={`/workflows/${template.id}`}>{template.name}</Link>
+        <span className={cn(TABLE_SUB, "block max-w-[420px] overflow-hidden text-ellipsis")}>{template.description}</span>
+      </TableCell>
+      <TableCell>{t("workflows.template.steps", { n: template.steps.length })}</TableCell>
+    </TableRow>
+  );
+};
+
 export const WorkflowsPage = (): ReactNode => {
   const { projectId } = useProjectScope();
   const { data, loading, error, reload } = usePoll<TaskTemplate[]>(
     projectId === "" ? null : `/projects/${projectId}/task-templates`, 30_000,
   );
+  /* Collapsed on every visit by design: the group is history, and the three
+     canonical chains are what an operator came for. */
+  const [showRetired, setShowRetired] = useState(false);
   const t = useT();
 
   if (projectId === "") return <Page><EmptyState>{t("common.selectProject")}</EmptyState></Page>;
-  const templates = data ?? [];
+  const malformed = data !== null && !isTemplateList(data);
+  const { current, retired } = partitionTemplates(malformed ? [] : data ?? []);
 
   return (
     <Page className="text-foreground">
@@ -120,35 +159,40 @@ export const WorkflowsPage = (): ReactNode => {
 
       <div className={STACK}>
         {fatal(error, data) ? <ErrorNotice message={`${error!.status} ${error!.message}`} onRetry={reload} /> : null}
-        <Card flush>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>{t("workflows.table.template")}</TableHead>
-                <TableHead>{t("workflows.table.steps")}</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {templates.map((template) => (
-                <TableRow key={template.id} className="cursor-pointer" onClick={(event) => {
-                  if (!event.defaultPrevented) navigate(`/workflows/${template.id}`);
-                }}>
-                  <TableCell className={TABLE_NAME}>
-                    <Link to={`/workflows/${template.id}`}>{template.name}</Link>
-                    <span className={cn(TABLE_SUB, "block max-w-[420px] overflow-hidden text-ellipsis")}>{template.description}</span>
-                  </TableCell>
-                  <TableCell>{t("workflows.template.steps", { n: template.steps.length })}</TableCell>
+        {malformed ? <ErrorNotice message={t("workflows.error.shape")} onRetry={reload} /> : null}
+        {malformed ? null : (
+          <Card flush>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>{t("workflows.table.template")}</TableHead>
+                  <TableHead>{t("workflows.table.steps")}</TableHead>
                 </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-          {templates.length === 0 ? (
-            <EmptyState>
-              <span className="mb-[10px] inline-flex text-[color:var(--faint)]"><IconWorkflows /></span>
-              <div>{t(loading ? "common.loading" : "workflows.templates.empty")}</div>
-            </EmptyState>
-          ) : null}
-        </Card>
+              </TableHeader>
+              <TableBody>
+                {current.map((template) => <TemplateRow key={template.id} template={template} />)}
+                {retired.length === 0 ? null : (
+                  <TableRow>
+                    <TableCell colSpan={2} className="p-0">
+                      <button type="button" data-retired-toggle aria-expanded={showRetired}
+                        className="w-full px-[14px] py-[10px] text-left text-[color:var(--muted)] hover:text-foreground"
+                        onClick={() => setShowRetired(!showRetired)}>
+                        {t("workflows.retired.group", { n: retired.length })}
+                      </button>
+                    </TableCell>
+                  </TableRow>
+                )}
+                {showRetired ? retired.map((template) => <TemplateRow key={template.id} template={template} />) : null}
+              </TableBody>
+            </Table>
+            {current.length === 0 && retired.length === 0 ? (
+              <EmptyState>
+                <span className="mb-[10px] inline-flex text-[color:var(--faint)]"><IconWorkflows /></span>
+                <div>{t(loading ? "common.loading" : "workflows.templates.empty")}</div>
+              </EmptyState>
+            ) : null}
+          </Card>
+        )}
       </div>
     </Page>
   );
