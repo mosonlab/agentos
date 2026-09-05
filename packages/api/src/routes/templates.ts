@@ -20,6 +20,7 @@ import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 
 import { chainKey, chainProgressByChain } from "../chain.js";
+import { templateStepExecutionOwner } from "../chain-execution-owner.js";
 import { isValidBranchName } from "../branch-name.js";
 import { authenticateWebhook, resolvePayloadVariables, usableDefault } from "../hooks.js";
 import { cloneTemplate, replaceTemplateSteps } from "../template-authoring.js";
@@ -126,6 +127,23 @@ type TriggerFireResponse = SerializesTo<TriggerFireContract<Date>, TriggerFireCo
 const isRetiredTemplate = (name: string): boolean =>
   legacyGenerationMarkerForTemplateName(name) !== null;
 
+/**
+ * One template row as both read routes answer it: the derived `retired` flag,
+ * and `executionOwner` on every step.
+ *
+ * The owner is computed here rather than left to the reader, because a step's
+ * assignee binding does not answer it — the merge-readiness step binds an Agent
+ * only so its task row has an assignee, and the control plane executes it. The
+ * console staffs from this field alone.
+ */
+const readTemplate = <Step extends { stepIndex: number; outputKind: string; assigneeType: AssigneeType }>(
+  template: { name: string; steps: Step[] },
+): typeof template & { retired: boolean; steps: Array<Step & { executionOwner: ReturnType<typeof templateStepExecutionOwner> }> } => ({
+  ...template,
+  retired: isRetiredTemplate(template.name),
+  steps: template.steps.map((step) => ({ ...step, executionOwner: templateStepExecutionOwner(step) })),
+});
+
 export const registerTemplateRoutes = (app: RouteApp, { db }: RouteDeps): (() => void) => {
   app.use("/hooks/templates/:templateId", bodyLimit({
     maxSize: 1024 * 1024,
@@ -183,7 +201,7 @@ export const registerTemplateRoutes = (app: RouteApp, { db }: RouteDeps): (() =>
         include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
         orderBy: { createdAt: "asc" },
       });
-      return context.json(templates.map((template) => ({ ...template, retired: isRetiredTemplate(template.name) })));
+      return context.json(templates.map(readTemplate));
     });
     app.get("/task-templates/:templateId", async (context) => {
       const template = await db.taskTemplate.findUnique({
@@ -191,7 +209,7 @@ export const registerTemplateRoutes = (app: RouteApp, { db }: RouteDeps): (() =>
         include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
       });
       return template
-        ? context.json({ ...template, retired: isRetiredTemplate(template.name) })
+        ? context.json(readTemplate(template))
         : context.json({ error: "Template not found" }, 404);
     });
     app.post("/projects/:projectId/task-templates/:templateId/clone", async (context) => {

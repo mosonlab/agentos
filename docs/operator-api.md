@@ -1030,6 +1030,13 @@ unreadable read-back, body mismatch, failed cleanup, or retained tracked
   history. A current canonical template and an operator's own clone are both
   false. The field is derived from the row's name at read time and never
   stored.
+- Every step carries `executionOwner`, one of `agent`, `human`,
+  `control-plane`, or `merge-executor`, computed by the API from the step
+  itself. It is the same rule chain rows answer with, and it is the only field
+  that says who runs a step: a `control-plane` step (the merge-readiness step)
+  and a `merge-executor` step both bind an Agent so their task rows have an
+  assignee, and neither is executed by that Agent. Staffing surfaces read this
+  field rather than matching output kinds or step names.
 
 ```sh
 curl "$BASE_URL/projects/$PROJECT_ID/task-templates" -H "Authorization: Bearer $OPERATOR_TOKEN"
@@ -1113,8 +1120,8 @@ curl -X PUT "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/steps" \
 ### GET `/task-templates/:templateId`
 
 - Required path parameter: `templateId`.
-- Carries the same derived `retired` field as
-  `GET /projects/:projectId/task-templates`.
+- Carries the same derived `retired` field and the same per-step
+  `executionOwner` field as `GET /projects/:projectId/task-templates`.
 
 ```sh
 curl "$BASE_URL/task-templates/$TEMPLATE_ID" -H "Authorization: Bearer $OPERATOR_TOKEN"
@@ -1253,12 +1260,21 @@ Validation refusals, in the order they are applied per entry:
 `staffing_profile_unknown_output_kind` (the template has no step producing it),
 `staffing_profile_include_not_optional` (an include flag on a step the template
 does not mark optional), `staffing_profile_step_not_agent` (staffing a `HUMAN`
-step), `staffing_profile_agent_not_found` (no such Agent in this project),
+step), `staffing_profile_step_control_plane` (staffing a step whose
+`executionOwner` is `control-plane`, which the control plane runs and no Agent
+executes; the message names the step to remove, and an entry with
+`assigneeAgentId: null` for it stays allowed),
+`staffing_profile_agent_not_found` (no such Agent in this project),
 `staffing_profile_agent_archived`, `staffing_profile_integrator_binding` (the
 merge-execution step binds only `merge-integrator`, and `merge-integrator` binds
 nothing else), and `staffing_profile_compound_implementation` (the compound
 implementation root requires an assignee whose effective runner is Codex and
-whose model is a `gpt-*` one). All eight are `422 Unprocessable Content`.
+whose model is a `gpt-*` one). All nine are `422 Unprocessable Content`.
+
+A profile saved before `staffing_profile_step_control_plane` existed is not
+migrated: it keeps its stored entry until the next write, which is refused with
+that code naming the step to remove. Reset writes the canonical plan, which
+states no assignee for a control-plane step.
 
 Warnings do not block a write. `same_agent_implements_and_reviews` reports that
 one Agent both implements and reviews under the saved plan.
@@ -1685,6 +1701,9 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/chain/resume" \
   - `merge_tail_repair_already_open`: a repair attempt for this recovery
     `sourceRunId` is already present. This takes precedence over the aggregate
     having already moved to `REPAIRING`.
+  - `merge_tail_repair_unstaffed`: the Chain has no fixed-implementation step,
+    so no Agent it staffed owns this repair. Nothing is substituted for the
+    missing step.
   - `merge_tail_repair_creation_failed`: the fixed-implementation agent is
     unavailable, lacks the repository grant, or the detached repair task cannot
     resolve the Chain repository, position, and shared branch.
@@ -1703,6 +1722,13 @@ is written to the Inbox. Its `failureReason` is exactly one of these shapes:
 
 - `semantic regression FAIL on chain head <sha> after N automatic repair attempts`
 - `merge gate FAIL on chain head <sha> after N automatic repair attempts`
+- `chain <chainId> has no fixed-implementation step to staff the <review-fix|gate-fix> repair`
+
+The last shape is not a repair ceiling: the Chain's template has no
+fixed-implementation step, so no Agent it staffed owns the repair. The tail
+stops and writes the stop notice rather than assigning the work to a canonical
+role nobody configured for this Chain. Instantiate the Chain from a template
+that has the step, or carry the branch forward as below.
 
 These are the repair ceiling, not an API defect. From this state,
 `POST /tasks/:taskId/retry` on the regression task opens a Run whose

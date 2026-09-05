@@ -19,6 +19,7 @@ export const staffingProfileRefusalStatus = {
   staffing_profile_entry_duplicate: 422,
   staffing_profile_unknown_output_kind: 422,
   staffing_profile_step_not_agent: 422,
+  staffing_profile_step_control_plane: 422,
   staffing_profile_include_not_optional: 422,
   staffing_profile_agent_not_found: 422,
   staffing_profile_agent_archived: 422,

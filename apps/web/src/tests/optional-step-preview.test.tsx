@@ -12,6 +12,7 @@ const step = (stepIndex: number, name: string, optional: boolean): TaskTemplateS
   stepIndex,
   name,
   assigneeType: "HUMAN",
+  executionOwner: "human",
   prompt: "",
   approvalGate: false,
   optional,

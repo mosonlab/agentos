@@ -40,21 +40,23 @@ import { awaitAuthorization, blockDownstream, exhaust } from "./merge-tail-state
 
 type DbTx = Prisma.TransactionClient;
 
-/** The canonical roles automatic repair falls back to when the chain names no
- *  Agent of its own. They are role file names — the Agent's canonical identity
- *  under R9 — and never the operator-editable `name` column, so a renamed
- *  canonical Agent still answers. */
+/** The canonical role a refresh conflict is routed to: no chain step owns that
+ *  repair, so it has no staffed Agent to address. It is a role file name — the
+ *  Agent's canonical identity under R9 — and never the operator-editable `name`
+ *  column, so a renamed canonical Agent still answers. */
 const MERGE_RESOLVER_ROLE = "merge-resolver-opus-medium";
-const FIX_IMPLEMENTATION_ROLE = "senior-dev-astra-medium";
 
 /**
  * Who a repair card is assigned to: the Agent the chain already bound to its
- * fix step, or the canonical role that owns the repair when the chain names
- * none.
+ * fix step, or the canonical role that owns a repair no chain step does.
  */
 export type MergeTailRepairAssignee =
   | Readonly<{ kind: "agent"; agentId: string; label: string }>
   | Readonly<{ kind: "role"; canonicalRole: string }>;
+
+/** No Agent the chain staffed owns this repair. The tail stops rather than
+ *  inventing one; `reason` is the stop reason an operator reads. */
+export type MergeTailRepairUnstaffed = Readonly<{ kind: "unstaffed"; reason: string }>;
 
 /**
  * Records the platform-owned requeue that earns one additional attempt for a
@@ -741,7 +743,12 @@ export const createMergeTailRepairTask = async (
 /** Resolves the implementation repair assignee shared by automatic repair and
  * operator reentry. Keeping this lookup in one place prevents the two repair
  * entrypoints from drifting when a template binds its fixed implementation
- * step to a non-default Agent. */
+ * step to a non-default Agent.
+ *
+ * A chain with no fixed-implementation step — a retired generation, or a clone
+ * that dropped it — is answered `unstaffed`. There is no canonical fallback:
+ * staffing the repair with an Agent nobody put on this chain is exactly the
+ * silent substitution the caller must refuse to make. */
 export const mergeTailRepairAssignee = async (
   tx: DbTx,
   input: {
@@ -750,7 +757,7 @@ export const mergeTailRepairAssignee = async (
     templateId: string | null;
     repairKind: "refresh-conflict" | "gate-fix" | "review-fix";
   },
-): Promise<MergeTailRepairAssignee> => {
+): Promise<MergeTailRepairAssignee | MergeTailRepairUnstaffed> => {
   if (input.repairKind === "refresh-conflict") return { kind: "role", canonicalRole: MERGE_RESOLVER_ROLE };
   const fixTask = await tx.task.findFirst({
     where: {
@@ -766,7 +773,10 @@ export const mergeTailRepairAssignee = async (
   // staffing profile may have put any Agent there, canonical or not.
   return bound
     ? { kind: "agent", agentId: bound.id, label: bound.name }
-    : { kind: "role", canonicalRole: FIX_IMPLEMENTATION_ROLE };
+    : {
+      kind: "unstaffed",
+      reason: `chain ${input.chainId ?? "(none)"} has no fixed-implementation step to staff the ${input.repairKind} repair`,
+    };
 };
 
 export const handleRegressionCompletion = async (
@@ -872,6 +882,7 @@ export const handleRegressionCompletion = async (
         : `merge gate FAIL on chain head ${verdict.headSha} after ${priorAttempts} automatic repair attempts`);
   }
   const assignee = await mergeTailRepairAssignee(tx, { ...input.task, repairKind });
+  if (assignee.kind === "unstaffed") return stop(assignee.reason);
   const repair = await createMergeTailRepairTask(tx, {
     regressionTask: input.task,
     sourceRun: input.run,

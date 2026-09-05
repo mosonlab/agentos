@@ -184,3 +184,57 @@ test("listed and single templates carry retired, true only for a renamed retired
     }
   });
 });
+
+test("both template reads answer executionOwner per step from the step itself", async () => {
+  await withTokens(async () => {
+    // Every step binds an Agent, including the two no Agent executes: a task row
+    // needs an assignee, and that binding is exactly what the field must not be
+    // read as an answer to.
+    const step = (stepIndex: number, name: string, outputKind: string, assigneeType = "AGENT") => ({
+      id: `step-${stepIndex}`, stepIndex, name, outputKind, assigneeType,
+      assigneeAgentId: "agent-1", assigneeAgent: { id: "agent-1", name: "Bound Agent" },
+    });
+    const rows = [{
+      id: "template-1",
+      name: "direct-engineer-workflow",
+      projectId: "project-1",
+      description: "",
+      variables: [],
+      steps: [
+        step(1, "Implementation", "implementation"),
+        step(2, "Human PR review", "human-review", "HUMAN"),
+        step(6, "Merge readiness", "merge-authorization"),
+        step(7, "Merge execution", "merge-result"),
+      ],
+    }];
+    const database = {
+      taskTemplate: {
+        findMany: async () => rows,
+        findUnique: async ({ where }: { where: { id: string } }) => rows.find((candidate) => candidate.id === where.id) ?? null,
+      },
+    } as unknown as PrismaClient;
+    const app = createApp(database);
+    const headers = { Authorization: "Bearer operator-unit-token" };
+    const expected = [
+      ["implementation", "agent"],
+      ["human-review", "human"],
+      ["merge-authorization", "control-plane"],
+      ["merge-result", "merge-executor"],
+    ];
+
+    type Read = { steps: Array<{ outputKind: string; executionOwner: string; assigneeAgentId: string }> };
+    const listed = await app.request("/projects/project-1/task-templates", { headers });
+    assert.equal(listed.status, 200);
+    const listedSteps = (await listed.json() as Read[])[0]!.steps;
+    assert.deepEqual(listedSteps.map((row) => [row.outputKind, row.executionOwner]), expected);
+    // The binding is reported unchanged next to the owner that contradicts it.
+    assert.deepEqual([...new Set(listedSteps.map((row) => row.assigneeAgentId))], ["agent-1"]);
+
+    const single = await app.request("/task-templates/template-1", { headers });
+    assert.equal(single.status, 200);
+    assert.deepEqual(
+      (await single.json() as Read).steps.map((row) => [row.outputKind, row.executionOwner]),
+      expected,
+    );
+  });
+});
