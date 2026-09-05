@@ -439,9 +439,11 @@ export const resolveRequeueBase = async (
 
 /**
  * The head a retry keeps because the *Task* owns it — a shared chain head, or
- * the ref a merge-tail repair card was created to land on. A head this module
- * minted for the previous Run belongs to that Run alone and is never carried
- * forward: the retry receives its own.
+ * the ref a merge-tail repair card was created to land on. Under this rule a
+ * head minted for the previous Run belongs to that Run alone and is not carried
+ * forward: the retry receives its own. Only the completion retry asks; the
+ * lost-lease and ordinary-birth rules deliberately continue the predecessor's
+ * declared head, and each says why where it does so.
  *
  * The comparison is against `runOwnedHead`, which this module is the only
  * producer of, so it reads back a decision made here rather than recognising
@@ -556,9 +558,11 @@ const chainDeclaredBranches = async (
  * base it clones (`targetBranch`).
  *
  * This is the only place either is decided. Every `openRun` intent goes through
- * it, `repairReplacementAfterSalvage` re-runs it for a queued replacement whose
- * clone base moved, and nothing else writes `Run.branch`. A caller that needs a
- * different head adds its intent here; patching the row after birth would put
+ * it, and a Run's head is written once, at its birth: nothing else writes
+ * `Run.branch`. `repairReplacementAfterSalvage` re-runs it for a queued
+ * replacement whose clone base moved and takes the base alone from the answer.
+ * A caller that needs a different head adds its intent here; patching the row
+ * after birth would put
  * the decision back in two places, which is how one Step ended up on a
  * different branch from the rest of its Chain.
  *
@@ -635,8 +639,19 @@ const declaredPublishTarget = async (
       // the head its predecessor was told to publish: the lost Run may already
       // have pushed it, and nothing terminal was reported about it.
       return { branch: prior?.branch ?? null, targetBranch: await requeueBase() };
-    default:
+    // Every remaining intent is an ordinary birth with no snapshot of its own:
+    // the Chain rule answers, and a Run outside a Chain receives the ref it
+    // owns. Listed rather than defaulted so a new intent kind fails to compile
+    // here instead of inheriting this rule by accident.
+    case "enqueue":
+    case "merge-tail-requeue":
+    case "task-created":
+    case "retry":
       return chainDeclaredBranches(tx, task, prior ? { branch: prior.branch } : null);
+    default: {
+      const unhandled: never = intent;
+      throw new Error(`Unhandled Run birth intent: ${String(unhandled)}`);
+    }
   }
 };
 

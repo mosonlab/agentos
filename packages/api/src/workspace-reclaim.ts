@@ -544,17 +544,21 @@ export const repairReplacementAfterSalvage = async (
     include: { repo: true, templateStep: true },
   });
   if (!task?.repo) return "already-started";
-  // The replacement was born from an ordinary enqueue; the late salvage only
-  // moved the evidence it resolves against, so it is re-decided by the same
-  // module under the same intent rather than patched here.
-  const branches = await resolveRunBranches(tx, { ...task, repo: task.repo }, {
+  // A late salvage moves only the publication evidence the *base* resolves
+  // against, so only the base is repaired here. The replacement's head was
+  // decided at its own birth by `resolveRunBranches` and stays that Run's:
+  // re-deciding it from the salvaged Run would hand a replacement the ref its
+  // predecessor owns. The `enqueue` arm is what asks for the base under current
+  // evidence rather than the replacement's birth snapshot, which is exactly
+  // what a moved base means; the head that arm returns is discarded.
+  const { targetBranch } = await resolveRunBranches(tx, { ...task, repo: task.repo }, {
     intent: "enqueue",
     runNumber: run.runNumber + 1,
     prior: { branch: run.branch, targetBranch: run.targetBranch, runNumber: run.runNumber },
   });
   const repaired = await tx.run.updateMany({
     where: { id: replacement.id, status: RunStatus.QUEUED },
-    data: { branch: branches.branch, targetBranch: branches.targetBranch },
+    data: { targetBranch },
   });
   return repaired.count === 1 ? "repaired" : "already-started";
 };
