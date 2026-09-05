@@ -19,7 +19,7 @@ import { Dialog, DialogContent, DialogTitle } from "./ui/dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "./ui/dropdown-menu";
 import {
   IconAgents, IconChevron, IconConnections, IconCosts, IconGoals, IconInbox, IconMore,
-  IconProjects, IconSecrets, IconSessions, IconSettings, IconTasks,
+  IconProjects, IconSecrets, IconSessions, IconSettings, IconTasks, IconWorkflows,
 } from "./icons";
 
 type NavEntry = { to: string; labelKey: string; icon: ReactNode; match: string[] };
@@ -34,6 +34,9 @@ const NAV: NavEntry[] = [
   { to: "/costs", labelKey: "sidebar.nav.costs", icon: <IconCosts />, match: ["/costs"] },
   { to: "/goals", labelKey: "sidebar.nav.goals", icon: <IconGoals />, match: ["/goals"] },
   { to: "/agents", labelKey: "sidebar.nav.agents", icon: <IconAgents />, match: ["/agents"] },
+  // The label key sits in the `workflows.` namespace with the rest of the page
+  // it opens, rather than in `sidebar.`, so the whole surface moves as one block.
+  { to: "/workflows", labelKey: "workflows.nav.label", icon: <IconWorkflows />, match: ["/workflows"] },
   { to: "/projects", labelKey: "sidebar.nav.projects", icon: <IconProjects />, match: ["/projects", "/"] },
   { to: "/connections", labelKey: "sidebar.nav.connections", icon: <IconConnections />, match: ["/connections"] },
   { to: "/secrets", labelKey: "sidebar.nav.secrets", icon: <IconSecrets />, match: ["/secrets"] },

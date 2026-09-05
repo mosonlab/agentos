@@ -67,7 +67,7 @@ test("below 900px the shell renders a tab bar, the Inbox count, and a More sheet
     const sheet = document.querySelector('[data-slot="dialog-content"]');
     assert.ok(sheet, "More sheet did not open");
     const items = [...sheet.querySelectorAll("a, button")].map((element) => element.textContent?.trim()).filter((text) => text !== "" && text !== "Close");
-    assert.deepEqual(items.slice(0, 5), ["Goals", "Agents", "Projects", "Connections", "Secrets"]);
+    assert.deepEqual(items.slice(0, 6), ["Goals", "Agents", "Workflows", "Projects", "Connections", "Secrets"]);
     assert.ok(sheet.querySelector('a[href="#/settings"]'), "sheet runner link missing");
     assert.ok(items.includes("Settings"));
     assert.ok(items.some((text) => text?.startsWith("Theme:")));
