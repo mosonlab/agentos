@@ -15,6 +15,40 @@ export const serviceUnitName = (label, inventory) => {
   return entry.unitName;
 };
 
+/**
+ * The systemd program every control command runs. The installer pins the same
+ * path into the service manifest, and `renderSystemdSudoers` grants exactly
+ * this program, so the granted command and the issued command are one string.
+ */
+export const SYSTEMCTL_PATH = "/bin/systemctl";
+
+/**
+ * The complete systemd control vocabulary of this deployment: for each verb,
+ * the systemctl arguments that precede the unit name. Both derivations of the
+ * command read this description - `invoke` below issues
+ * `systemdControlArgv(verb, unit)`, and `renderSystemdSudoers` renders the
+ * service user's `sudo -n` grant from the same call. 6da5abd3 had to repair a
+ * grant that allowed `systemctl show <unit>` while `describe` issued
+ * `systemctl show -p ExecStart --value <unit>`; that mismatch is now
+ * unrepresentable.
+ */
+const SYSTEMD_CONTROL_ARGUMENTS = Object.freeze({
+  restart: Object.freeze(["restart"]),
+  "is-active": Object.freeze(["is-active"]),
+  show: Object.freeze(["show", "-p", "ExecStart", "--value"]),
+});
+
+/** The control verbs in the order the deployment issues them. */
+export const SYSTEMD_CONTROL_VERBS = Object.freeze(Object.keys(SYSTEMD_CONTROL_ARGUMENTS));
+
+/** The exact systemctl argv a verb produces for one unit. */
+export const systemdControlArgv = (verb, unitName) => {
+  if (!Object.hasOwn(SYSTEMD_CONTROL_ARGUMENTS, verb)) {
+    throw new DeployFailure("service-control-verb-unknown", String(verb));
+  }
+  return [...SYSTEMD_CONTROL_ARGUMENTS[verb], unitName];
+};
+
 const uidOf = () => {
   if (typeof process.getuid === "function") return process.getuid();
   return 0;
@@ -79,7 +113,6 @@ export const createServiceControl = ({
   wrapperPath = "",
   uid = uidOf(),
   euid = euidOf(),
-  systemctlBinary = "systemctl",
   sudoBinary = "sudo",
   launchctlBinary = "/bin/launchctl",
   timeoutMs = Object.freeze({
@@ -102,7 +135,7 @@ export const createServiceControl = ({
   const invoke = async ({
     label,
     verb,
-    args,
+    launchctlArgs,
     options = {},
     inactiveExit = false,
     failureReason = "service-control-failed",
@@ -111,12 +144,12 @@ export const createServiceControl = ({
     const unit = serviceUnitName(label, inventory);
     const program = platform === "darwin"
       ? launchctlBinary
-      : euid === 0 ? systemctlBinary : sudoBinary;
+      : euid === 0 ? SYSTEMCTL_PATH : sudoBinary;
     const commandArgs = platform === "darwin"
-      ? args
+      ? launchctlArgs
       : euid === 0
-        ? args
-        : ["-n", systemctlBinary, ...args];
+        ? systemdControlArgv(verb, unit)
+        : ["-n", SYSTEMCTL_PATH, ...systemdControlArgv(verb, unit)];
     const binaryName = platform === "darwin" ? "launchctl" : euid === 0 ? "systemctl" : "sudo";
     let result;
     try {
@@ -175,9 +208,7 @@ export const createServiceControl = ({
       verb: "restart",
       failureReason: reason,
       useChecked: platform === "darwin",
-      args: platform === "darwin"
-        ? ["kickstart", "-k", `gui/${uid}/${label}`]
-        : ["restart", serviceUnitName(label, inventory)],
+      launchctlArgs: ["kickstart", "-k", `gui/${uid}/${label}`],
       options: {
         timeoutMs: timeout,
         timeoutReason: timeoutReason ?? `${reason}-timeout`,
@@ -191,9 +222,7 @@ export const createServiceControl = ({
       label,
       verb: "is-active",
       inactiveExit: true,
-      args: platform === "darwin"
-        ? ["print", `gui/${uid}/${label}`]
-        : ["is-active", serviceUnitName(label, inventory)],
+      launchctlArgs: ["print", `gui/${uid}/${label}`],
       options: {
         ...options,
         timeoutMs: options.timeoutMs ?? inspectTimeoutMs,
@@ -209,9 +238,7 @@ export const createServiceControl = ({
       label,
       verb: "show",
       inactiveExit: platform === "darwin",
-      args: platform === "darwin"
-        ? ["print", `gui/${uid}/${label}`]
-        : ["show", "-p", "ExecStart", "--value", serviceUnitName(label, inventory)],
+      launchctlArgs: ["print", `gui/${uid}/${label}`],
       options: {
         ...options,
         timeoutMs: options.timeoutMs ?? inspectTimeoutMs,
