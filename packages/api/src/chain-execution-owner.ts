@@ -21,3 +21,17 @@ export const chainExecutionOwner = (subject: ChainExecutionSubject): ChainExecut
   if (isIntegratorStep(subject.templateStep)) return "merge-executor";
   return subject.assigneeType === "HUMAN" ? "human" : "agent";
 };
+
+/**
+ * The same rule for a template step, which has no task row yet. The staffing
+ * surface must agree with the chain rows the graph will produce, so both sides
+ * answer from one predicate rather than from a step's name or output kind.
+ */
+export const templateStepExecutionOwner = (step: {
+  stepIndex: number;
+  outputKind: string;
+  assigneeType: string;
+}): ChainExecutionOwner => chainExecutionOwner({
+  assigneeType: step.assigneeType,
+  templateStep: { stepIndex: step.stepIndex, outputKind: step.outputKind },
+});

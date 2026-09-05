@@ -1098,6 +1098,7 @@ export const en = {
   "workflows.editor.agent": "Assigned agent",
   "workflows.editor.canonical": "Template default: {name}",
   "workflows.editor.canonical.none": "Template default: unassigned",
+  "workflows.editor.controlPlane": "The control plane runs this step, so no agent is staffed on it.",
   "workflows.editor.human": "A person answers this step, so no agent can be staffed on it.",
   "workflows.editor.include": "Include this step",
   "workflows.editor.include.aria": "Include {name}",

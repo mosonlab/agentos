@@ -65,6 +65,7 @@ const AGENTS = [SENIOR, RETIRED, SENTINEL];
 const step = (overrides: Partial<TaskTemplateStep> & Pick<TaskTemplateStep, "stepIndex" | "name" | "outputKind">): TaskTemplateStep => ({
   id: `step-${overrides.stepIndex}`,
   assigneeType: "AGENT",
+  executionOwner: "agent",
   prompt: "",
   approvalGate: false,
   optional: false,
@@ -80,13 +81,20 @@ const TEMPLATE: TaskTemplate = {
   id: "template-1",
   projectId: PROJECT.id,
   name: "Direct engineering",
-  description: "Seven steps without a spec phase",
+  description: "A direct chain without a spec phase",
   variables: [],
   retired: false,
   steps: [
     step({ stepIndex: 1, name: "Implementation", outputKind: "implementation", assigneeAgentId: SENIOR.id, assigneeAgent: SENIOR }),
     step({ stepIndex: 2, name: "Blind review", outputKind: "blind-findings", optional: true }),
     step({ stepIndex: 3, name: "Human PR review", outputKind: "human-review", assigneeType: "HUMAN" }),
+    // Bound to an Agent so its task row has an assignee, and executed by the
+    // control plane all the same: the row is exactly the case the console must
+    // not read as staffable.
+    step({
+      stepIndex: 4, name: "Merge readiness", outputKind: "merge-authorization",
+      executionOwner: "control-plane", assigneeAgentId: SENIOR.id, assigneeAgent: SENIOR,
+    }),
   ],
 };
 
@@ -104,7 +112,11 @@ const FAST_LANE = profile({
   id: "p-fast",
   name: "Fast lane",
   isDefault: true,
-  entries: [{ outputKind: "implementation", assigneeAgentId: SENIOR.id, include: null }],
+  entries: [
+    { outputKind: "implementation", assigneeAgentId: SENIOR.id, include: null },
+    // Saved before the control plane owned that step; the next save must surface the refusal.
+    { outputKind: "merge-authorization", assigneeAgentId: SENIOR.id, include: null },
+  ],
 });
 const CAREFUL = profile({ id: "p-careful", name: "Careful lane" });
 
@@ -170,7 +182,7 @@ test("the three Workflows routes are registered and the list renders its templat
   try {
     const text = page.container.textContent ?? "";
     assert.match(text, /Direct engineering/u);
-    assert.ok(text.includes(t("en", "workflows.template.steps", { n: 3 })));
+    assert.ok(text.includes(t("en", "workflows.template.steps", { n: 4 })));
     assert.ok(page.container.querySelector('a[href="#/workflows/template-1"]'), "the template should link to its profiles");
   } finally {
     await page.dispose();
@@ -383,6 +395,11 @@ for (const locale of ["en", "zh"] as const) {
       assert.ok(!everyOption.some((label) => label.includes(RETIRED.title)));
       assert.ok(!everyOption.some((label) => label.includes(SENTINEL.title)));
 
+      // Neither is a step the control plane runs, whatever Agent its row binds.
+      const readiness = rowFor(page, "merge-authorization");
+      assert.equal(readiness.querySelector("select"), null);
+      assert.ok((readiness.textContent ?? "").includes(t(locale, "workflows.editor.controlPlane")));
+
       // A human step is not staffable at all.
       assert.equal(rowFor(page, "human-review").querySelector("select"), null);
       assert.ok((rowFor(page, "human-review").textContent ?? "").includes(t(locale, "workflows.editor.human")));
@@ -397,9 +414,12 @@ for (const locale of ["en", "zh"] as const) {
   });
 }
 
-test("saving sends PUT with the profile name and exactly the entries the operator staffed", async () => {
+test("saving preserves a legacy readiness assignment and shows the refusal", async () => {
   const { page, saves } = await mountEditor("en", {
-    "PUT /staffing-profiles/p-fast": { profile: FAST_LANE, warnings: [] },
+    "PUT /staffing-profiles/p-fast": new Response(
+      JSON.stringify({ code: "staffing_profile_step_control_plane", error: "Step Merge readiness (merge-authorization) is executed by the control plane and staffs no agent; remove its entry from this profile", outputKind: "merge-authorization" }),
+      { status: 400, headers: { "Content-Type": "application/json" } },
+    ),
   });
   try {
     await selectIn(page, rowFor(page, "blind-findings"), SENIOR.id);
@@ -416,9 +436,11 @@ test("saving sends PUT with the profile name and exactly the entries the operato
         // so an omitted kind means "the template's own binding stands".
         { outputKind: "implementation", assigneeAgentId: SENIOR.id, include: null },
         { outputKind: "blind-findings", assigneeAgentId: SENIOR.id, include: false },
+        { outputKind: "merge-authorization", assigneeAgentId: SENIOR.id, include: null },
       ],
     });
-    assert.equal(saves(), 1);
+    assert.equal(saves(), 0);
+    assert.match(page.container.textContent ?? "", /400 Step Merge readiness.*remove its entry/u);
   } finally {
     await page.dispose();
   }

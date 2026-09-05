@@ -38,6 +38,7 @@ const step = (stepIndex: number, name: string, outputKind: string, overrides: Pa
   stepIndex,
   name,
   assigneeType: "AGENT",
+  executionOwner: "agent",
   prompt: "",
   approvalGate: false,
   optional: false,

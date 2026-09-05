@@ -83,6 +83,8 @@ export const draftOf = (template: TaskTemplate, profile: StaffingProfile): Draft
  */
 export const entriesOf = (template: TaskTemplate, draft: Draft): StaffingProfileEntryInput[] =>
   template.steps.flatMap((step) => {
+    // Preserve legacy assignments so the writer refuses them visibly. Only an
+    // explicit reset may replace them with the canonical null plan.
     const held = draft.entries[step.outputKind];
     const assigneeAgentId = held?.assigneeAgentId ?? "";
     const include = step.optional ? held?.include ?? true : null;
@@ -123,7 +125,11 @@ const isListedStep = (value: unknown): value is ListedTemplate["steps"][number] 
   && (value.baseFromStepIndex === null || Number.isInteger(value.baseFromStepIndex))
   && (value.runner === null || value.runner === "CLAUDE" || value.runner === "CODEX" || value.runner === "PI")
   && (value.assigneeAgentId === null || typeof value.assigneeAgentId === "string")
-  && (value.assigneeAgent === null || isRecord(value.assigneeAgent));
+  && (value.assigneeAgent === null || isRecord(value.assigneeAgent))
+  // Who runs a step is the API's answer, never a guess from its kind or name,
+  // so a row without it is a shape the console cannot staff from.
+  && (value.executionOwner === "agent" || value.executionOwner === "human"
+    || value.executionOwner === "control-plane" || value.executionOwner === "merge-executor");
 const isTemplateList = (value: unknown): value is ListedTemplate[] =>
   Array.isArray(value) && value.every((row: unknown) =>
     isRecord(row)
@@ -410,7 +416,9 @@ const StepRow = ({ step, agents, entry, onChange }: {
         <span className={HINT}>{t("workflows.editor.step", { index: step.stepIndex, kind: step.outputKind })}</span>
         {step.optional ? <Pill tone="grey">{t("workflows.editor.optional")}</Pill> : null}
       </div>
-      {step.assigneeType === "AGENT" ? (
+      {step.executionOwner === "control-plane" ? (
+        <div className={HINT}>{t("workflows.editor.controlPlane")}</div>
+      ) : step.assigneeType === "AGENT" ? (
         <div className={FIELD_ROW}>
           <Field label={t("workflows.editor.agent")} htmlFor={stepControlId(step.outputKind)}>
             <Select id={stepControlId(step.outputKind)} value={entry.assigneeAgentId}

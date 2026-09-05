@@ -1091,6 +1091,7 @@ export const zh = {
   "workflows.editor.agent": "指派的 Agent",
   "workflows.editor.canonical": "模板默认：{name}",
   "workflows.editor.canonical.none": "模板默认：未指派",
+  "workflows.editor.controlPlane": "该步骤由控制平面执行，不会指派任何 Agent。",
   "workflows.editor.human": "该步骤由人来完成，不能指派 Agent。",
   "workflows.editor.include": "包含该步骤",
   "workflows.editor.include.aria": "包含 {name}",

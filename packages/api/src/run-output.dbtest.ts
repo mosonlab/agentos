@@ -341,6 +341,41 @@ const addRepairAgent = async (
     mountPath: "/repo",
     permissions: "GIT_WRITE",
   } });
+  if (agentName !== "merge-resolver-opus-medium") {
+    // Implementation repairs use the chain's explicit staffing, not a role-name fallback.
+    assert.ok(seeded.task.templateId);
+    assert.ok(seeded.task.chainId);
+    await db.task.update({
+      where: { id: seeded.task.id },
+      data: { chainIndex: 5, chainLayer: 5 },
+    });
+    const step = await db.taskTemplateStep.create({ data: {
+      taskTemplateId: seeded.task.templateId,
+      stepIndex: 4,
+      layer: 4,
+      name: "Apply review fixes",
+      assigneeType: "AGENT",
+      assigneeAgentId: repairAgent.id,
+      prompt: "fix",
+      approvalGate: false,
+      outputKind: "fixed-implementation",
+    } });
+    await db.task.create({ data: {
+      projectId: seeded.project.id,
+      name: "Apply review fixes",
+      description: "Explicit repair staffing",
+      assigneeAgentId: repairAgent.id,
+      repoId: seeded.repo.id,
+      templateId: seeded.task.templateId,
+      templateStepId: step.id,
+      chainId: seeded.task.chainId,
+      chainIndex: 4,
+      chainLayer: 4,
+      targetBranch: "master",
+      status: TaskStatus.DONE,
+    } });
+  }
+  return repairAgent;
 };
 
 test("a failed run's output survives on the run that produced it", async () => {
@@ -498,7 +533,7 @@ test("a retryable protocol failure consumes its durable negative Regression verd
   ] as const) {
     await resetTestDb(db);
     const seeded = await seedTask(REGRESSION_STEP);
-    await addRepairAgent(seeded, agentName);
+    const repairAgent = await addRepairAgent(seeded, agentName);
     const runId = await enqueue(seeded.task.id);
     const claimed = await claimRun(runId, `runner-durable-${outcome}`);
     const body = outcome === "gate-fail"
@@ -530,6 +565,7 @@ test("a retryable protocol failure consumes its durable negative Regression verd
     assert.equal(await db.task.count({ where: {
       projectId: seeded.project.id,
       name: `Autonomous merge tail: ${repairKind}`,
+      assigneeAgentId: repairAgent.id,
     } }), 1, outcome);
 
     const duplicate = await call("POST", `/runner/runs/${runId}/complete`, RUNNER, completion);
@@ -557,7 +593,7 @@ test("a retryable protocol failure consumes its durable negative Regression verd
 
 test("a current v2 gate-fail with gate proof is consumed after protocol failure", async () => {
   const seeded = await seedTask(REGRESSION_V2_STEP);
-  await addRepairAgent(seeded, "senior-dev-astra-medium");
+  const repairAgent = await addRepairAgent(seeded, "senior-dev-astra-medium");
   const runId = await enqueue(seeded.task.id);
   const claimed = await claimRun(runId, "runner-v2-durable-gate-fail");
   const written = await call("PUT", `/session/runs/${runId}/output`, claimed.sessionToken, {
@@ -582,6 +618,7 @@ test("a current v2 gate-fail with gate proof is consumed after protocol failure"
   assert.equal(await db.task.count({ where: {
     projectId: seeded.project.id,
     name: "Autonomous merge tail: gate-fix",
+    assigneeAgentId: repairAgent.id,
   } }), 1);
 });
 
@@ -593,7 +630,7 @@ test("current v2 durable negative verdicts survive lease-loss reconciliation wit
   ] as const) {
     await resetTestDb(db);
     const seeded = await seedTask(REGRESSION_V2_STEP);
-    await addRepairAgent(seeded, agentName);
+    const repairAgent = await addRepairAgent(seeded, agentName);
     const runId = await enqueue(seeded.task.id);
     const claimed = await claimRun(runId, `runner-reconcile-${outcome}`);
     const written = await call("PUT", `/session/runs/${runId}/output`, claimed.sessionToken, {
@@ -616,6 +653,7 @@ test("current v2 durable negative verdicts survive lease-loss reconciliation wit
     assert.equal(await db.task.count({ where: {
       projectId: seeded.project.id,
       name: `Autonomous merge tail: ${repairKind}`,
+      assigneeAgentId: repairAgent.id,
     } }), 1, outcome);
 
     assert.equal(await reconcileDatabaseRuns(db, new Date(), async () => {}), 0, outcome);

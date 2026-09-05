@@ -35,6 +35,7 @@ import type {
   StaffingProfileWarning,
 } from "@anneal/db/console-contract";
 
+import { templateStepExecutionOwner } from "./chain-execution-owner.js";
 import { StaffingProfileRefusal } from "./staffing-profile-errors.js";
 import { serializable } from "./transaction.js";
 
@@ -134,6 +135,14 @@ export const compoundImplementationCapable = (
 };
 
 /**
+ * Whether the control plane, rather than any Agent, executes this step. The
+ * same predicate the read routes answer `executionOwner: "control-plane"` from,
+ * so the console and the writer cannot disagree about which rows are staffable.
+ */
+const isControlPlaneStep = (step: Pick<ValidationStep, "stepIndex" | "outputKind" | "assigneeType">): boolean =>
+  templateStepExecutionOwner(step) === "control-plane";
+
+/**
  * Whether one step may be staffed by one Agent, and why not.
  *
  * Stated once because two callers ask it: a profile write, which refuses, and
@@ -148,6 +157,18 @@ export const staffingAssigneeRefusal = (
   context: { projectId: string; templateName: string },
 ): StaffingProfileRefusal | null => {
   if (assigneeAgentId === null) return null;
+  // The control plane executes this step; its row binds an Agent only because a
+  // task row needs an assignee, and staffing it would change nothing. Refused
+  // rather than ignored, so an operator who saved one learns of it here instead
+  // of going on believing that Agent runs the step. A null entry stays allowed:
+  // it states no opinion, and the row's own binding stands either way.
+  if (isControlPlaneStep(step)) {
+    return refuse(
+      "staffing_profile_step_control_plane",
+      `Step ${step.name} (${step.outputKind}) is executed by the control plane and staffs no agent; remove its entry from this profile`,
+      step.outputKind,
+    );
+  }
   if (step.assigneeType !== AssigneeType.AGENT) {
     return refuse(
       "staffing_profile_step_not_agent",
@@ -290,12 +311,15 @@ export const validateStaffingEntries = (
   return { entries: normalized, warnings };
 };
 
-/** The canonical plan: every step's own binding, and every optional step kept. */
+/** The canonical plan: every step's own binding, and every optional step kept.
+ *  A control-plane step states no assignee here, because a profile cannot
+ *  express one for it — its row keeps whatever binding gives its task an
+ *  assignee, and no plan changes who executes it. */
 export const canonicalStaffingEntries = (
   steps: readonly ValidationStep[],
 ): StaffingProfileEntryContract[] => steps.map((step) => ({
   outputKind: step.outputKind,
-  assigneeAgentId: step.assigneeAgentId,
+  assigneeAgentId: isControlPlaneStep(step) ? null : step.assigneeAgentId,
   include: step.optional ? true : null,
 }));
 

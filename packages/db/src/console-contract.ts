@@ -30,6 +30,7 @@ import type {
   SessionEventSource as PrismaSessionEventSource,
 } from "@prisma/client";
 
+import type { ExecutionOwner } from "./board-contract.js";
 import type { Agent, GoalStatus } from "./wire-contract.js";
 
 export type SessionEventSource = PrismaSessionEventSource;
@@ -65,6 +66,11 @@ export type TaskTemplateStep<DateTime = string> = {
   runner: PrismaRunnerKind | null;
   assigneeAgentId: string | null;
   assigneeAgent: Agent<DateTime> | null;
+  /** Who executes this step, computed by the API from the step itself. The
+   *  console never derives it from an output kind or a step name: a
+   *  `control-plane` step is run by the server and cannot be staffed at all,
+   *  whatever Agent its row binds so the task has an assignee. */
+  executionOwner: ExecutionOwner;
 };
 
 export type TaskTemplate<DateTime = string> = {
