@@ -179,6 +179,12 @@ They are removed:
   preserving exact-head evidence.
 - The lease covers only live-state recheck and prefix publication, not the full
   gate duration.
+- To avoid wasting completed gate proofs when another window holds the lease for
+  only a few seconds, lease acquisition waits up to 10 minutes by default and
+  accepts an operator-supplied bound through `--lease-wait-minutes <n>`. This
+  wait still occurs after gating, so the lease remains a publication-only hold;
+  once acquired, live `main` must still equal the original base or the train
+  returns `stale-base` and discards the proofs.
 - FIFO is visible in the command line rather than hidden in lease acquisition
   timing.
 - A downstream gate may be wasted when an earlier prefix fails. With a maximum
