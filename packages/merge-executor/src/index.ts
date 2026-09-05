@@ -15,6 +15,7 @@ import "dotenv/config";
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
+import type { MechanicalClaim } from "@anneal/db/claim-contract";
 import { INTEGRATOR_OUTPUT_KIND, MERGE_INTEGRATOR_KIND, MERGE_INTEGRATOR_SCHEMA_VERSION, serializeMergeResult } from "@anneal/db/merge-integrator";
 
 import {
@@ -23,7 +24,6 @@ import {
   makeAgentOsClient,
   MechanicalContractMismatchError,
   type MechanicalCancellation,
-  type MechanicalClaim,
 } from "./agentos.js";
 import { loadExecutorConfig, type ExecutorConfig } from "./config.js";
 import { execute, type Deps } from "./decision-table.js";
@@ -85,7 +85,7 @@ export const runClaim = async (
       return false;
     }
   };
-  const chainIndex = claimed.task.chainIndex ?? null;
+  const chainIndex = claimed.task.chainIndex;
   if (chainIndex === null) {
     // Fail closed and loudly: a mechanical run outside a chain has no
     // predecessor to read an authorization from, so there is nothing to execute.

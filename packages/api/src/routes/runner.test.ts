@@ -10,9 +10,8 @@ import {
   type PrismaClient,
 } from "@anneal/db";
 import {
-  MECHANICAL_CONTRACT_MISMATCH_ALERT_BODY_PREFIX,
-  MECHANICAL_CONTRACT_MISMATCH_DEDUPE_KEY_PREFIX,
   RUN_COMPLETION_CONTRACT_VERSION,
+  mechanicalContractMismatch,
 } from "@anneal/db/claim-contract";
 
 import { createApp } from "../test-app.js";
@@ -216,36 +215,35 @@ for (const contractVersion of [undefined, RUN_COMPLETION_CONTRACT_VERSION + 1]) 
             }),
           });
 
+        // The decision the route must reach, composed by the module that owns
+        // it. The route may serialise it and nothing else.
+        const decided = (received: number | null) => {
+          const mismatch = mechanicalContractMismatch({ receivedVersion: received, taskId: "task-mechanical", now: new Date() });
+          assert.ok(mismatch);
+          return mismatch;
+        };
+        const expected = decided(contractVersion ?? null);
+
         const response = await request();
         assert.equal(response.status, 409);
-        const refusal = await response.json() as Record<string, unknown>;
-        assert.equal(refusal.code, "mechanical_contract_mismatch");
-        assert.equal(refusal.expectedVersion, RUN_COMPLETION_CONTRACT_VERSION);
-        assert.equal(refusal.receivedVersion, contractVersion ?? null);
-        assert.match(String(refusal.error), new RegExp(`executor version ${contractVersion ?? "missing"}`, "u"));
-        assert.match(String(refusal.error), new RegExp(`API version ${RUN_COMPLETION_CONTRACT_VERSION}`, "u"));
+        assert.deepEqual(await response.json(), expected.refusal);
         assert.equal(runMutations, 0);
         assert.equal(activities.length, 1);
         assert.equal(activities[0]?.taskId, "task-mechanical");
-        assert.match(String(activities[0]?.body), new RegExp(`executor version ${contractVersion ?? "missing"}`, "u"));
-        assert.match(String(activities[0]?.body), new RegExp(`API version ${RUN_COMPLETION_CONTRACT_VERSION}`, "u"));
+        assert.equal(activities[0]?.body, expected.activity.body);
+        assert.deepEqual(activities[0]?.metadata, expected.activity.metadata);
         assert.equal((await request()).status, 409);
         assert.equal(activities.length, 1);
         assert.equal(inboxMessages.length, 1);
         assert.equal(inboxMessages[0]?.status, InboxStatus.OPEN);
-        assert.match(String(inboxMessages[0]?.dedupeKey), new RegExp(`^${MECHANICAL_CONTRACT_MISMATCH_DEDUPE_KEY_PREFIX}`, "u"));
-        assert.ok(String(inboxMessages[0]?.body).startsWith(MECHANICAL_CONTRACT_MISMATCH_ALERT_BODY_PREFIX));
-        assert.match(String(inboxMessages[0]?.body), new RegExp(`executor version ${contractVersion ?? "missing"}; API version ${RUN_COMPLETION_CONTRACT_VERSION}`, "u"));
-        assert.match(String(inboxMessages[0]?.body), /task task-mechanical/u);
+        assert.equal(inboxMessages[0]?.body, expected.alert.body);
+        assert.ok(String(inboxMessages[0]?.dedupeKey).startsWith(expected.alert.dedupeKeyPrefix));
         if (contractVersion === undefined) {
           const differentVersion = RUN_COMPLETION_CONTRACT_VERSION + 1;
           assert.equal((await request(differentVersion)).status, 409);
           assert.equal(inboxMessages.length, 2);
           assert.equal(inboxMessages.filter(({ status }) => status === InboxStatus.OPEN).length, 2);
-          assert.match(
-            String(inboxMessages[1]?.dedupeKey),
-            new RegExp(`^${MECHANICAL_CONTRACT_MISMATCH_DEDUPE_KEY_PREFIX}${RUN_COMPLETION_CONTRACT_VERSION}:${differentVersion}:`, "u"),
-          );
+          assert.ok(String(inboxMessages[1]?.dedupeKey).startsWith(decided(differentVersion).alert.dedupeKeyPrefix));
           assert.equal(activities.length, 2);
         }
       } finally {
