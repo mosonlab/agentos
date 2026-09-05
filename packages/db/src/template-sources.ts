@@ -9,6 +9,13 @@ import { DIRECT_TEMPLATE_NAME, PR_TEMPLATE_NAME } from "./agent-contract.js";
 import { gateSlotOf } from "./gate-slot.js";
 import { INTEGRATOR_TEMPLATE_NAME } from "./merge-integrator.js";
 import { parseInlineList, parsePromptDocument, requiredFrontmatter } from "./prompt-document.js";
+import { TEMPLATE_STEP_FRONTMATTER_KEYS } from "./template-step-fields.js";
+
+/**
+ * The row-vs-source comparator this module presents, built from the one field
+ * table `template-step-fields.ts` holds.
+ */
+export { templateStepStructureDifferences } from "./template-step-fields.js";
 
 const templatesRoot = fileURLToPath(new URL("../../../agents/templates/", import.meta.url));
 /** Migration-only marker: pre-whitelist template rows retain the old all-output handoff. */
@@ -52,21 +59,6 @@ export const canonicalTemplateSourceSpec = (name: CanonicalTemplateName) => {
   if (!spec) throw new Error(`Unknown canonical template source ${name}`);
   return spec;
 };
-const STRUCTURAL_FIELDS = [
-  "stepIndex",
-  "layer",
-  "agent",
-  "approvalGate",
-  "optional",
-  "outputKind",
-  "attachmentsFromPrevious",
-  "priorOutputKinds",
-  "opensPullRequest",
-  "requiresCommit",
-  "provisionDependencies",
-  "baseFromStepIndex",
-  "spawnPolicy",
-] as const;
 
 export type TemplateStepSource = {
   stepIndex: number;
@@ -129,32 +121,6 @@ export const templateMetadataDifferences = (
     .map(([field]) => field);
 };
 
-export const templateStepStructureDifferences = (
-  actual: PersistedTemplateStepStructure,
-  expected: TemplateStepSource,
-): string[] => {
-  const expectedAssigneeType = expected.agentName === null ? "HUMAN" : "AGENT";
-  const fields = [
-    ["name", actual.name, expected.name],
-    ["agent", actual.assigneeAgent?.name ?? null, expected.agentName],
-    ["assigneeType", actual.assigneeType, expectedAssigneeType],
-    ["layer", actual.layer, expected.layer],
-    ["approvalGate", actual.approvalGate, expected.approvalGate],
-    ["optional", actual.optional, expected.optional],
-    ["outputKind", actual.outputKind, expected.outputKind],
-    ["attachmentsFromPrevious", actual.attachmentsFromPrevious, expected.attachmentsFromPrevious],
-    ["priorOutputKinds", actual.priorOutputKinds, expected.priorOutputKinds],
-    ["opensPullRequest", actual.opensPullRequest, expected.opensPullRequest],
-    ["requiresCommit", actual.requiresCommit, expected.requiresCommit],
-    ["provisionDependencies", actual.provisionDependencies, expected.provisionDependencies],
-    ["baseFromStepIndex", actual.baseFromStepIndex, expected.baseFromStepIndex],
-    ["spawnPolicy", actual.spawnPolicy, expected.spawnPolicy],
-  ] as const;
-  return fields
-    .filter(([, actualValue, expectedValue]) => !isDeepStrictEqual(actualValue, expectedValue))
-    .map(([field]) => field);
-};
-
 const parseBoolean = (value: string, filePath: string, key: string): boolean => {
   if (value !== "true" && value !== "false") throw new Error(`${filePath} ${key} must be true or false`);
   return value === "true";
@@ -207,9 +173,9 @@ export const loadTemplateStepSources = async (
     const filePath = join(templateRoot, filename);
     const document = parsePromptDocument(await readFile(filePath, "utf8"), filePath);
     const keys = Object.keys(document.attributes).sort();
-    const expectedKeys = [...STRUCTURAL_FIELDS].sort();
+    const expectedKeys = [...TEMPLATE_STEP_FRONTMATTER_KEYS].sort();
     if (JSON.stringify(keys) !== JSON.stringify(expectedKeys)) {
-      throw new Error(`${filePath} frontmatter must contain exactly ${STRUCTURAL_FIELDS.join(", ")}`);
+      throw new Error(`${filePath} frontmatter must contain exactly ${TEMPLATE_STEP_FRONTMATTER_KEYS.join(", ")}`);
     }
     const stepIndex = parseStepIndex(requiredFrontmatter(document, "stepIndex", filePath), filePath);
     if (Number(filename.slice(0, 2)) !== stepIndex) throw new Error(`${filePath} prefix does not match stepIndex ${stepIndex}`);
