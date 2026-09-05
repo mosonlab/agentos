@@ -14,6 +14,7 @@ import {
 
 const SHA_PATTERN = /^[0-9a-f]{40}$/u;
 const MAX_CANDIDATES = 3;
+const DEFAULT_LEASE_WAIT_MINUTES = 10;
 
 class CommandError extends Error {
   constructor(command, result) {
@@ -107,14 +108,17 @@ const defaultGate = async (_repoRoot, prefix, checkout) => {
   return { status, code: result.code, output };
 };
 
-export const acquireMergeTrainLease = (repoRoot, task, count, { environment = process.env, runner } = {}) =>
+export const acquireMergeTrainLease = (
+  repoRoot, task, count,
+  { environment = process.env, runner, leaseWaitMinutes = DEFAULT_LEASE_WAIT_MINUTES } = {},
+) =>
   acquireMergeLease({
     repoRoot,
     environment,
     runner,
     task,
     reason: `Publish ${count}-entry merge train`,
-    timeoutMinutes: 0,
+    timeoutMinutes: leaseWaitMinutes,
   });
 
 export const releaseMergeTrainLease = (repoRoot, task, { environment = process.env, runner } = {}) =>
@@ -260,7 +264,16 @@ const verifyPublishedCandidates = async (repoRoot, prefixes, adapters) => {
   return warnings;
 };
 
-export const coordinateMergeTrain = async ({ repoRoot, task, candidates, adapters: overrides = {} }) => {
+const validateLeaseWaitMinutes = (value) => {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error("--lease-wait-minutes must be a non-negative safe integer");
+  }
+};
+
+export const coordinateMergeTrain = async ({
+  repoRoot, task, candidates, leaseWaitMinutes = DEFAULT_LEASE_WAIT_MINUTES, adapters: overrides = {},
+}) => {
+  validateLeaseWaitMinutes(leaseWaitMinutes);
   validateCandidates(candidates);
   if (!task) throw new Error("--task is required");
   const adapters = { ...realAdapters, ...overrides };
@@ -322,10 +335,13 @@ export const coordinateMergeTrain = async ({ repoRoot, task, candidates, adapter
       };
     }
 
-    const acquisition = await adapters.acquireLease(repoRoot, task, passingCount);
+    const leaseWaitStarted = performance.now();
+    const acquisition = await adapters.acquireLease(repoRoot, task, passingCount, { leaseWaitMinutes });
+    const leaseWaitedMs = Math.round(performance.now() - leaseWaitStarted);
     if (acquisition.outcome === "contended") {
       return {
         status: "lease-contended",
+        leaseWaitedMs,
         baseSha,
         alreadyDelivered,
         prefixes: built.prefixes,
@@ -433,22 +449,34 @@ export const coordinateMergeTrain = async ({ repoRoot, task, candidates, adapter
 
 const usage = () => {
   process.stdout.write(`Usage:
-  scripts/merge-train.mjs --task <id> --candidate <pr>:<40-character-head> [--candidate ...]
+  scripts/merge-train.mjs --task <id> --candidate <pr>:<40-character-head> [--candidate ...] [--lease-wait-minutes <n>]
 
 Coordinates one fixed FIFO batch of at most three open GitHub pull requests.
 The command builds cumulative merge commits, gates them concurrently, then
 publishes only the longest contiguous passing prefix under the merge lease.
+
+  --lease-wait-minutes <n>  Wait up to n whole minutes for the publication lease
+                            (default: 10; 0 tries immediately).
+On lease-contended, JSON includes leaseWaitedMs (elapsed acquisition milliseconds).
 `);
 };
 
 const parseArguments = (argv) => {
   const candidates = [];
   let task = "";
+  let leaseWaitMinutes = DEFAULT_LEASE_WAIT_MINUTES;
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--help" || argument === "-h") return { help: true };
     if (argument === "--task") {
       task = argv[index + 1] ?? "";
+      index += 1;
+      continue;
+    }
+    if (argument === "--lease-wait-minutes") {
+      const value = argv[index + 1] ?? "";
+      leaseWaitMinutes = /^\d+$/u.test(value) ? Number(value) : NaN;
+      validateLeaseWaitMinutes(leaseWaitMinutes);
       index += 1;
       continue;
     }
@@ -463,7 +491,7 @@ const parseArguments = (argv) => {
     }
     throw new Error(`unknown argument: ${argument}`);
   }
-  return { help: false, task, candidates };
+  return { help: false, task, candidates, leaseWaitMinutes };
 };
 
 const main = async () => {
@@ -473,13 +501,16 @@ const main = async () => {
     return;
   }
   const repoRoot = await checkedProcess("git", ["rev-parse", "--show-toplevel"]);
-  const result = await coordinateMergeTrain({ repoRoot, task: options.task, candidates: options.candidates });
+  const result = await coordinateMergeTrain({
+    repoRoot, task: options.task, candidates: options.candidates, leaseWaitMinutes: options.leaseWaitMinutes,
+  });
   for (const gateResult of result.gateResults) {
     process.stdout.write(`\nmerge-train: gate P${gateResult.prefix.index} for PR #${gateResult.prefix.candidate.pullRequest}\n`);
     process.stdout.write(gateResult.output.endsWith("\n") ? gateResult.output : `${gateResult.output}\n`);
   }
   const summary = {
     status: result.status,
+    ...(result.status === "lease-contended" ? { leaseWaitedMs: result.leaseWaitedMs } : {}),
     baseSha: result.baseSha,
     liveMain: result.liveMain ?? result.baseSha,
     alreadyDelivered: result.alreadyDelivered.map((candidate) => candidate.pullRequest),

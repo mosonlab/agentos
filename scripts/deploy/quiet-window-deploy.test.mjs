@@ -1416,22 +1416,7 @@ test("runner phase table rechecks the control-plane target immediately before pu
 
 test("standalone builder creates a verified exact-commit release", () => {
   const deployRoot = mkdtempSync(join(tmpdir(), "anneal-artifact-builder-"));
-  const commands = [];
-  const artifact = buildReleaseArtifact({
-    deployRoot,
-    revision: revisions.to,
-    sourceRemote: "https://example.invalid/anneal.git",
-    gitBinary: "/git",
-    nodeBinary: "/node",
-    npmBinary: "/npm",
-    requiredPaths: ["packages/api/dist", "packages/runner/dist"],
-    artifactPaths: () => COMPLETE_ARTIFACT_PATHS,
-    optionalArtifactPaths: () => [],
-    execute: (program, args, options = {}) => {
-      commands.push({ program, args });
-      if (args.join(" ") === "/npm run build") minimalBuildTree(options.cwd, revisions.to);
-    },
-  });
+  const { artifact, commands } = buildWithScriptedClone({ deployRoot, cloneOutcomes: [null] });
   assert.equal(artifact.revision, revisions.to);
   assert.deepEqual(artifact.dbMaintenanceSourceImports, ["schema-census"]);
   assert.match(artifact.releaseName, new RegExp(`^${revisions.to}-[0-9a-f]{64}$`, "u"));
@@ -1451,6 +1436,161 @@ test("standalone builder creates a verified exact-commit release", () => {
   assert.deepEqual(commands.slice(1).map(({ args }) => args.slice(-2)), [
     ["--detach", revisions.to], ["/npm", "ci"], ["run", "build"],
   ]);
+  removeTree(deployRoot);
+});
+
+const capturedFailure = (build) => {
+  try {
+    build();
+  } catch (error) {
+    return error;
+  }
+  return assert.fail("expected the build to fail");
+};
+
+/** What the builder's own runner raises after `git clone` exits 128. */
+const cloneFailure = (stderr) => Object.assign(
+  new DeployFailure("release-artifact-source-unavailable", "exit-128"),
+  { status: 128, stderr },
+);
+
+/** Drive the standalone builder with a fake git whose clone outcomes are
+ * scripted per attempt. `null` succeeds; an error is thrown as the real
+ * runner would after a failed `git clone`. */
+const buildWithScriptedClone = ({ deployRoot, cloneOutcomes, commands = [], waits = [] }) => {
+  let attempt = 0;
+  const artifact = buildReleaseArtifact({
+    deployRoot,
+    revision: revisions.to,
+    sourceRemote: "https://example.invalid/anneal.git",
+    gitBinary: "/git",
+    nodeBinary: "/node",
+    npmBinary: "/npm",
+    requiredPaths: ["packages/api/dist", "packages/runner/dist"],
+    artifactPaths: () => COMPLETE_ARTIFACT_PATHS,
+    optionalArtifactPaths: () => [],
+    sleep: (ms) => waits.push(ms),
+    execute: (program, args, options = {}) => {
+      commands.push({ program, args });
+      if (args[0] === "clone") {
+        const outcome = cloneOutcomes[attempt++];
+        if (outcome) throw outcome;
+        return undefined;
+      }
+      if (args.join(" ") === "/npm run build") minimalBuildTree(options.cwd, revisions.to);
+      return undefined;
+    },
+  });
+  return { artifact, commands, waits };
+};
+
+test("a transient clone failure is retried and the receipt records the attempts", () => {
+  const deployRoot = mkdtempSync(join(tmpdir(), "anneal-artifact-clone-retry-"));
+  const tlsFailure = () => cloneFailure(
+    "fatal: unable to access 'https://example.invalid/anneal.git/': gnutls_handshake() failed: The TLS connection was non-properly terminated\n",
+  );
+  const { artifact, commands, waits } = buildWithScriptedClone({
+    deployRoot,
+    cloneOutcomes: [tlsFailure(), tlsFailure(), null],
+  });
+  assert.equal(artifact.cloneAttempts, 3);
+  assert.equal(artifact.revision, revisions.to);
+  assert.equal(commands.filter(({ args }) => args[0] === "clone").length, 3);
+  assert.equal(waits.length, 2);
+  assert.ok(waits.every((ms) => ms > 0));
+  removeTree(deployRoot);
+});
+
+test("builder CLI emits the retry receipt and preserves verbose successful clone stderr", () => {
+  const deployRoot = mkdtempSync(join(tmpdir(), "anneal-artifact-cli-"));
+  try {
+    const source = join(deployRoot, "fixture");
+    minimalBuildTree(source, revisions.to);
+    writeFileSync(join(source, "package.json"), JSON.stringify({ workspaces: ["packages/*", "apps/*"] }));
+    for (const path of DEPLOY_REQUIRED_ARTIFACT_PATHS) mkdirSync(join(source, path), { recursive: true });
+    for (const path of deployReleaseArtifactPaths(source)) {
+      if (existsSync(join(source, path))) continue;
+      mkdirSync(dirname(join(source, path)), { recursive: true });
+      writeFileSync(join(source, path), "");
+    }
+    const git = join(deployRoot, "fake-git.cjs");
+    const count = join(deployRoot, "attempts");
+    writeFileSync(git, `#!${process.execPath}
+const fs = require("node:fs");
+if (process.argv[2] === "clone") {
+  const countPath = ${JSON.stringify(count)};
+  const attempt = fs.existsSync(countPath) ? Number(fs.readFileSync(countPath, "utf8")) + 1 : 1;
+  fs.writeFileSync(countPath, String(attempt));
+  if (attempt < 3) {
+    fs.writeSync(2, "gnutls_handshake() failed: The TLS connection was non-properly terminated\\n");
+    process.exit(128);
+  }
+  fs.writeSync(2, "x".repeat(2 * 1024 * 1024) + "successful clone warning\\n");
+  fs.cpSync(${JSON.stringify(source)}, process.argv.at(-1), { recursive: true });
+}
+`);
+    chmodSync(git, 0o755);
+    const npm = join(deployRoot, "fake-npm.cjs");
+    writeFileSync(npm, "");
+    const result = spawnSync(process.execPath, [
+      join(REPOSITORY_ROOT, "scripts/deploy/build-release-artifact.mjs"), revisions.to,
+    ], {
+      env: {
+        ...process.env,
+        AGENTOS_REPOSITORY_ROOT: deployRoot,
+        DEPLOY_SOURCE_REMOTE: "https://example.invalid/anneal.git",
+        DEPLOY_GIT_BINARY: git,
+        DEPLOY_NODE_BINARY: process.execPath,
+        DEPLOY_NPM_BINARY: npm,
+      },
+      encoding: "utf8",
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    assert.equal(result.status, 0, result.stderr?.slice(-4000));
+    const line = result.stdout.split("\n").find((line) => line.startsWith("RELEASE-ARTIFACT "));
+    assert.ok(line, result.stdout);
+    const receipt = JSON.parse(line.slice("RELEASE-ARTIFACT ".length));
+    assert.equal(receipt.cloneAttempts, 3);
+    assert.equal(receipt.revision, revisions.to);
+    assert.equal(readFileSync(count, "utf8"), "3");
+    assert.equal(findReleaseArtifact({ deployRoot, revision: revisions.to }).releaseName, receipt.releaseName);
+    assert.match(result.stderr, /successful clone warning/u);
+    assert.equal(result.stderr.match(/gnutls_handshake/g)?.length, 2);
+  } finally {
+    removeTree(deployRoot);
+  }
+});
+
+test("an exhausted clone retry keeps the source-unavailable failure shape", () => {
+  const deployRoot = mkdtempSync(join(tmpdir(), "anneal-artifact-clone-exhausted-"));
+  const commands = [];
+  const waits = [];
+  const failure = capturedFailure(() => buildWithScriptedClone({
+    deployRoot,
+    commands,
+    waits,
+    cloneOutcomes: [0, 1, 2].map(() => cloneFailure("fatal: unable to access: Connection reset by peer\n")),
+  }));
+  assert.equal(commands.filter(({ args }) => args[0] === "clone").length, 3);
+  assert.deepEqual(waits, [2_000, 8_000]);
+  assert.ok(failure instanceof DeployFailure);
+  assert.equal(failure.reason, "release-artifact-source-unavailable");
+  assert.equal(failure.detail, "exit-128");
+  removeTree(deployRoot);
+});
+
+test("a clone failure that is not network-shaped is not retried", () => {
+  const deployRoot = mkdtempSync(join(tmpdir(), "anneal-artifact-clone-fatal-"));
+  const commands = [];
+  const failure = capturedFailure(() => buildWithScriptedClone({
+    deployRoot,
+    commands,
+    cloneOutcomes: [0, 1, 2].map(() => cloneFailure("fatal: not a git repository\n")),
+  }));
+  assert.ok(failure instanceof DeployFailure);
+  assert.equal(failure.reason, "release-artifact-source-unavailable");
+  assert.equal(failure.detail, "exit-128");
+  assert.equal(commands.filter(({ args }) => args[0] === "clone").length, 1);
   removeTree(deployRoot);
 });
 
