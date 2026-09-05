@@ -28,7 +28,7 @@ import { blockingPredecessor } from "./chain.js";
 import { FAILURE_REASON_LIMIT, failureReasonText } from "./failure-reason.js";
 import type { Refusal } from "./refusal.js";
 import { validateSchedule } from "./scheduler.js";
-import { patchesBriefInPlace, rewriteBrief } from "./task-brief.js";
+import { legacyBriefMigration, patchesBriefInPlace, rewriteBrief } from "./task-brief.js";
 import { taskMoveAuthority } from "./task-move-authority.js";
 import {
   hasActiveRun,
@@ -306,9 +306,7 @@ export const patchTask = async (
       return { reason: "invalid-request", message: "Cannot rewrite task brief: template Step metadata is missing" };
     }
     if (patchesBriefInPlace(before, templateStep.outputKind)) {
-      const rewritten = rewriteBrief(before.description, body.description, {
-        legacyAttachmentsFromPrevious: templateStep.priorOutputKinds.length > 0,
-      });
+      const rewritten = rewriteBrief(before.description, body.description, legacyBriefMigration(templateStep));
       if (typeof rewritten !== "string") {
         return {
           reason: "invalid-request",

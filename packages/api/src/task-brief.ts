@@ -25,6 +25,19 @@ type LegacyBriefMigration = {
   legacyAttachmentsFromPrevious: boolean;
 };
 
+/**
+ * How to read a brief written before the fence existed, derived from the one
+ * fact that decides it: whether the Step's prompt carried the prior-outputs
+ * reminder. Every caller holds the same template Step columns, so the
+ * derivation lives here once. Passing no migration at all stays a distinct
+ * decision: a fenced brief is required and there is no legacy fallback.
+ */
+export const legacyBriefMigration = (
+  templateStep: { priorOutputKinds: readonly string[] } | null | undefined,
+): LegacyBriefMigration => ({
+  legacyAttachmentsFromPrevious: (templateStep?.priorOutputKinds.length ?? 0) > 0,
+});
+
 export const stepHasTaskBrief = (outputKind: string): boolean => {
   const role = stepRole({ outputKind });
   return role !== "readiness" && role !== "integrator";
@@ -168,9 +181,7 @@ export const editableBrief = (
   templateStep: { outputKind: string; priorOutputKinds: string[] } | null,
 ): string | null => {
   if (patchesBriefInPlace(task, templateStep?.outputKind ?? null)) {
-    const brief = readBrief(task.description, {
-      legacyAttachmentsFromPrevious: (templateStep?.priorOutputKinds.length ?? 0) > 0,
-    });
+    const brief = readBrief(task.description, legacyBriefMigration(templateStep));
     // An unreadable fence is not an invitation to rewrite the description
     // wholesale: the patch would refuse the write anyway.
     return "unparseable" in brief ? null : brief.brief;

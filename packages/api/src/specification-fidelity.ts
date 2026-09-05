@@ -12,7 +12,7 @@ import { abortableDelay, abortReason } from "./abortable-delay.js";
 import { isCanonicalBlindFindingsStep, isCanonicalSolFindingsStep } from "./canonical-task-output.js";
 import { isValidBranchName } from "./branch-name.js";
 import { GitHubReadError } from "./github-read.js";
-import { readBrief } from "./task-brief.js";
+import { legacyBriefMigration, readBrief } from "./task-brief.js";
 
 /** Stable, operator-visible reasons for the distinct fail-closed outcomes. */
 export const SPEC_TRANSCRIPTION_REFUSAL_REASON = "spec-transcription-mismatch";
@@ -75,9 +75,7 @@ export const specificationMaterializationForDirectImplementation = (
   if (!task.templateId || !task.chainId
     || !isSpecificationMaterializationImplementationStep(task.templateStep ?? null)
     || !branch || !isValidBranchName(branch)) return null;
-  const parsed = readBrief(task.description, {
-    legacyAttachmentsFromPrevious: (task.templateStep?.priorOutputKinds.length ?? 0) > 0,
-  });
+  const parsed = readBrief(task.description, legacyBriefMigration(task.templateStep));
   return "unparseable" in parsed ? null : {
     kind: "direct-implementation",
     path: specificationPathForBranch(branch),
@@ -214,9 +212,7 @@ const directAuthority = (source: AuthoritySource): AuthorityResult => {
       "direct-chain implementation step metadata is missing",
     ) };
   }
-  const parsed = readBrief(source.description, {
-    legacyAttachmentsFromPrevious: source.templateStep.priorOutputKinds.length > 0,
-  });
+  const parsed = readBrief(source.description, legacyBriefMigration(source.templateStep));
   return "unparseable" in parsed
     ? { error: refusal(
       SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON,
