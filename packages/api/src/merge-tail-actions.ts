@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   asJsonObject,
   errorForOpenRunRefusal,
+  findCanonicalAgent,
   isIntegratorStep,
   isRegressionVerificationOutputKind,
   latestMarker,
@@ -38,6 +39,22 @@ import { awaitAuthorization, blockDownstream, exhaust } from "./merge-tail-state
  */
 
 type DbTx = Prisma.TransactionClient;
+
+/** The canonical roles automatic repair falls back to when the chain names no
+ *  Agent of its own. They are role file names — the Agent's canonical identity
+ *  under R9 — and never the operator-editable `name` column, so a renamed
+ *  canonical Agent still answers. */
+const MERGE_RESOLVER_ROLE = "merge-resolver-opus-medium";
+const FIX_IMPLEMENTATION_ROLE = "senior-dev-astra-medium";
+
+/**
+ * Who a repair card is assigned to: the Agent the chain already bound to its
+ * fix step, or the canonical role that owns the repair when the chain names
+ * none.
+ */
+export type MergeTailRepairAssignee =
+  | Readonly<{ kind: "agent"; agentId: string; label: string }>
+  | Readonly<{ kind: "role"; canonicalRole: string }>;
 
 /**
  * Records the platform-owned requeue that earns one additional attempt for a
@@ -585,7 +602,7 @@ export const createMergeTailRepairTask = async (
   input: {
     regressionTask: { id: string; projectId: string; repoId: string | null; templateId: string | null; chainId: string | null; chainIndex: number | null; targetBranch: string | null };
     sourceRun: { id: string; branch: string | null };
-    agentName: string;
+    assignee: MergeTailRepairAssignee;
     repairKind: "refresh-conflict" | "gate-fix" | "review-fix";
     headSha: string;
     baseHeadSha: string;
@@ -601,14 +618,25 @@ export const createMergeTailRepairTask = async (
   ) {
     return { refusal: "repair task cannot resolve its chain position, repository, and shared branch" };
   }
-  const agent = await tx.agent.findFirst({
-    where: { projectId: regressionTask.projectId, name: input.agentName, archivedAt: null },
-  });
-  if (!agent) return { refusal: `required repair agent ${input.agentName} is absent or archived` };
+  // Addressed by id or by canonical role, never by the editable name: an
+  // operator may rename the canonical resolver, and the repair still belongs
+  // to that role's Agent (R9).
+  const agentLabel = input.assignee.kind === "agent" ? input.assignee.label : input.assignee.canonicalRole;
+  const agent = input.assignee.kind === "agent"
+    ? await tx.agent.findFirst({
+      where: { id: input.assignee.agentId, projectId: regressionTask.projectId, archivedAt: null },
+      select: { id: true },
+    })
+    : await findCanonicalAgent(tx, {
+      projectId: regressionTask.projectId,
+      canonicalRole: input.assignee.canonicalRole,
+      activeOnly: true,
+    });
+  if (!agent) return { refusal: `required repair agent ${agentLabel} is absent or archived` };
   const grant = await tx.agentRepoAccess.findFirst({
     where: { projectId: regressionTask.projectId, agentId: agent.id, repoId: regressionTask.repoId },
   });
-  if (!grant) return { refusal: `required repair agent ${input.agentName} has no repository grant` };
+  if (!grant) return { refusal: `required repair agent ${agentLabel} has no repository grant` };
 
   // A repair task is deliberately chain-detached, so the claim path's own
   // prior-output lookup (which keys off chainId and chainIndex) never fires for
@@ -644,7 +672,7 @@ export const createMergeTailRepairTask = async (
       ? [
         `Resolve the refresh conflict between chain head ${input.headSha} and target head ${input.baseHeadSha}.`,
         input.summary,
-        `Re-run the merge, preserve both intents under the merge-resolver-opus-medium role contract, commit the resolution, and persist the role's versioned JSON bound to start ${input.headSha} and target ${input.baseHeadSha}.`,
+        `Re-run the merge, preserve both intents under the ${MERGE_RESOLVER_ROLE} role contract, commit the resolution, and persist the role's versioned JSON bound to start ${input.headSha} and target ${input.baseHeadSha}.`,
       ]
       : [
         `Repair the autonomous merge tail failure at ${input.headSha} against target ${input.baseHeadSha}.`,
@@ -714,7 +742,7 @@ export const createMergeTailRepairTask = async (
  * operator reentry. Keeping this lookup in one place prevents the two repair
  * entrypoints from drifting when a template binds its fixed implementation
  * step to a non-default Agent. */
-export const mergeTailRepairAgentName = async (
+export const mergeTailRepairAssignee = async (
   tx: DbTx,
   input: {
     projectId: string;
@@ -722,8 +750,8 @@ export const mergeTailRepairAgentName = async (
     templateId: string | null;
     repairKind: "refresh-conflict" | "gate-fix" | "review-fix";
   },
-): Promise<string> => {
-  if (input.repairKind === "refresh-conflict") return "merge-resolver-opus-medium";
+): Promise<MergeTailRepairAssignee> => {
+  if (input.repairKind === "refresh-conflict") return { kind: "role", canonicalRole: MERGE_RESOLVER_ROLE };
   const fixTask = await tx.task.findFirst({
     where: {
       projectId: input.projectId,
@@ -731,9 +759,14 @@ export const mergeTailRepairAgentName = async (
       templateId: input.templateId,
       templateStep: { outputKind: "fixed-implementation" },
     },
-    select: { assigneeAgent: { select: { name: true } } },
+    select: { assigneeAgent: { select: { id: true, name: true } } },
   });
-  return fixTask?.assigneeAgent?.name ?? "senior-dev-astra-medium";
+  const bound = fixTask?.assigneeAgent;
+  // The chain already staffed this step, so its Agent is addressed by id: a
+  // staffing profile may have put any Agent there, canonical or not.
+  return bound
+    ? { kind: "agent", agentId: bound.id, label: bound.name }
+    : { kind: "role", canonicalRole: FIX_IMPLEMENTATION_ROLE };
 };
 
 export const handleRegressionCompletion = async (
@@ -838,11 +871,11 @@ export const handleRegressionCompletion = async (
         ? `semantic regression FAIL on chain head ${verdict.headSha} after ${priorAttempts} automatic repair attempts`
         : `merge gate FAIL on chain head ${verdict.headSha} after ${priorAttempts} automatic repair attempts`);
   }
-  const agentName = await mergeTailRepairAgentName(tx, { ...input.task, repairKind });
+  const assignee = await mergeTailRepairAssignee(tx, { ...input.task, repairKind });
   const repair = await createMergeTailRepairTask(tx, {
     regressionTask: input.task,
     sourceRun: input.run,
-    agentName,
+    assignee,
     repairKind,
     headSha: verdict.headSha,
     baseHeadSha: verdict.baseHeadSha,

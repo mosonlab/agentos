@@ -17,7 +17,7 @@ import {
 
 import {
   createMergeTailRepairTask,
-  mergeTailRepairAgentName,
+  mergeTailRepairAssignee,
   regressionVerdictForRun,
 } from "./merge-tail-actions.js";
 import type { Refusal } from "./refusal.js";
@@ -44,14 +44,14 @@ export type MergeTailRepairRequestResult = {
 export type MergeTailRepairReentryDependencies = {
   readHistory: typeof readMarkerHistory;
   qualifyVerdict: typeof regressionVerdictForRun;
-  resolveAgentName: typeof mergeTailRepairAgentName;
+  resolveAssignee: typeof mergeTailRepairAssignee;
   createRepairTask: typeof createMergeTailRepairTask;
 };
 
 const defaultDependencies: MergeTailRepairReentryDependencies = {
   readHistory: readMarkerHistory,
   qualifyVerdict: regressionVerdictForRun,
-  resolveAgentName: mergeTailRepairAgentName,
+  resolveAssignee: mergeTailRepairAssignee,
   createRepairTask: createMergeTailRepairTask,
 };
 
@@ -242,11 +242,11 @@ export const requestMergeTailRepair = async (
     return refused("merge_tail_repair_budget_exhausted", `The ${repairKind} repair budget is exhausted`);
   }
 
-  const agentName = await dependencies.resolveAgentName(tx, { ...regressionTask, repairKind });
+  const assignee = await dependencies.resolveAssignee(tx, { ...regressionTask, repairKind });
   const repair = await dependencies.createRepairTask(tx, {
     regressionTask,
     sourceRun,
-    agentName,
+    assignee,
     repairKind,
     headSha: verdict.headSha,
     baseHeadSha: verdict.baseHeadSha,

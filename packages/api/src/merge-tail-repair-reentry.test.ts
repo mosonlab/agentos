@@ -159,7 +159,7 @@ const scenario = (options: ScenarioOptions = {}) => {
         : verdict === "review-fail"
           ? { status: "ok", verdict: { schemaVersion: 2, outcome: "review-fail", headSha: HEAD, baseHeadSha: BASE, summary: "semantic defect" }, headSha: HEAD }
           : { status: "ok", verdict: { schemaVersion: 2, outcome: "gate-fail", headSha: HEAD, baseHeadSha: BASE, gateVerdict: "FAIL", gateProof: "MERGE GATE: FAIL (tests)", summary: "gate defect" }, headSha: HEAD },
-    resolveAgentName: async () => "fixed-implementation-agent",
+    resolveAssignee: async () => ({ kind: "agent", agentId: "fixed-implementation-agent", label: "fix" }),
     createRepairTask: async (_tx, input) => {
       if (options.repairRefusal) return { refusal: options.repairRefusal };
       assert.notEqual(input.repairKind, "refresh-conflict");
@@ -252,7 +252,11 @@ test("operator recovery repair creates once, uses the fixed assignee, and replay
   assert.deepEqual(first, expected);
   assert.deepEqual(replay, expected);
   assert.equal(observed.repairCalls.length, 1);
-  assert.equal(observed.repairCalls[0]?.agentName, "fixed-implementation-agent");
+  assert.deepEqual(observed.repairCalls[0]?.assignee, {
+    kind: "agent",
+    agentId: "fixed-implementation-agent",
+    label: "fix",
+  });
   assert.equal(observed.repairCalls[0]?.sourceRun.id, "recovery-run-1");
   assert.equal(observed.recoveryUpdates.length, 1);
   assert.deepEqual(observed.recoveryUpdates[0]?.data, {
