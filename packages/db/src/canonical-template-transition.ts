@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { AssigneeType, RunStatus } from "@prisma/client";
+import { AssigneeType } from "@prisma/client";
 
 import { PR_TEMPLATE_NAME } from "./agent-contract.js";
 import { stepRole, type StepRole } from "./step-role.js";
@@ -575,14 +575,6 @@ export const legacyGenerationMarkerForTemplateName = (templateName: string): str
  */
 export const legacyTemplateName = (templateName: string, marker: string, templateId: string): string =>
   `${templateName}-legacy-${marker}-${templateId}`;
-
-export const TEMPLATE_ROLLOVER_ACTIVE_RUN_STATUSES = [
-  RunStatus.QUEUED,
-  RunStatus.CLAIMED,
-  RunStatus.PROVISIONING,
-  RunStatus.RUNNING,
-  RunStatus.WAITING_INBOX,
-] as const;
 
 /**
  * A quiescent chain may move under a legacy template name without changing any

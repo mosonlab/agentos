@@ -66,8 +66,6 @@ export type RunOutcome =
    */
   | { case: "provider-failure"; reason: string; envelope: FailureEnvelope };
 
-export type RunOutcomeCase = RunOutcome["case"];
-
 /** The budget gates `evaluateBudget` can refuse a Run on. */
 export const budgetGates = ["max-runs", "walltime", "stall"] as const;
 
