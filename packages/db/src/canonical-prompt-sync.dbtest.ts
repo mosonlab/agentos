@@ -863,42 +863,51 @@ test("sync adopts any uncustomized canonical runtime drift", async () => {
 
   await prisma.agent.updateMany({ where: { projectId: project.id, name: "review-coordinator-astra-medium" }, data: driftedCoordinator });
   await prisma.agent.updateMany({ where: { projectId: project.id, name: "code-reviewer-sol-high" }, data: driftedSol });
-  await prisma.agent.updateMany({
+  // §R9 made title adoptable, so it is drifted here as the identity half of the
+  // adoption rather than as a refusal. `inboxAccess` is what the Markdown still
+  // owns outright, and it is what makes the run refuse.
+  const coordinator = await prisma.agent.findFirstOrThrow({
     where: { projectId: project.id, name: "review-coordinator-astra-medium" },
-    data: { title: "Unrelated drift" },
+    select: { id: true, inboxAccess: true },
+  });
+  await prisma.agent.update({
+    where: { id: coordinator.id },
+    data: { title: "Unrelated drift", inboxAccess: !coordinator.inboxAccess },
   });
 
   const rejected = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
   assert.notEqual(rejected.status, 0, rejected.output);
-  assert.match(rejected.output, /Agent review-coordinator-astra-medium .* differs from canonical Markdown structure: title/u);
+  assert.match(rejected.output, /Agent review-coordinator-astra-medium .* differs from canonical Markdown structure: inboxAccess/u);
   const rolledBack = await prisma.agent.findMany({
     where: { projectId: project.id, name: { in: names } },
-    select: { name: true, model: true, runnerPreference: true },
+    select: { name: true, title: true, model: true, runnerPreference: true },
   });
   assert.equal(rolledBack.length, 2);
   assert.ok(rolledBack.every((agent) => (agent.name === "review-coordinator-astra-medium"
     ? agent.model === driftedCoordinator.model && agent.runnerPreference === driftedCoordinator.runnerPreference
     : agent.model === driftedSol.model && agent.runnerPreference === driftedSol.runnerPreference)));
+  // The adoptable title drift rolled back with the refused transaction too.
+  assert.equal(rolledBack.find(({ name }) => name === "review-coordinator-astra-medium")?.title, "Unrelated drift");
 
-  await prisma.agent.updateMany({
-    where: { projectId: project.id, name: "review-coordinator-astra-medium" },
-    data: { title: "Review Coordinator" },
-  });
+  await prisma.agent.update({ where: { id: coordinator.id }, data: { inboxAccess: coordinator.inboxAccess } });
   const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
   assert.equal(synced.status, 0, synced.output);
   assert.match(synced.output, /"adoptedAgentDefaults":2/u);
+  // The drifted title was adopted in the same run, not refused.
+  assert.match(synced.output, /"adoptedAgentIdentity":1/u);
   assert.match(synced.output, runtimeAdoptionPattern("review-coordinator-astra-medium", driftedCoordinator, coordinatorSource));
   assert.match(synced.output, runtimeAdoptionPattern("code-reviewer-sol-high", driftedSol, solSource));
 
   const upgraded = await prisma.agent.findMany({
     where: { projectId: project.id, name: { in: names } },
-    select: { name: true, model: true, runnerPreference: true },
+    select: { name: true, title: true, model: true, runnerPreference: true },
   });
   assert.equal(upgraded.length, 2);
   assert.ok(upgraded.every((agent) => {
     const source = canonicalRuntime(agent.name);
     return agent.model === source.model && agent.runnerPreference === source.runnerPreference;
   }));
+  assert.notEqual(upgraded.find(({ name }) => name === "review-coordinator-astra-medium")?.title, "Unrelated drift");
 });
 
 test("sync adopts uncustomized model-only runtime drift", async () => {
@@ -1327,9 +1336,41 @@ test("canonical sync adopts the tolerated differences and refuses every other on
   assert.equal(await provisioning(implementationStep.id), false);
   await prisma.taskTemplateStep.update({ where: { id: implementationStep.id }, data: { provisionDependencies: true } });
 
-  // An adoption that rewrites a column instantiated Tasks copy refuses a referenced step.
-  await prisma.taskTemplateStep.update({ where: { id: regressionStep.id }, data: { assigneeAgentId: retiredReviewer.id } });
+  // An adoption that rewrites a column instantiated Tasks copy refuses a
+  // referenced step. §R8 took the Agent binding out of that class -- a Task
+  // keeps the assignee it was created with, and staffing owns who runs it -- so
+  // the case is proved on the step rename, which Tasks do copy.
+  const authorizationStep = step(7);
+  assert.equal(authorizationStep.name, "Merge authorization");
+  await prisma.taskTemplateStep.update({ where: { id: authorizationStep.id }, data: { name: "Merge readiness" } });
   const referenced = await prisma.task.create({ data: {
+    projectId: project.id,
+    templateId: template.id,
+    templateStepId: authorizationStep.id,
+    name: "referenced merge readiness",
+    description: "operator-owned evidence",
+    assigneeAgentId: authorizationStep.assigneeAgentId,
+    assigneeType: authorizationStep.assigneeType,
+    status: TaskStatus.TODO,
+  } });
+  const refusedReferenced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.notEqual(refusedReferenced.status, 0, refusedReferenced.output);
+  assert.match(refusedReferenced.output, /referenced by instantiated tasks/u);
+  assert.equal(
+    (await prisma.taskTemplateStep.findUniqueOrThrow({ where: { id: authorizationStep.id } })).name,
+    "Merge readiness",
+  );
+  // The tolerated review-step write happened earlier in the same transaction and rolled back with it.
+  assert.equal(await provisioning(reviewStep.id), true);
+  assert.equal((await prisma.task.findUniqueOrThrow({ where: { id: referenced.id } })).description, "operator-owned evidence");
+  await prisma.task.delete({ where: { id: referenced.id } });
+  await prisma.taskTemplateStep.update({ where: { id: authorizationStep.id }, data: { name: "Merge authorization" } });
+
+  // The Agent binding is the exception: a referenced step is rebound to its
+  // canonical default, and the Task instantiated from it keeps its own
+  // assignee, which is now a staffing decision rather than a template one.
+  await prisma.taskTemplateStep.update({ where: { id: regressionStep.id }, data: { assigneeAgentId: retiredReviewer.id } });
+  const staffedTask = await prisma.task.create({ data: {
     projectId: project.id,
     templateId: template.id,
     templateStepId: regressionStep.id,
@@ -1339,14 +1380,17 @@ test("canonical sync adopts the tolerated differences and refuses every other on
     assigneeType: "AGENT",
     status: TaskStatus.TODO,
   } });
-  const refusedReferenced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
-  assert.notEqual(refusedReferenced.status, 0, refusedReferenced.output);
-  assert.match(refusedReferenced.output, /referenced by instantiated tasks/u);
-  assert.equal(await assignee(regressionStep.id), retiredReviewer.id);
-  // The tolerated review-step write happened earlier in the same transaction and rolled back with it.
-  assert.equal(await provisioning(reviewStep.id), true);
-  assert.equal((await prisma.task.findUniqueOrThrow({ where: { id: referenced.id } })).description, "operator-owned evidence");
-  await prisma.task.delete({ where: { id: referenced.id } });
+  const rebound = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(rebound.status, 0, rebound.output);
+  assert.equal(await assignee(regressionStep.id), verifier.id);
+  assert.equal(
+    (await prisma.task.findUniqueOrThrow({ where: { id: staffedTask.id } })).assigneeAgentId,
+    retiredReviewer.id,
+  );
+  await prisma.task.delete({ where: { id: staffedTask.id } });
+  // Put the drift back so the adoption below is the one being measured.
+  await prisma.taskTemplateStep.update({ where: { id: regressionStep.id }, data: { assigneeAgentId: retiredReviewer.id } });
+  await prisma.taskTemplateStep.update({ where: { id: reviewStep.id }, data: { provisionDependencies: true } });
 
   // Both differences are now adoptable; the dependency-provisioning write does not
   // protect a referenced step, so an instantiated Task does not stop it.

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { DependencyProvisioning, PrismaClient } from "@anneal/db";
 import { after, before, beforeEach, test } from "node:test";
 
-import { AssigneeType } from "@anneal/db";
+import { AssigneeType, RunnerPreference } from "@anneal/db";
 
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
@@ -311,7 +311,11 @@ test("integrator and pinned compound implementation bindings are checked after o
   const seed = await fixture("binding");
   const executioner = await db.agent.create({ data: {
     projectId: seed.project.id, environmentId: (await db.environment.findFirstOrThrow({ where: { projectId: seed.project.id } })).id,
+    // §R14: the compound root is a capability, so this canonical binding has to
+    // be a Codex gpt-* Agent or the whole graph is refused before the override
+    // cases this test is about are reached.
     name: "plan-executor-astra-medium", title: "executioner", model: "gpt-5.6-sol:high",
+    runnerPreference: RunnerPreference.CODEX,
     foundationalPrompt: "foundation", rolePrompt: "role",
   } });
   const sentinel = await db.agent.create({ data: {

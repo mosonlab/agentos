@@ -17,7 +17,7 @@
  * takes only the Project row. No existing writer takes a step row and then
  * acquires its template row.
  */
-import { Prisma, type Agent, type RunnerPreference } from "@prisma/client";
+import { Prisma, RunnerPreference, type Agent } from "@prisma/client";
 
 type Tx = Prisma.TransactionClient;
 
@@ -130,6 +130,31 @@ export const lockAgentRow = async (
 };
 
 /**
+ * `RunnerPreference` is stored under its `@map` name, and `$queryRaw` answers
+ * the stored spelling rather than the client enum: a raw row holds `codex`
+ * where `RunnerPreference.CODEX` is `CODEX`. Comparing the raw value to the
+ * enum reads every Agent as "not Codex" without failing anywhere, so the
+ * projection below translates the column back to the client spelling in SQL
+ * and every caller sees the enum it compares against. The table is exhaustive
+ * over the enum, so a new member fails the build here.
+ */
+const RUNNER_PREFERENCE_COLUMN = {
+  [RunnerPreference.CLAUDE]: "claude",
+  [RunnerPreference.CODEX]: "codex",
+  [RunnerPreference.PI]: "pi",
+  [RunnerPreference.AUTO]: "auto",
+  [RunnerPreference.INHERIT]: "inherit",
+} as const satisfies Record<RunnerPreference, string>;
+
+// `Prisma.raw`, not a bound parameter: the branches are this module's own
+// constants, and a raw fragment contributes no placeholder of its own.
+const runnerPreferenceAsClientEnum = Prisma.raw(
+  `CASE "runnerPreference"::text ${Object.entries(RUNNER_PREFERENCE_COLUMN)
+    .map(([preference, column]) => `WHEN '${column}' THEN '${preference}'`)
+    .join(" ")} END AS "runnerPreference"`,
+);
+
+/**
  * Takes the same mutex for a whole step list in one statement.
  *
  * `model` and `runnerPreference` are projected because the capability
@@ -159,7 +184,8 @@ export const lockAgentRows = async (
     model: string;
     runnerPreference: RunnerPreference;
   }>>`
-    SELECT "id", "name", "projectId", "archivedAt", "model", "runnerPreference" FROM "Agent"
+    SELECT "id", "name", "projectId", "archivedAt", "model", ${runnerPreferenceAsClientEnum}
+    FROM "Agent"
     WHERE "id" = ANY(${unique})
     ORDER BY "id" FOR UPDATE
   `;

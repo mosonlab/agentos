@@ -126,6 +126,10 @@ const createAgent = async (
       projectId: project.id,
       environmentId: project.environmentId,
       name: source.name,
+      // A row installed from `agents/` carries its canonical role (§R9); a
+      // fixture that leaves it null makes sync claim the role and rewrite rows
+      // these tests hold still.
+      canonicalRole: source.canonicalRole,
       title: source.title,
       model: source.model,
       runnerPreference: source.runnerPreference,
@@ -417,14 +421,16 @@ test("foreign structural drift refuses only that Project and still syncs canonic
     await deleteProject(healthyProject.id);
     await prisma.agent.update({
       where: { id: canonicalAgent.id },
-      data: { foundationalPrompt: canonicalAgent.foundationalPrompt, rolePrompt: canonicalAgent.rolePrompt, title: canonicalAgent.title },
+      data: { foundationalPrompt: canonicalAgent.foundationalPrompt, rolePrompt: canonicalAgent.rolePrompt, inboxAccess: canonicalAgent.inboxAccess },
     });
   });
 
+  // §R9 made `title` adoptable, so the structural drift a sync must refuse is a
+  // field the Markdown still owns outright.
   await prisma.agent.update({
     where: { id: refusedAgent.id },
     data: {
-      title: "operator structural drift",
+      inboxAccess: !refusedAgent.inboxAccess,
       foundationalPrompt: "foreign foundational drift",
       rolePrompt: "foreign role drift",
     },
@@ -484,18 +490,21 @@ test("canonical Project structural drift remains fatal and writes nothing", asyn
     await deleteProject(healthyProject.id);
     await prisma.agent.update({
       where: { id: canonicalAgent.id },
-      data: { title: canonicalAgent.title },
+      data: { inboxAccess: canonicalAgent.inboxAccess },
     });
   });
 
-  await prisma.agent.update({ where: { id: canonicalAgent.id }, data: { title: "canonical structural drift" } });
+  await prisma.agent.update({
+    where: { id: canonicalAgent.id },
+    data: { inboxAccess: !canonicalAgent.inboxAccess },
+  });
   await prisma.agent.update({
     where: { id: healthyAgent.id },
     data: { foundationalPrompt: "healthy Project prompt drift", rolePrompt: "healthy Project role drift" },
   });
   const canonicalBefore = await prisma.agent.findUniqueOrThrow({
     where: { id: canonicalAgent.id },
-    select: { title: true, foundationalPrompt: true, rolePrompt: true },
+    select: { inboxAccess: true, foundationalPrompt: true, rolePrompt: true },
   });
   const healthyBefore = await prisma.agent.findUniqueOrThrow({
     where: { id: healthyAgent.id },
@@ -511,7 +520,7 @@ test("canonical Project structural drift remains fatal and writes nothing", asyn
   assert.deepEqual(
     await prisma.agent.findUniqueOrThrow({
       where: { id: canonicalAgent.id },
-      select: { title: true, foundationalPrompt: true, rolePrompt: true },
+      select: { inboxAccess: true, foundationalPrompt: true, rolePrompt: true },
     }),
     canonicalBefore,
   );
@@ -713,8 +722,13 @@ test("full installation fills only the addressed Project's missing inventory and
   for (const agent of allAgents) {
     const source = role(agent.name);
     assert.equal(agent.title, source.title);
-    assert.equal(agent.model, agent.customizedFields ? customized.model : source.model);
-    assert.equal(agent.runnerPreference, agent.customizedFields ? customized.runnerPreference : source.runnerPreference);
+    // §R9 replaced the single flag with a per-field list, so the question is
+    // whether the operator edited *that* field, not whether the row is marked.
+    assert.equal(agent.model, agent.customizedFields.includes("model") ? customized.model : source.model);
+    assert.equal(
+      agent.runnerPreference,
+      agent.customizedFields.includes("runnerPreference") ? customized.runnerPreference : source.runnerPreference,
+    );
     assert.equal(agent.inboxAccess, source.inboxAccess);
     assert.equal(agent.foundationalPrompt, sources.foundationalPrompt);
     assert.equal(agent.rolePrompt, source.rolePrompt);
@@ -860,7 +874,9 @@ test("sync refusal classes include every available Project and object identifier
         const project = await createProject(`a2-refusal-agent-${randomBytes(4).toString("hex")}`);
         const agents = await createAgents(project, ["default"]);
         const agentId = agents.get("default")!;
-        await prisma.agent.update({ where: { id: agentId }, data: { title: "structural drift" } });
+        // §R9: `title` is adoptable now, so the drift a sync refuses is a field
+        // the Markdown owns outright. `default` grants inbox access.
+        await prisma.agent.update({ where: { id: agentId }, data: { inboxAccess: false } });
         return {
           args: [],
           expected: [new RegExp(`REFUSED ${project.slug}:`, "u"), new RegExp(`Agent default \\(${agentId}\\)`, "u")],

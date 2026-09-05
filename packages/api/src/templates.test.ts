@@ -1130,7 +1130,9 @@ const staffingFixture = (options: {
         return agentId !== undefined && granted.has(agentId) ? [{ agentId, repoId: "repo-1" }] : [];
       }
       if (sql.includes('"Agent"')) {
-        const requested = new Set(values[0] as string[]);
+        // The Agent lock interpolates a raw projection fragment before its id
+        // list, so the ids are the one array-valued binding, not the first.
+        const requested = new Set(values.find(Array.isArray) as string[]);
         return agents.filter(({ id }) => requested.has(id));
       }
       return [];

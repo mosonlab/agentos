@@ -108,6 +108,32 @@ WHERE "name" IN (
   'spec-revalidator'
 );
 
+-- A row already carrying a post-rename slug is that canonical role too: the
+-- repository's contract is that an Agent named after a role file is rewritten
+-- from it on every deploy, so leaving it unclaimed would strand it outside
+-- canonical sync while a second row could later claim the same role.
+UPDATE "Agent"
+SET "canonicalRole" = "name"
+WHERE "canonicalRole" IS NULL
+  AND "name" IN (
+    'code-reviewer-opus-high',
+    'code-reviewer-sol-high',
+    'frontend-dev-opus-medium',
+    'librarian-luna-xhigh',
+    'merge-resolver-opus-medium',
+    'plan-executor-astra-medium',
+    'plan-fable-medium',
+    'plan-reviser-opus-high',
+    'regression-verifier-luna-xhigh',
+    'review-coordinator-astra-medium',
+    'senior-dev-astra-medium',
+    'senior-dev-luna-max',
+    'senior-dev-opus-medium',
+    'senior-dev-sol-high',
+    'spec-opus-high',
+    'spec-revalidator-luna-xhigh'
+  );
+
 -- 4. Refuse before renaming anything -----------------------------------------
 
 -- A target slug already taken in the same project by a different row is a
