@@ -3,7 +3,8 @@ import test from "node:test";
 import { act } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { ChainList, agentOptionLabel } from "../components/chain-list";
+import { ChainList } from "../components/chain-list";
+import { agentOptionLabel } from "../lib/models";
 import { LocaleProvider } from "../lib/i18n";
 import { translate } from "../lib/i18n-core";
 import { TaskDetailPage } from "../pages/TaskDetail";

@@ -89,6 +89,17 @@ export const slugForModel = (name: string, model: string): string | null => {
   return role === "" ? null : `${role}-${short}-${effort}`;
 };
 
+/** `title · model effort` — the role and the price of running it, which is the
+ *  pair an operator weighs in every Agent picker: the chain's staffing select,
+ *  the task header's, and the New Task panel's. The model half is resolved
+ *  through the catalog so the option reads `Claude Opus 5 high` rather than the
+ *  stored `claude-opus-5:high`. */
+export const agentOptionLabel = (agent: { title: string; model: string }): string => {
+  const parsed = splitModel(agent.model);
+  const model = findModel(parsed.model)?.label ?? parsed.model;
+  return parsed.effort === null ? `${agent.title} · ${model}` : `${agent.title} · ${model} ${parsed.effort}`;
+};
+
 /** The chip form of a model: the catalog's label and the effort it pins, as one
  *  string, because a chip is a single line of text and not a layout. */
 export const modelChipLabel = (model: string): string => {

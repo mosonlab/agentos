@@ -3,7 +3,7 @@ import { type ReactNode, useEffect, useState } from "react";
 import { api } from "../lib/api";
 import { useAction, usePoll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
-import { findModel, splitModel } from "../lib/models";
+import { agentOptionLabel } from "../lib/models";
 import type {
   Agent, Project, Repo, StaffingProfile, StaffingProfileEntry, TaskTemplate, TaskTemplateStep,
 } from "../lib/types";
@@ -162,13 +162,6 @@ const changedStepOverrides = (
     if (Object.keys(override).length > 0) overrides[key] = override;
   }
   return Object.keys(overrides).length === 0 ? undefined : overrides;
-};
-
-/** `title · model effort`, the reading the model picker gives everywhere else. */
-const agentOptionLabel = (agent: Agent): string => {
-  const parsed = splitModel(agent.model);
-  const model = findModel(parsed.model)?.label ?? parsed.model;
-  return parsed.effort === null ? `${agent.title} · ${model}` : `${agent.title} · ${model} ${parsed.effort}`;
 };
 
 export const NewTask = ({ projectId, project, agents, repos, onClose, onCreated }: {
@@ -356,7 +349,7 @@ export const NewTask = ({ projectId, project, agents, repos, onClose, onCreated 
                     at rest. */}
                 <Select className="disabled:opacity-100 disabled:cursor-default" value={form.assigneeAgentId} disabled={form.assigneeType === "HUMAN"}
                   onChange={(event) => setForm({ ...form, assigneeAgentId: event.target.value })}>
-                  {activeAgents.map((agent) => <option key={agent.id} value={agent.id}>{agent.title} · {agent.model}</option>)}
+                  {activeAgents.map((agent) => <option key={agent.id} value={agent.id}>{agentOptionLabel(agent)}</option>)}
                 </Select>
               </Field>
             </div>
@@ -471,7 +464,9 @@ export const NewTask = ({ projectId, project, agents, repos, onClose, onCreated 
                       const listed = activeAgents.some((agent) => agent.id === chosenId);
                       return (
                         <div className="grid gap-[6px]" key={step.id}>
-                          <Field label={t("newTask.staffing.step.agent", { name: step.name })}>
+                          {/* A HUMAN step has no agent to pick, so it must not be
+                              labelled as if it had one. */}
+                          <Field label={t(step.assigneeType === "HUMAN" ? "newTask.staffing.step.human" : "newTask.staffing.step.agent", { name: step.name })}>
                             {step.assigneeType === "HUMAN"
                               ? <div className={HINT}>{t("newTask.preview.human")}</div>
                               : (

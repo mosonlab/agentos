@@ -470,6 +470,7 @@ export const en = {
   "newTask.staffing.profile.hint": "Who runs each step, and which optional steps this chain keeps.",
   "newTask.staffing.profile.label": "Staffing profile",
   "newTask.staffing.step.agent": "{name} — agent",
+  "newTask.staffing.step.human": "{name} — human",
   "newTask.staffing.step.include": "Include {name}",
   "newTask.staffing.title": "Staffing",
   "newTask.staffing.unstaffed": "Unstaffed",

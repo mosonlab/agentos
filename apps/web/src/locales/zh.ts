@@ -467,6 +467,7 @@ export const zh = {
   "newTask.staffing.profile.hint": "每个步骤由谁执行，以及这条链保留哪些可选步骤。",
   "newTask.staffing.profile.label": "配人档案",
   "newTask.staffing.step.agent": "{name} — 执行者",
+  "newTask.staffing.step.human": "{name} — 人工",
   "newTask.staffing.step.include": "包含 {name}",
   "newTask.staffing.title": "配人",
   "newTask.staffing.unstaffed": "未配人",

@@ -5,7 +5,7 @@ import { gateToggleRefusal } from "@anneal/db/gate-toggle";
 
 import { sha, titleCase } from "../lib/format";
 import { useT } from "../lib/i18n";
-import { findModel, splitModel } from "../lib/models";
+import { agentOptionLabel } from "../lib/models";
 import { parseRepairCycles, type RepairCycleViewModel } from "../lib/repair-subtimeline";
 import { Link } from "../lib/router";
 import type { Agent, Chain, ChainStep, TaskActivity } from "../lib/types";
@@ -151,16 +151,6 @@ export const ExecutionOwnerChip = ({ step }: { step: ChainStep }): ReactNode => 
 /** The Agent fields a staffing picker needs: who the role is, and what running
  *  it costs. `ChainStep.agent` and `TaskBase.assigneeAgent` both satisfy it. */
 export type ReassignAgent = Pick<Agent, "id" | "title" | "model">;
-
-/** `title · model effort` — the role and the price of running it, which is the
- *  pair an operator weighs when restaffing. The model half is resolved through
- *  the shared catalog so the option reads `Claude Opus 5 high` rather than the
- *  stored `claude-opus-5:high`. */
-export const agentOptionLabel = (agent: Pick<Agent, "title" | "model">): string => {
-  const parsed = splitModel(agent.model);
-  const model = findModel(parsed.model)?.label ?? parsed.model;
-  return parsed.effort === null ? `${agent.title} · ${model}` : `${agent.title} · ${model} ${parsed.effort}`;
-};
 
 /**
  * The staffing control for one Task, wherever it is rendered.
