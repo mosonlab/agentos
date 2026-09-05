@@ -1,0 +1,20 @@
+Reviews: the implementation range is pinned from platform facts, not from SHAs the agent typed
+
+Goal: a review or fix step of a chain is pinned to an implementation range the platform derived from its own records, so a mistyped SHA in an agent's output can no longer send every downstream step to a commit that does not exist.
+
+Background: `pinnedImplementationRange` and `implementationRangeFromOutput` in `packages/db/src/run-open.ts` take `implementationBaseSha` from the `baseSha` field of the implementation step's persisted output body, which the implementing agent types by hand. `packages/api/src/canonical-task-output.ts` validates that body's `headSha` against the authored commit at persistence, but never validates `baseSha`. On 2026-09-05 (chain 855dd85c) an implementer wrote `822d3cf99e5a...` for a spec commit whose real id is `822d3cf9cdb3...`; both review siblings failed provisioning with `upload-pack: not our ref` on three machines until an operator rewrote the output by hand. The platform already holds the true range: the first Run of the implementation task records as `Run.baseSha` the workspace HEAD at provisioning, which is the chain's specification commit, and the authored commit is the head the output validation already pins. Later Runs of the same task may record a different `baseSha` (a recovery Run starts at the prior head or at a salvaged WIP commit), so the authority is the task's first Run, not the Run that authored the output.
+
+Changes:
+1. `pinnedImplementationRange` derives `implementationBaseSha` from the implementation task's earliest Run with a non-null `baseSha`, and `implementationHeadSha` from the output's `commitSha` as today. The output body's `baseSha` is no longer read for pinning.
+2. When that earliest Run has no `baseSha`, the claim fails with a `PinnedBaseCommitError` naming the task and the missing record; nothing falls back to the body.
+3. At implementation-output persistence, `canonical-task-output.ts` compares the body's `baseSha` (when present) with the platform-derived base and records a task activity entry naming both when they differ; persistence is not refused, because the field no longer decides anything.
+4. `agents/README.md` (or the implementation step contract that documents the output JSON) states that `baseSha` in the implementation output is informational and that the platform pins the reviewed range from its own records.
+5. The blind-review provisioning path in `packages/runner/src/workspace.ts` is untouched; it keeps fetching the pinned base and head by object id.
+
+Out of scope: changing the implementation output schema version or removing the `baseSha` field from it; any change to review prompts; the salvage mechanism; the fix step's reviewed-head check; retry or budget classification.
+
+Constraints: fail loud, no silent fallback to the agent-typed value; a chain whose implementation task has several Runs pins the same base for every review sibling and for later fix or regression steps; existing chains with an already-pinned range keep behaving as today (the derivation reads the same tables, so a correct body and the derived value agree).
+
+Acceptance: a unit test in `packages/db/src` shows a task whose first Run recorded base B and whose output body says base X (X not equal to B) pins B; a test shows a task whose first Run has no `baseSha` refuses with `PinnedBaseCommitError`; a test shows that a recovery second Run with a different `baseSha` does not change the pinned base; a `packages/api/src` test shows persistence of an implementation output whose body base differs from the platform base succeeds and writes the activity entry; `packages/api/src/parallel-review-fixture.ts`-based tests still pass; `npm run test -w @anneal/db`, `npm run test -w @anneal/api`, `npm run lint`, `npm run typecheck` and `npm run test:snapshot-scan` pass.
+
+Route: implementation=senior-dev-opus-high - operator spends Claude capacity at high effort; the claim path decides what every downstream step reviews, and a wrong derivation is only visible on a multi-Run chain
