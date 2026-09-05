@@ -38,6 +38,9 @@ export type CostableSession = {
 
 export type CostableRun = {
   model: string;
+  /** `nativeChildUsed` is carried but deliberately never priced: see
+   * `sessionUsageCost` on why an observed native child cannot change the
+   * rate. Keeping it on the row is what lets a test prove that. */
   session: (CostableSession & { nativeChildUsed: boolean }) | null;
 };
 
@@ -53,12 +56,6 @@ export type UsageCost = {
 };
 
 const MILLION = new Prisma.Decimal(1_000_000);
-
-/** Native implementation children are pinned to this model by the workflow
- * contract. A Run with native children currently stores one aggregate Session,
- * so this is the safe read-time rate when the provider gives no per-thread
- * breakdown. */
-const NATIVE_CHILD_PRICING_MODEL = "gpt-5.6-luna";
 
 export const modelNameForPricing = (model: string): string => {
   const suffix = model.lastIndexOf(":");
@@ -76,7 +73,6 @@ const hasTokens = (session: CostableSession): boolean =>
 export const sessionUsageCost = (
   model: string,
   session: CostableSession,
-  options: { mixedModels?: boolean } = {},
 ): UsageCost => {
   const tokens = {
     inputTokens: session.inputTokens,
@@ -88,15 +84,29 @@ export const sessionUsageCost = (
     return { costUsd: new Prisma.Decimal(session.costUsd), estimated: false, ...tokens };
   }
   if (!hasTokens(session)) return { costUsd: null, estimated: false, ...tokens };
-  // Codex reports aggregate session tokens without a per-model breakdown for
-  // native children. The child model is platform-pinned to Luna max, so price
-  // an unsplit aggregate at Luna rather than at the root model's rate. This is
-  // an estimate because it is derived from the persisted token triple. A
-  // clean root/child split is represented by separate cost items and keeps the
-  // root's model here; `sumUsageCosts` combines those items without losing the
-  // distinction.
-  const pricingModel = options.mixedModels ? NATIVE_CHILD_PRICING_MODEL : model;
-  const prices = MODEL_TOKEN_PRICES[modelNameForPricing(pricingModel)];
+  // USAGE PROVENANCE, established from the Codex event stream (checked
+  // 2026-09-05): root and child token counts are NOT reported separately. The
+  // one usage-bearing Codex event is `turn.completed`, which carries a single
+  // flat `usage` object (`input_tokens`, `cached_input_tokens`,
+  // `cache_write_input_tokens`, `output_tokens`, `reasoning_output_tokens`)
+  // with no `modelUsage` and no per-thread breakdown — see
+  // `spikes/cli-capabilities/samples/codex-gpt-5.6-luna-max-20260828.stdout`,
+  // the `turn.completed` branch of `packages/runner/src/adapters/codex.ts`, and
+  // `recomputeSessionUsage`, which reads FINAL_OUTPUT events alone. Native
+  // children surface only as `collab_agent_tool_call` items carrying
+  // `receiver_thread_ids`, which report no usage at all. So a session with
+  // native children yields one aggregate that cannot be decomposed, and the
+  // aggregate cannot even be shown to exclude child tokens.
+  //
+  // Therefore price the whole aggregate at the model that ran the root thread.
+  // Pricing it at the platform-pinned child model (Luna) understated a
+  // gpt-6-astra executioner roughly forty-fold; a session is never priced at a
+  // model that did not run its root. The result stays `estimated` because it
+  // is derived from the persisted token columns and, for a native-child
+  // session, prices child tokens at the root rate. A genuine per-model split
+  // is expressed as separate cost items that `sumUsageCosts` combines, each
+  // keeping its own model here.
+  const prices = MODEL_TOKEN_PRICES[modelNameForPricing(model)];
   // Every component is required for a complete estimate. Persisted null means
   // the provider did not report that component, not that it was zero. Codex
   // reports cached input as a subset of input, so inconsistent rows also fall
@@ -127,12 +137,12 @@ export const sessionUsageCost = (
   return { costUsd, estimated: true, ...tokens };
 };
 
-/** Price one persisted Run from observed usage provenance. The immutable
- * subagent launch snapshot is deliberately absent: permission to spawn a child
- * says nothing about whether the aggregate contains child tokens. */
+/** Price one persisted Run at its own model. Neither the subagent launch
+ * snapshot nor `Session.nativeChildUsed` changes the rate: with no per-thread
+ * usage to split, the root model is the only model known to have run. */
 export const runSessionUsageCost = (run: CostableRun): UsageCost | null => run.session === null
   ? null
-  : sessionUsageCost(run.model, run.session, { mixedModels: run.session.nativeChildUsed });
+  : sessionUsageCost(run.model, run.session);
 
 export const sumUsageCosts = (items: UsageCost[]): UsageCost | null => {
   if (items.length === 0) return null;
