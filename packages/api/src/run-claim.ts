@@ -38,6 +38,7 @@ import { z } from "zod";
 
 import { issueSessionToken } from "./auth.js";
 import { isCanonicalBlindFindingsStep, previousRunHandoffForClaim } from "./canonical-task-output.js";
+import { chainStepPresence } from "./chain-step-omission.js";
 import { makeFencingToken } from "./execution.js";
 import { openMergeTailStopNotice } from "./merge-tail-actions.js";
 import { hasOpenOperatorAlert, openOperatorAlert } from "./operator-alert.js";
@@ -810,35 +811,18 @@ export const claimRun = async (
           : declaredPriorOutputKinds.filter((kind) => !presentKinds.has(kind));
         // A retained step may still declare an output whose producer was
         // omitted when this chain was instantiated. Only that narrow case is
-        // satisfied by absence: an unknown kind, or any template step
-        // producing the kind that has a task in this chain, remains a claim
-        // refusal.
-        const producerSteps = missingKinds.length > 0
+        // satisfied by absence: an undeclared kind, or a producer that does
+        // have a task in this chain, remains a claim refusal.
+        const presence = missingKinds.length > 0
           && candidate.task.templateStep !== null
           && candidate.task.chainId !== null
-          && candidate.task.chainIndex !== null
-          ? await tx.taskTemplateStep.findMany({
-            where: {
-              taskTemplateId: candidate.task.templateStep.taskTemplateId,
-              outputKind: { in: missingKinds },
-            },
-            select: {
-              outputKind: true,
-              tasks: {
-                where: {
-                  projectId: candidate.task.projectId,
-                  chainId: candidate.task.chainId,
-                },
-                select: { id: true },
-              },
-            },
+          ? await chainStepPresence(tx, {
+            projectId: candidate.task.projectId,
+            chainId: candidate.task.chainId,
+            taskTemplateId: candidate.task.templateStep.taskTemplateId,
           })
-          : [];
-        const producerHasTask = new Map<string, boolean>();
-        for (const { outputKind, tasks } of producerSteps) {
-          producerHasTask.set(outputKind, (producerHasTask.get(outputKind) ?? false) || tasks.length > 0);
-        }
-        const unresolvedMissingKinds = missingKinds.filter((kind) => producerHasTask.get(kind) !== false);
+          : null;
+        const unresolvedMissingKinds = missingKinds.filter((kind) => presence?.ofKind(kind) !== "omitted");
         if (unresolvedMissingKinds.length > 0) {
           const reason = `Prior output claim refused: missing declared output kind${unresolvedMissingKinds.length === 1 ? "" : "s"}: ${unresolvedMissingKinds.join(", ")}`;
           await parkQueuedCandidate(candidate, {
