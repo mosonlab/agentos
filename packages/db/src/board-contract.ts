@@ -457,10 +457,18 @@ export type ChainStep<DateTime = string> = {
   gateSlot: GateSlot | null;
   assigneeType: AssigneeType;
   executionOwner: ExecutionOwner;
-  agent: { id: string; title: string } | null;
+  /** `name` is the Agent's slug and `model` its stored `model:effort` string:
+   *  the console names a step's staffing by role and shows what it costs to
+   *  run, and neither is derivable from `title` alone. */
+  agent: { id: string; title: string; name: string; model: string } | null;
   archivedAt: DateTime | null;
   failureReason: string | null;
   latestRun: { id: string; status: RunStatus; runNumber: number } | null;
+  /** Whether this step's assignee may be changed right now: true exactly when
+   *  the task has no Run in an active status. Deliberately not `executionOwner`
+   *  — a human or control-plane step with no Run is reassignable, and an agent
+   *  step whose Run is QUEUED is not. */
+  reassignable: boolean;
   startable: boolean;
   startAction: "start" | "recover" | null;
   holdRefusal: string | null;

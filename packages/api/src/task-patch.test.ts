@@ -5,9 +5,11 @@ import {
   AssigneeType,
   COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
   type PrismaClient,
+  RunStatus,
   TaskStatus,
 } from "@anneal/db";
 
+import { refusalResponse } from "./refusal.js";
 import { composeBrief, readBrief } from "./task-brief.js";
 import { patchTask } from "./task-patch.js";
 
@@ -137,7 +139,7 @@ test("a compound implementation reassignment returns a structured refusal direct
     assigneeAgentId: null,
   }), {
     reason: "compound-implementation-assignee",
-    message: "Compound implementation step must remain assigned to the active in-project Agent plan-executor-astra-medium",
+    message: "Compound implementation step requires an active in-project Agent on a Codex gpt-* model",
     detail: { code: COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE },
   });
 });
@@ -221,4 +223,100 @@ test("a slot that is no longer TODO is refused under the Task lock", async () =>
   });
   assert.equal(fixture.update(), null);
   assert.deepEqual(fixture.activities(), []);
+});
+
+/**
+ * §R5, through the route. The four PATCH branches all reach `writeTask`, so the
+ * fixture is deliberately the plain field-edit branch: it is the one that
+ * carries no status and no `opensPullRequest`, and its refusal is the mapping
+ * every other branch shares.
+ */
+const reassignmentFixture = (runs: Array<{ runNumber: number; status: RunStatus }>) => {
+  const task = {
+    id: "task-busy",
+    projectId: "project-1",
+    templateId: null,
+    templateStepId: null,
+    chainId: null,
+    description: "work",
+    name: "Busy task",
+    approvalGate: false,
+    archivedAt: null,
+    status: TaskStatus.DOING as TaskStatus,
+    dispatchAfterTaskId: null,
+    dispatchAfter: null,
+    assigneeType: AssigneeType.AGENT,
+    assigneeAgentId: "agent-1",
+    repoId: null,
+    scheduleKind: null,
+    maxSessionsPerTask: 5,
+    templateStep: null,
+  };
+  const agents = [
+    { id: "agent-1", name: "senior-dev-astra-medium", projectId: "project-1", archivedAt: null },
+    { id: "agent-2", name: "senior-dev-luna-max", projectId: "project-1", archivedAt: null },
+  ];
+  const writes: Array<Record<string, unknown>> = [];
+  const tx = {
+    $queryRaw: async () => [{ id: task.id }],
+    task: {
+      findUnique: async () => task,
+      findUniqueOrThrow: async () => task,
+      update: async ({ data }: { data: Record<string, unknown> }) => {
+        writes.push(data);
+        return { ...task, ...data };
+      },
+    },
+    agent: {
+      findUnique: async ({ where }: { where: { id: string } }) =>
+        agents.find((agent) => agent.id === where.id) ?? null,
+      findFirst: async ({ where }: { where: { id: string; projectId?: string } }) =>
+        agents.find((agent) => agent.id === where.id) ?? null,
+    },
+    run: {
+      findFirst: async ({ where }: { where: { status: { in: readonly RunStatus[] } } }) =>
+        runs.find((run) => where.status.in.includes(run.status)) ?? null,
+    },
+    taskActivity: { create: async () => ({ id: "activity-1" }) },
+  };
+  const db = {
+    ...tx,
+    $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
+  } as unknown as PrismaClient;
+  return { db, writes };
+};
+
+for (const status of [RunStatus.RUNNING, RunStatus.QUEUED, RunStatus.WAITING_INBOX] as const) {
+  test(`PATCH refuses a reassignment with 409 while a ${status} Run exists`, async () => {
+    const fixture = reassignmentFixture([{ runNumber: 3, status }]);
+    assert.deepEqual(await patchTask(fixture.db, "task-busy", { assigneeAgentId: "agent-2" }), {
+      reason: "conflict",
+      message: `Cannot change the assignee while run 3 is ${status}; stop or finish it first`,
+    });
+    assert.deepEqual(fixture.writes, []);
+  });
+}
+
+test("the reassignment refusal is a 409, not a 400", async () => {
+  const fixture = reassignmentFixture([{ runNumber: 1, status: RunStatus.RUNNING }]);
+  const refusal = await patchTask(fixture.db, "task-busy", { assigneeAgentId: "agent-2" });
+  assert.ok("reason" in refusal);
+  assert.equal(refusalResponse(refusal).status, 409);
+});
+
+test("PATCH refuses clearing the assignee and changing the assignee type the same way", async () => {
+  for (const body of [{ assigneeAgentId: null }, { assigneeType: AssigneeType.HUMAN }] as const) {
+    const fixture = reassignmentFixture([{ runNumber: 1, status: RunStatus.RUNNING }]);
+    const result = await patchTask(fixture.db, "task-busy", body);
+    assert.ok("reason" in result);
+    assert.equal(result.reason, "conflict");
+    assert.deepEqual(fixture.writes, []);
+  }
+});
+
+test("PATCH accepts the same reassignment once the task's Runs are terminal", async () => {
+  const fixture = reassignmentFixture([{ runNumber: 1, status: RunStatus.FAILED }]);
+  const result = await patchTask(fixture.db, "task-busy", { assigneeAgentId: "agent-2" });
+  assert.ok("task" in result);
+  assert.deepEqual(fixture.writes, [{ assigneeAgentId: "agent-2" }]);
 });

@@ -113,8 +113,12 @@ export const deriveRunConfig = (
   };
 };
 
-export const COMPOUND_IMPLEMENTATION_AGENT_NAME = "implementation-plan-executioner";
 export const COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE = "COMPOUND_IMPLEMENTATION_ASSIGNEE_INVALID";
+
+/** One sentence for every site that refuses this binding, so the console and
+ *  the three guards below cannot describe the same rule differently. */
+export const COMPOUND_IMPLEMENTATION_ASSIGNEE_MESSAGE =
+  "Compound implementation step requires an active in-project Agent on a Codex gpt-* model";
 
 export type CompoundImplementationStepShape = {
   stepIndex?: number;
@@ -129,11 +133,41 @@ export const isCompoundImplementationStep = (templateStep: CompoundImplementatio
   && stepRole({ outputKind: templateStep.outputKind }) === "implementation";
 
 type CompoundImplementationAgent = {
-  name: string;
   projectId: string;
   archivedAt: Date | null;
+  model: string;
+  runnerPreference: RunnerPreference;
 } | null;
 
+/**
+ * Can this Agent's Run reach the Codex CLI on a `gpt-*` model?
+ *
+ * The two halves are the same pair `deriveRunConfig` re-checks before a
+ * compound Run is created: `runnerFor` is the runtime authority for which CLI a
+ * Run gets — a concrete preference wins, and AUTO/INHERIT defer to the model
+ * name exactly as they will at Run open — while `catalogRunnerForModel` is the
+ * `gpt-*` half, which is true only for a model whose name starts with `gpt-`.
+ *
+ * A template step that pins `runner` can only widen the first half, never
+ * narrow it, so this predicate is at worst stricter than the Run it guards: it
+ * cannot admit an assignment `deriveRunConfig` would later refuse.
+ */
+export const codexGptCapability = (agent: {
+  model: string;
+  runnerPreference: RunnerPreference;
+}): boolean => runnerFor(agent.runnerPreference, agent.model) === RunnerKind.CODEX
+  && catalogRunnerForModel(agent.model) === RunnerPreference.CODEX;
+
+/**
+ * §R14. The compound implementation root is bound by capability, not by name.
+ *
+ * A staffing profile may bind any Agent to any step, so a fixed Agent name is
+ * no longer the invariant this step needs — what it needs is an in-project,
+ * unarchived Agent that can actually execute a compound implementation Run.
+ * Every site that used to compare against a fixed Agent name asks this
+ * instead, and it is re-asked under the Agent-row lock at
+ * instantiation, at assignment and at Run open.
+ */
 export const compoundImplementationAssigneeValid = (
   taskProjectId: string,
   assigneeType: AssigneeType,
@@ -141,15 +175,16 @@ export const compoundImplementationAssigneeValid = (
   templateStep: CompoundImplementationStepShape,
 ): boolean => !isCompoundImplementationStep(templateStep)
   || (assigneeType === AssigneeType.AGENT
-    && agent?.name === COMPOUND_IMPLEMENTATION_AGENT_NAME
+    && agent !== null
     && agent.projectId === taskProjectId
-    && agent.archivedAt === null);
+    && agent.archivedAt === null
+    && codexGptCapability(agent));
 
 export class CompoundImplementationAssigneeError extends Error {
   readonly code = COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE;
 
   constructor() {
-    super(`Compound implementation step must remain assigned to the active in-project Agent ${COMPOUND_IMPLEMENTATION_AGENT_NAME}`);
+    super(COMPOUND_IMPLEMENTATION_ASSIGNEE_MESSAGE);
     this.name = "CompoundImplementationAssigneeError";
   }
 }
@@ -903,7 +938,7 @@ export const openRun = async (
     return openRunRefusal(
       "compound-implementation-assignee",
       "compound-implementation-assignee",
-      `Compound implementation step must remain assigned to the active in-project Agent ${COMPOUND_IMPLEMENTATION_AGENT_NAME}`,
+      COMPOUND_IMPLEMENTATION_ASSIGNEE_MESSAGE,
       { code: COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE },
     );
   }
@@ -1018,7 +1053,14 @@ export const openRun = async (
     })
     : null;
 
-  const preservedConfiguration = sourceRetryIntent(intent) && prior
+  // An automatic retry normally re-runs the exact configuration that failed,
+  // so a mid-Run agent edit cannot silently change what the next attempt is.
+  // A *reassignment* is the one case where that would be wrong: the operator
+  // moved this task to a different Agent precisely so the retry runs that
+  // Agent's runner, model, service tier and native subagent configuration.
+  // Preserving the prior snapshot there would open a Run billed to the new
+  // Agent but executed as the old one.
+  const preservedConfiguration = sourceRetryIntent(intent) && prior && prior.agentId === lockedAgent.id
     ? {
       runner: prior.runner,
       model: prior.model,

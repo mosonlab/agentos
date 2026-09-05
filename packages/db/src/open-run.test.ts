@@ -13,6 +13,10 @@ import {
   type OpenRunIntent,
   type OpenRunDisposition,
   type OpenRunRefusal,
+  NATIVE_IMPLEMENTATION_SUBAGENT_MAX_CONCURRENT,
+  NATIVE_IMPLEMENTATION_SUBAGENT_MODEL,
+  codexGptCapability,
+  compoundImplementationAssigneeValid,
   enqueueTaskRun,
   openRun,
   pinnedImplementationRange,
@@ -770,7 +774,7 @@ test("every OpenRunRefusal code comes from a real guard, carries a disposition, 
       intent: { kind: "enqueue", readyAt: now },
       reason: "compound-implementation-assignee",
       disposition: "fault",
-      message: "Compound implementation step must remain assigned to the active in-project Agent plan-executor-astra-medium",
+      message: "Compound implementation step requires an active in-project Agent on a Codex gpt-* model",
       detail: { code: "COMPOUND_IMPLEMENTATION_ASSIGNEE_INVALID" },
     },
     "integrator-binding-invalid": {
@@ -986,3 +990,161 @@ test("runBudgetCeiling is the only ceiling algorithm and clamps negative grants"
   assert.equal(runBudgetCeiling(5, -2), 5);
   assert.equal(runBudgetCeiling(5, 3), 8);
 });
+
+// §R14. The compound implementation root is a capability, so the predicate is
+// tested directly: name is not an input, and the runtime configuration is.
+const compoundStep = {
+  stepIndex: 5,
+  outputKind: "implementation",
+  taskTemplate: { name: "compound-engineer-workflow" },
+};
+
+const capabilityAgent = (overrides: Record<string, unknown> = {}) => ({
+  projectId: "project-1",
+  archivedAt: null,
+  model: "gpt-6-astra:medium",
+  runnerPreference: RunnerPreference.CODEX,
+  ...overrides,
+}) as { projectId: string; archivedAt: Date | null; model: string; runnerPreference: RunnerPreference };
+
+test("the compound implementation root admits any in-project Codex gpt-* Agent", () => {
+  for (const model of ["gpt-6-astra:medium", "gpt-5.6-sol:high", "gpt-5.6-luna:max"]) {
+    assert.equal(
+      compoundImplementationAssigneeValid("project-1", AssigneeType.AGENT, capabilityAgent({ model }), compoundStep),
+      true,
+      model,
+    );
+  }
+});
+
+test("the compound implementation root refuses a non-Codex runner, a non-gpt model, and a foreign or archived Agent", () => {
+  const refused: Array<[string, Record<string, unknown>]> = [
+    ["claude runner", { runnerPreference: RunnerPreference.CLAUDE, model: "claude-opus-5:high" }],
+    // A Codex preference does not make a Claude model a gpt-* one.
+    ["codex runner on a claude model", { runnerPreference: RunnerPreference.CODEX, model: "claude-opus-5:high" }],
+    ["pi runner on a pi-hosted gpt model", { runnerPreference: RunnerPreference.PI, model: "openai-codex/gpt-5.6-sol:high" }],
+    ["another project", { projectId: "project-2" }],
+    ["archived", { archivedAt: now }],
+  ];
+  for (const [name, overrides] of refused) {
+    assert.equal(
+      compoundImplementationAssigneeValid("project-1", AssigneeType.AGENT, capabilityAgent(overrides), compoundStep),
+      false,
+      name,
+    );
+  }
+  assert.equal(compoundImplementationAssigneeValid("project-1", AssigneeType.HUMAN, capabilityAgent(), compoundStep), false);
+  assert.equal(compoundImplementationAssigneeValid("project-1", AssigneeType.AGENT, null, compoundStep), false);
+  // Any other step is unconstrained by this rule.
+  assert.equal(
+    compoundImplementationAssigneeValid("project-1", AssigneeType.AGENT, capabilityAgent({ runnerPreference: RunnerPreference.CLAUDE }), null),
+    true,
+  );
+});
+
+test("INHERIT and AUTO resolve through the same runner authority a Run will use", () => {
+  // `runnerFor` decides the CLI for a preference that names none, and it reads
+  // the model name — which for a bare `gpt-*` id is CLAUDE. The predicate
+  // therefore refuses these, exactly as `deriveRunConfig` would at Run open,
+  // rather than admitting an assignment the Run could not honour.
+  for (const preference of [RunnerPreference.INHERIT, RunnerPreference.AUTO] as const) {
+    assert.equal(codexGptCapability({ model: "gpt-6-astra:medium", runnerPreference: preference }), false, preference);
+    // A model the naming rule does route to Codex passes on the same authority.
+    assert.equal(codexGptCapability({ model: "gpt-5.6-codex:high", runnerPreference: preference }), true, preference);
+  }
+  assert.equal(codexGptCapability({ model: "gpt-6-astra:medium", runnerPreference: RunnerPreference.CODEX }), true);
+});
+
+// §R5's other half: a retry after failure with a new assignee must run the new
+// Agent's configuration, not the snapshot the previous Agent failed with.
+const reassignedRetryIntents: OpenRunIntent[] = [
+  {
+    kind: "retry-after-completion" as const,
+    readyAt: now,
+    sourceRunId: "run-3",
+    sourceMaxRunsPerTask: 5,
+    sourceBudgetGrants: 1,
+    budgetGrant: 1,
+  },
+  {
+    kind: "retry-after-lease-loss" as const,
+    readyAt: now,
+    sourceRunId: "run-3",
+    sourceMaxRunsPerTask: 5,
+    sourceBudgetGrants: 1,
+  },
+];
+
+for (const intent of reassignedRetryIntents) {
+  // A lease-loss retry resumes the source Run's branch; a completion retry
+  // opens the next one. Neither depends on who the assignee is.
+  const expectedBranch = intent.kind === "retry-after-lease-loss"
+    ? "agentos/task-1/run-3"
+    : "agentos/task-1/run-4";
+  test(`${intent.kind} derives runner, model, service tier and native subagent config from a new assignee`, async () => {
+    const successor = agent({
+      id: "agent-2",
+      name: "plan-executor-astra-medium",
+      model: "gpt-6-astra:medium",
+      runnerPreference: RunnerPreference.CODEX,
+      codexServiceTier: CodexServiceTier.FAST,
+    });
+    const task = taskRow({
+      assigneeAgentId: successor.id,
+      assigneeAgent: successor,
+      repoId: "repo-1",
+      repo: { id: "repo-1", defaultBranch: "main" },
+      templateStepId: "implementation-step",
+      templateStep: {
+        id: "implementation-step",
+        stepIndex: 5,
+        outputKind: "implementation",
+        baseFromStepIndex: null,
+        runner: null,
+        taskTemplate: { name: "compound-engineer-workflow" },
+      },
+      runs: [priorRun({ agentId: "agent-1", runner: RunnerKind.CLAUDE, model: "claude-opus-5:high" })],
+    });
+    const { tx, creates } = fakeTx(task, { lockedAgent: successor });
+    const opened = await openRun(tx, "task-1", intent);
+    assert.equal(opened.ok, true);
+    assert.equal(creates.length, 1);
+    assert.deepEqual({
+      agentId: creates[0]!.agentId,
+      runner: creates[0]!.runner,
+      model: creates[0]!.model,
+      codexServiceTier: creates[0]!.codexServiceTier,
+      subagentModel: creates[0]!.subagentModel,
+      subagentMaxConcurrent: creates[0]!.subagentMaxConcurrent,
+    }, {
+      agentId: "agent-2",
+      runner: RunnerKind.CODEX,
+      model: "gpt-6-astra:medium",
+      codexServiceTier: CodexServiceTier.FAST,
+      subagentModel: NATIVE_IMPLEMENTATION_SUBAGENT_MODEL,
+      subagentMaxConcurrent: NATIVE_IMPLEMENTATION_SUBAGENT_MAX_CONCURRENT,
+    });
+    // Only the Agent-derived configuration moves. The branch/target derivation
+    // is untouched by the reassignment: it is the same pair the unchanged-
+    // assignee case below produces.
+    assert.equal(creates[0]!.branch, expectedBranch);
+    assert.equal(creates[0]!.targetBranch, "main");
+  });
+
+  test(`${intent.kind} still preserves the prior configuration when the assignee is unchanged`, async () => {
+    const unchanged = agent({ model: "gpt-6-astra:medium", runnerPreference: RunnerPreference.CODEX });
+    const task = taskRow({
+      assigneeAgent: unchanged,
+      repoId: "repo-1",
+      repo: { id: "repo-1", defaultBranch: "main" },
+      runs: [priorRun({ agentId: "agent-1", runner: RunnerKind.CLAUDE, model: "claude-opus-5:high" })],
+    });
+    const { tx, creates } = fakeTx(task, { lockedAgent: unchanged });
+    const opened = await openRun(tx, "task-1", intent);
+    assert.equal(opened.ok, true);
+    assert.equal(creates[0]!.runner, RunnerKind.CLAUDE);
+    assert.equal(creates[0]!.model, "claude-opus-5:high");
+    assert.equal(creates[0]!.branch, expectedBranch);
+    assert.equal(creates[0]!.targetBranch, "main");
+  });
+}

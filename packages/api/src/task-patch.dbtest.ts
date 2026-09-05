@@ -27,7 +27,7 @@ const waitForDatabaseLockWaiter = async (): Promise<void> => {
     if ((waiting?.count ?? 0) > 0) return;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
-  assert.fail("timed out waiting for approval-gate PATCH to reach the Task-row mutex");
+  assert.fail("timed out waiting for the PATCH to reach the Task-row mutex");
 };
 
 let sequence = 0;
@@ -225,4 +225,113 @@ test("an accepted patch returns the written task rather than a response", async 
   const result = await patchTask(db, task.id, { name: "Renamed" });
   assert.ok("task" in result, "expected the written task");
   assert.equal(result.task.name, "Renamed");
+});
+
+/**
+ * §R5 under real concurrency: a reassignment and a run enqueue both take the
+ * Task row, so exactly one of them decides.
+ *
+ * The unit tests prove the predicate; only the database can prove the
+ * serialization, because the refusal depends on a `Run` row another transaction
+ * committed while this one was already waiting on the Task mutex — the exact
+ * read ReadCommitted would otherwise answer from a stale snapshot.
+ */
+const successorAgent = async (projectId: string, environmentId: string) => {
+  sequence += 1;
+  return db.agent.create({ data: {
+    projectId,
+    environmentId,
+    name: `successor-${process.pid}-${sequence}`,
+    title: "Successor",
+    model: "gpt-6-astra:medium",
+    runnerPreference: "CODEX",
+    foundationalPrompt: "foundation",
+    rolePrompt: "role",
+  } });
+};
+
+test("a reassignment racing a run enqueue loses to the run that committed first", { timeout: 10_000 }, async () => {
+  const { project, agent, task } = await seed();
+  const successor = await successorAgent(project.id, agent.environmentId!);
+  let releaseHolder!: () => void;
+  let holderReady!: () => void;
+  const release = new Promise<void>((resolve) => { releaseHolder = resolve; });
+  const ready = new Promise<void>((resolve) => { holderReady = resolve; });
+  const enqueue = db.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT "id" FROM "Task" WHERE "id" = ${task.id} FOR UPDATE`;
+    await tx.run.create({ data: {
+      projectId: project.id,
+      taskId: task.id,
+      agentId: agent.id,
+      runNumber: 1,
+      dedupeKey: `task:${task.id}:run:1`,
+      status: RunStatus.QUEUED,
+      runner: "CODEX",
+      model: agent.model,
+      promptHash: "hash",
+      branch: `codex/${task.id}`,
+      workspacePath: `/scratch/${task.id}`,
+    } });
+    holderReady();
+    await release;
+  });
+  await ready;
+
+  const patching = patchTask(db, task.id, { assigneeAgentId: successor.id });
+  try {
+    await waitForDatabaseLockWaiter();
+  } finally {
+    releaseHolder();
+  }
+  await enqueue;
+
+  const result = await patching;
+  assert.deepEqual(result, {
+    reason: "conflict",
+    message: `Cannot change the assignee while run 1 is ${RunStatus.QUEUED}; stop or finish it first`,
+  });
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: task.id } })).assigneeAgentId, agent.id);
+});
+
+test("a reassignment that wins the Task mutex is the assignment the next run opens with", { timeout: 10_000 }, async () => {
+  const { project, agent, task } = await seed();
+  const successor = await successorAgent(project.id, agent.environmentId!);
+  let releaseHolder!: () => void;
+  let holderReady!: () => void;
+  const release = new Promise<void>((resolve) => { releaseHolder = resolve; });
+  const ready = new Promise<void>((resolve) => { holderReady = resolve; });
+  // The holder takes the same mutex and commits no Run, so the waiting PATCH
+  // observes an empty active set the instant it is admitted.
+  const holder = db.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT "id" FROM "Task" WHERE "id" = ${task.id} FOR UPDATE`;
+    holderReady();
+    await release;
+  });
+  await ready;
+
+  const patching = patchTask(db, task.id, { assigneeAgentId: successor.id });
+  try {
+    await waitForDatabaseLockWaiter();
+  } finally {
+    releaseHolder();
+  }
+  await holder;
+
+  const result = await patching;
+  assert.ok("task" in result);
+  assert.equal(result.task.assigneeAgentId, successor.id);
+  const opened = await db.run.create({ data: {
+    projectId: project.id,
+    taskId: task.id,
+    agentId: (await db.task.findUniqueOrThrow({ where: { id: task.id } })).assigneeAgentId!,
+    runNumber: 1,
+    dedupeKey: `task:${task.id}:run:1`,
+    status: RunStatus.QUEUED,
+    runner: "CODEX",
+    model: successor.model,
+    promptHash: "hash",
+    branch: `codex/${task.id}`,
+    workspacePath: `/scratch/${task.id}`,
+  } });
+  assert.equal(opened.agentId, successor.id);
 });

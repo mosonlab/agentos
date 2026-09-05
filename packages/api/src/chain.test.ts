@@ -7,6 +7,8 @@ import {
   chainKey,
   chainProgress,
   chainProgressByChain,
+  chainStepAgent,
+  chainStepReassignable,
   blockingPredecessor,
   positions,
   refusalForHeldChainStep,
@@ -14,6 +16,7 @@ import {
   stepName,
   taskStartability,
   type ChainRow,
+  type FoundStepAdmission,
   type StartableRow,
 } from "./chain.js";
 
@@ -348,4 +351,30 @@ test("blockingPredecessor respects layered siblings and surviving archived rows"
 
   const archived = row({ id: "archived", chainIndex: 2, chainLayer: 2, status: "BACKLOG", archivedAt: new Date() });
   assert.equal(blockingPredecessor([rows[0]!, archived, rows[3]!], "join")?.id, "archived");
+});
+
+test("the ChainStep agent projection carries the slug and the model:effort string", () => {
+  assert.deepEqual(chainStepAgent({
+    assigneeAgent: {
+      id: "agent-1",
+      title: "Senior Dev",
+      name: "senior-dev-astra-medium",
+      model: "gpt-6-astra:medium",
+    },
+  }), {
+    id: "agent-1",
+    title: "Senior Dev",
+    name: "senior-dev-astra-medium",
+    model: "gpt-6-astra:medium",
+  });
+  assert.equal(chainStepAgent({ assigneeAgent: null }), null);
+});
+
+test("a step is reassignable exactly when it has no active Run, and an unknown step is not", () => {
+  const admission = (active: boolean): FoundStepAdmission => ({
+    facts: { total: 1, active, budgetGrants: null },
+  } as FoundStepAdmission);
+  assert.equal(chainStepReassignable(admission(false)), true);
+  assert.equal(chainStepReassignable(admission(true)), false);
+  assert.equal(chainStepReassignable(undefined), false);
 });

@@ -5,7 +5,7 @@ import { TaskStatus } from "@anneal/db";
 
 import {
   deriveBoundImplementationTask,
-  SPEC_REVALIDATOR_AGENT_NAME,
+  isRevalidationStep,
   validateRevalidatedBrief,
   type RevalidationTask,
 } from "./revalidation.js";
@@ -31,7 +31,7 @@ const task = (input: Partial<RevalidationTask> & Pick<RevalidationTask, "id" | "
   },
 });
 
-const caller = (overrides: Partial<RevalidationTask> = {}): RevalidationTask & { agentId: string; agentName: string } => ({
+const caller = (overrides: Partial<RevalidationTask> = {}): RevalidationTask & { agentId: string } => ({
   ...task({
     id: "revalidate",
     chainIndex: 0,
@@ -46,7 +46,6 @@ const caller = (overrides: Partial<RevalidationTask> = {}): RevalidationTask & {
     ...overrides,
   }),
   agentId: "agent-revalidator",
-  agentName: SPEC_REVALIDATOR_AGENT_NAME,
 });
 
 test("derives exactly one downstream same-chain implementation task", () => {
@@ -69,7 +68,7 @@ test("derives exactly one downstream same-chain implementation task", () => {
   }
 });
 
-test("rejects a non-revalidator, an unbound task, and ambiguous implementations", () => {
+test("rejects a run whose agent is not the task's assignee, an unbound task, and ambiguous implementations", () => {
   const implementation = task({
     id: "implementation",
     chainIndex: 1,
@@ -82,9 +81,17 @@ test("rejects a non-revalidator, an unbound task, and ambiguous implementations"
       taskTemplate: { name: "direct-engineer-workflow" },
     },
   });
-  const wrongAgent = deriveBoundImplementationTask({ ...caller(), agentName: "senior-dev-astra-medium" }, [caller(), implementation]);
-  assert.ok("message" in wrongAgent);
-  if ("message" in wrongAgent) assert.equal(wrongAgent.reason, "forbidden");
+  // §R11/§R5: the capability is keyed on the Step, so any Agent a staffing
+  // profile bound to it may use it — what is still refused is a Run whose
+  // Agent is not the one the task is assigned to.
+  const anyAgent = deriveBoundImplementationTask(
+    { ...caller({ assigneeAgentId: "agent-anything" }), agentId: "agent-anything" },
+    [caller(), implementation],
+  );
+  assert.equal("message" in anyAgent, false);
+  const foreignRun = deriveBoundImplementationTask({ ...caller(), agentId: "agent-someone-else" }, [caller(), implementation]);
+  assert.ok("message" in foreignRun);
+  if ("message" in foreignRun) assert.equal(foreignRun.reason, "forbidden");
   const unbound = deriveBoundImplementationTask(caller({ chainId: null, dispatchAfterTaskId: null }), [implementation]);
   assert.ok("message" in unbound);
   if ("message" in unbound) assert.equal(unbound.reason, "conflict");
@@ -181,4 +188,18 @@ test("revalidation rejects mutations to every immutable Product Contract bar", (
     assert.ok(refusal);
     assert.equal(refusal.reason, "invalid-request");
   }
+});
+
+test("the revalidation capability is keyed on the canonical step, not on any agent", () => {
+  const canonical = {
+    stepIndex: 1,
+    outputKind: "revalidation",
+    taskTemplate: { name: "direct-engineer-workflow" },
+  };
+  assert.equal(isRevalidationStep(canonical), true);
+  assert.equal(isRevalidationStep(null), false);
+  assert.equal(isRevalidationStep(undefined), false);
+  assert.equal(isRevalidationStep({ ...canonical, stepIndex: 2 }), false);
+  assert.equal(isRevalidationStep({ ...canonical, outputKind: "implementation" }), false);
+  assert.equal(isRevalidationStep({ ...canonical, taskTemplate: { name: "custom-workflow" } }), false);
 });

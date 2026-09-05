@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { AssigneeType, type Prisma, TaskStatus } from "@anneal/db";
+import { AssigneeType, type Prisma, RunStatus, TaskStatus } from "@anneal/db";
 
 import { writeTask } from "./task-write.js";
 
@@ -17,6 +17,8 @@ type TaskRow = {
 };
 
 type AgentRow = { id: string; name: string; projectId: string; archivedAt: Date | null };
+
+type RunRow = { runNumber: number; status: RunStatus };
 
 const task = (overrides: Partial<TaskRow> = {}): TaskRow => ({
   id: "task-1",
@@ -38,7 +40,12 @@ const task = (overrides: Partial<TaskRow> = {}): TaskRow => ({
  * writer that took the Agent row before the Task row would pass there. Here the
  * `FOR UPDATE` statements are the observable.
  */
-const recordingTx = (state: { task: TaskRow | null; agents?: AgentRow[]; siblings?: string[] }) => {
+const recordingTx = (state: {
+  task: TaskRow | null;
+  agents?: AgentRow[];
+  siblings?: string[];
+  runs?: RunRow[];
+}) => {
   const locks: string[] = [];
   const writes: Array<{ kind: string; data: unknown }> = [];
   const agents = state.agents ?? [];
@@ -73,6 +80,11 @@ const recordingTx = (state: { task: TaskRow | null; agents?: AgentRow[]; sibling
       ),
       findFirst: async ({ where }: { where: { id: string; projectId: string } }) => (
         agents.find((agent) => agent.id === where.id && agent.projectId === where.projectId) ?? null
+      ),
+    },
+    run: {
+      findFirst: async ({ where }: { where: { status: { in: readonly RunStatus[] } } }) => (
+        (state.runs ?? []).find((run) => where.status.in.includes(run.status)) ?? null
       ),
     },
     taskActivity: {
@@ -186,4 +198,83 @@ test("a caller that decides under the lock not to write still gets its value bac
   assert.equal(result.ok && result.activityId, null);
   assert.deepEqual(locks, ["task-row"]);
   assert.deepEqual(writes, []);
+});
+
+// §R5. The assignment freeze, per task and keyed on Run status alone.
+const reassignmentFixture = (runs: RunRow[]) => recordingTx({
+  task: task({ assigneeAgentId: "agent-1" }),
+  agents: [{ id: "agent-2", name: "successor", projectId: "project-1", archivedAt: null }],
+  runs,
+});
+
+for (const status of [RunStatus.RUNNING, RunStatus.QUEUED, RunStatus.WAITING_INBOX] as const) {
+  test(`a reassignment is refused as a conflict while a ${status} Run exists`, async () => {
+    const { tx, locks, writes } = reassignmentFixture([{ runNumber: 2, status }]);
+    const result = await writeTask(tx, "task-1", async () => ({
+      update: { assigneeAgentId: "agent-2" },
+      activity: { actorType: "operator", body: "reassigned" },
+      value: null,
+    }));
+    assert.deepEqual(result.ok ? null : result.refusal, {
+      kind: "assignment-active-run",
+      reason: `Cannot change the assignee while run 2 is ${status}; stop or finish it first`,
+    });
+    // The Agent row is never reached: the freeze decides under the Task lock.
+    assert.deepEqual(locks, ["task-row"]);
+    assert.deepEqual(writes, []);
+  });
+}
+
+test("a reassignment is allowed when the task's Run history is entirely terminal", async () => {
+  const { tx, writes } = reassignmentFixture([
+    { runNumber: 1, status: RunStatus.FAILED },
+    { runNumber: 2, status: RunStatus.CANCELLED },
+  ]);
+  const result = await writeTask(tx, "task-1", async () => ({
+    update: { assigneeAgentId: "agent-2" },
+    activity: null,
+    value: null,
+  }));
+  assert.equal(result.ok, true);
+  assert.deepEqual(writes.map((write) => write.kind), ["task.update"]);
+});
+
+test("clearing the assignee to null is guarded by the same active Run", async () => {
+  const { tx, writes } = reassignmentFixture([{ runNumber: 1, status: RunStatus.RUNNING }]);
+  const result = await writeTask(tx, "task-1", async () => ({
+    update: { assigneeAgentId: null },
+    activity: null,
+    value: null,
+  }));
+  assert.equal(result.ok, false);
+  assert.equal(result.ok ? null : result.refusal.kind, "assignment-active-run");
+  assert.deepEqual(writes, []);
+});
+
+test("changing only assigneeType is guarded by the same active Run", async () => {
+  const { tx, writes } = reassignmentFixture([{ runNumber: 1, status: RunStatus.RUNNING }]);
+  const result = await writeTask(tx, "task-1", async () => ({
+    update: { assigneeType: AssigneeType.HUMAN },
+    activity: null,
+    value: null,
+  }));
+  assert.equal(result.ok, false);
+  assert.equal(result.ok ? null : result.refusal.kind, "assignment-active-run");
+  assert.deepEqual(writes, []);
+});
+
+test("restating the assignment a running task already has is not a reassignment", async () => {
+  const { tx, locks, writes } = recordingTx({
+    task: task({ assigneeAgentId: "agent-1" }),
+    agents: [{ id: "agent-1", name: "engineer", projectId: "project-1", archivedAt: null }],
+    runs: [{ runNumber: 1, status: RunStatus.RUNNING }],
+  });
+  const result = await writeTask(tx, "task-1", async () => ({
+    update: { assigneeAgentId: "agent-1", assigneeType: AssigneeType.AGENT },
+    activity: null,
+    value: null,
+  }));
+  assert.equal(result.ok, true);
+  assert.deepEqual(locks, ["task-row", "agent-row"]);
+  assert.deepEqual(writes.map((write) => write.kind), ["task.update"]);
 });

@@ -51,8 +51,9 @@ const chainFor = (taskId: string): Chain => ({
   chainId: "chain-c", total: 1, done: 0, steps: [{
     taskId, position: 1, chainIndex: 0, layer: null, name: "Chain C", stepName: "Chain C",
     status: "TODO", approvalGate: false, gateSlot: null, assigneeType: "AGENT", executionOwner: "agent",
-    agent: { id: "agent-1", title: "Builder" }, archivedAt: null,
-    failureReason: null, latestRun: null, startable: true, startAction: "start", holdRefusal: null,
+    agent: { id: "agent-1", title: "Builder", name: "senior-dev-astra-medium", model: "gpt-6-astra:medium" },
+    archivedAt: null, failureReason: null, latestRun: null, reassignable: true,
+    startable: true, startAction: "start", holdRefusal: null,
     blockedOn: null, currentExecution: false, mergeRecovery: null,
   }], control: null,
 });

@@ -43,8 +43,8 @@ export {
 export {
   ArchivedAssigneeError,
   ArchivedTaskError,
-  COMPOUND_IMPLEMENTATION_AGENT_NAME,
   COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
+  COMPOUND_IMPLEMENTATION_ASSIGNEE_MESSAGE,
   ChainHeldError,
   CompoundImplementationAssigneeError,
   type CompoundImplementationStepShape,
@@ -62,6 +62,7 @@ export {
   WorkflowRefusalError,
   type WorkflowRefusalReason,
   attemptRunBirth,
+  codexGptCapability,
   compoundImplementationAssigneeValid,
   deriveRunConfig,
   enqueueTaskRun,

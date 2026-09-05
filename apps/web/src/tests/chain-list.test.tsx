@@ -19,7 +19,8 @@ const step = (position: number, overrides: Partial<ChainStep> = {}): ChainStep =
   taskId: `t${position}`, position, chainIndex: position - 1, layer: null, name: `Task ${position}`,
   stepName: `Step ${position}`, status: "TODO", approvalGate: false, gateSlot: null, assigneeType: "AGENT",
   executionOwner: "agent",
-  agent: { id: "a1", title: "Builder" }, archivedAt: null, failureReason: null, latestRun: null,
+  agent: { id: "a1", title: "Builder", name: "senior-dev-astra-medium", model: "gpt-6-astra:medium" },
+  archivedAt: null, failureReason: null, latestRun: null, reassignable: true,
   startable: false, startAction: null, holdRefusal: null, blockedOn: null, currentExecution: false,
   mergeRecovery: null,
   ...overrides,
@@ -201,8 +202,8 @@ test("a human step uses semantic human presentation and offers no start action",
 
 test("server-owned tail steps show their actual execution owners", () => {
   const markup = render(chain([
-    step(1, { executionOwner: "control-plane", agent: { id: "a1", title: "Review Coordinator" } }),
-    step(2, { executionOwner: "merge-executor", agent: { id: "a2", title: "Merge Integrator" } }),
+    step(1, { executionOwner: "control-plane", agent: { id: "a1", title: "Review Coordinator", name: "review-coordinator-astra-medium", model: "gpt-6-astra:medium" } }),
+    step(2, { executionOwner: "merge-executor", agent: { id: "a2", title: "Merge Integrator", name: "merge-integrator", model: "mechanical" } }),
   ]), "t1");
   assert.match(markup, new RegExp(`>${en("executionOwner.control-plane")}<`));
   assert.match(markup, new RegExp(`>${en("executionOwner.merge-executor")}<`));
