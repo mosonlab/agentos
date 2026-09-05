@@ -1119,6 +1119,135 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/instant
   -d '{"repoId":"'$REPO_ID'","variables":{"branchName":"feature/demo"},"name":"Demo delivery","gates":{"spec":true,"merge":false},"autoStart":true}'
 ```
 
+## Staffing profiles
+
+A staffing profile is a named plan for one TaskTemplate: who runs each step,
+and which of that template's optional steps a chain instantiated from it keeps.
+Profiles hang off the template, not the project, so one project may keep
+several plans for the same graph. Exactly one profile of a template is its
+default; a template may also have none, in which case instantiation uses the
+step rows' own bindings.
+
+Entries key on the step's exact `outputKind`. `foo` and `foo-v2` are different
+steps of a custom graph and therefore different entries; nothing is normalised
+on this surface. `assigneeAgentId` null means the profile has no opinion and
+the canonical binding stands. `include` is meaningful only for a step the
+template marks `optional` and must be `null` for every other step.
+
+Every write takes the template row mutex and then the Agent-row mutex that
+archive and chain instantiation take, so a profile cannot be saved against an
+Agent that is being archived in a concurrent transaction. Repository grants are
+*not* checked here: a profile is a plan, and a grant is checked when a chain is
+actually created.
+
+Validation refusals, in the order they are applied per entry:
+`staffing_profile_entry_duplicate` (the same output kind twice in one request),
+`staffing_profile_unknown_output_kind` (the template has no step producing it),
+`staffing_profile_include_not_optional` (an include flag on a step the template
+does not mark optional), `staffing_profile_step_not_agent` (staffing a `HUMAN`
+step), `staffing_profile_agent_not_found` (no such Agent in this project),
+`staffing_profile_agent_archived`, `staffing_profile_integrator_binding` (the
+merge-execution step binds only `merge-integrator`, and `merge-integrator` binds
+nothing else), and `staffing_profile_compound_implementation` (the compound
+implementation root requires an assignee whose effective runner is Codex and
+whose model is a `gpt-*` one). All eight are `422 Unprocessable Content`.
+
+Warnings do not block a write. `same_agent_implements_and_reviews` reports that
+one Agent both implements and reviews under the saved plan.
+
+### GET `/projects/:projectId/task-templates/:templateId/staffing-profiles`
+
+- Required path parameters: `projectId`, `templateId`.
+- Returns `200 OK` with the template's profiles, the default first and the rest
+  by name, each with its ordered `entries`.
+- Refusal: `404 Not Found` with code `staffing_profile_template_not_found` when
+  the template is not in the addressed project.
+
+```sh
+curl "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/staffing-profiles" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN"
+```
+
+### POST `/projects/:projectId/task-templates/:templateId/staffing-profiles`
+
+- Required path parameters: `projectId`, `templateId`.
+- Required JSON fields: `name` (trimmed, non-empty, at most 200 characters) and
+  `entries` (at most 64, each `{ "outputKind", "assigneeAgentId"?, "include"? }`).
+- Optional JSON field: `isDefault`. The first profile of a template is always
+  its default regardless of this field; setting it on a later profile clears
+  the previous default in the same transaction.
+- Returns `201 Created` with `{ "profile": <profile>, "warnings": [...] }`.
+- Refusals: `404 Not Found` with code `staffing_profile_template_not_found`;
+  `409 Conflict` with code `staffing_profile_name_taken` when the template
+  already has a profile with that name; and the `422` validation codes above.
+
+```sh
+curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/staffing-profiles" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"Fast lane","entries":[{"outputKind":"implementation","assigneeAgentId":"'$AGENT_ID'"},{"outputKind":"blind-findings","include":false}]}'
+```
+
+### PUT `/staffing-profiles/:profileId`
+
+- Required path parameter: `profileId`.
+- Required JSON fields: `name` and `entries`. The entry list replaces the
+  stored one whole; an omitted output kind loses its opinion rather than
+  keeping the previous one.
+- Default membership is not part of this body; `PATCH` owns that transition.
+- Returns `200 OK` with `{ "profile": <profile>, "warnings": [...] }`.
+- Refusals: `404 Not Found` with code `staffing_profile_not_found`;
+  `409 Conflict` with code `staffing_profile_name_taken`; and the `422`
+  validation codes above.
+
+```sh
+curl -X PUT "$BASE_URL/staffing-profiles/$PROFILE_ID" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"Fast lane","entries":[{"outputKind":"implementation","assigneeAgentId":"'$AGENT_ID'"}]}'
+```
+
+### PATCH `/staffing-profiles/:profileId`
+
+- Required path parameter: `profileId`.
+- Required JSON field: `isDefault`, which must be exactly `true`. Clearing the
+  default is not expressible: a template with profiles and no default has no
+  answer for instantiation.
+- Promotes this profile and demotes the previous default atomically.
+- Returns `200 OK` with the promoted profile.
+- Refusal: `404 Not Found` with code `staffing_profile_not_found`.
+
+```sh
+curl -X PATCH "$BASE_URL/staffing-profiles/$PROFILE_ID" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
+  -d '{"isDefault":true}'
+```
+
+### DELETE `/staffing-profiles/:profileId`
+
+- Required path parameter: `profileId`.
+- Returns `204 No Content`. Deleting a template's last profile is allowed;
+  instantiation then falls back to the template's own step bindings.
+- Refusals: `404 Not Found` with code `staffing_profile_not_found`; and
+  `409 Conflict` with code `staffing_profile_default_delete_refused` when the
+  addressed profile is the default and the template has other profiles.
+
+```sh
+curl -X DELETE "$BASE_URL/staffing-profiles/$PROFILE_ID" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN"
+```
+
+### POST `/staffing-profiles/:profileId/reset`
+
+- Required path parameter: `profileId`.
+- Replaces the profile's entries with the template's canonical plan: every
+  step's own `assigneeAgentId`, and every optional step included.
+- Returns `200 OK` with `{ "profile": <profile>, "warnings": [...] }`.
+- Refusal: `404 Not Found` with code `staffing_profile_not_found`.
+
+```sh
+curl -X POST "$BASE_URL/staffing-profiles/$PROFILE_ID/reset" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN"
+```
+
 ## Triggers and automations
 
 Triggers are webhook-configured task templates. The operator routes inspect,
