@@ -278,3 +278,64 @@ test("clone name schema rejects blank and overlong names", async () => {
     assert.equal(await db.taskTemplate.count(), 1);
   }
 });
+
+test("clone copies the source template's staffing profiles", async () => {
+  const seed = await seedTemplate("clone-staffing");
+  const profile = await db.staffingProfile.create({
+    data: {
+      projectId: seed.project.id,
+      taskTemplateId: seed.template.id,
+      name: "Default",
+      isDefault: true,
+      entries: {
+        create: [
+          { outputKind: "implementation", assigneeAgentId: seed.agent.id, include: null },
+          { outputKind: "approval", assigneeAgentId: null, include: null },
+        ],
+      },
+    },
+  });
+  await db.staffingProfile.create({
+    data: {
+      projectId: seed.project.id,
+      taskTemplateId: seed.template.id,
+      name: "Alternate",
+      isDefault: false,
+      entries: { create: [{ outputKind: "implementation", assigneeAgentId: null, include: null }] },
+    },
+  });
+
+  const result = await request(seed.project.id, seed.template.id, { name: "cloned-with-staffing" });
+  assert.equal(result.status, 201, JSON.stringify(result.body));
+
+  const cloned = await db.staffingProfile.findMany({
+    where: { taskTemplateId: result.body.id },
+    orderBy: { name: "asc" },
+    include: { entries: { orderBy: { outputKind: "asc" } } },
+  });
+  assert.deepEqual(
+    cloned.map(({ name, isDefault, entries }) => ({
+      name,
+      isDefault,
+      entries: entries.map(({ outputKind, assigneeAgentId, include }) => ({ outputKind, assigneeAgentId, include })),
+    })),
+    [
+      {
+        name: "Alternate",
+        isDefault: false,
+        entries: [{ outputKind: "implementation", assigneeAgentId: null, include: null }],
+      },
+      {
+        name: "Default",
+        isDefault: true,
+        entries: [
+          { outputKind: "approval", assigneeAgentId: null, include: null },
+          { outputKind: "implementation", assigneeAgentId: seed.agent.id, include: null },
+        ],
+      },
+    ],
+  );
+  // The copies are independent rows, and the source keeps its own.
+  assert.ok(cloned.every((copy) => copy.id !== profile.id));
+  assert.equal(await db.staffingProfile.count({ where: { taskTemplateId: seed.template.id } }), 2);
+});
