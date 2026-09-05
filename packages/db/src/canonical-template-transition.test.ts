@@ -8,7 +8,7 @@ import {
   canonicalTemplateIdentity,
   LEGACY_TEMPLATE_GENERATIONS,
   legacyGenerationMatches,
-  legacyTemplateName,
+  templateRolloverName,
   matchedLegacyGeneration,
   sourcePromptGenerationDrift,
   templatePromptGenerationDigest,
@@ -139,7 +139,7 @@ test("canonical identity parses current names and every registered generation", 
     assert.deepEqual(canonicalTemplateIdentity(canonicalName), { canonicalName, generation: null });
     for (const generation of generations) {
       assert.deepEqual(
-        canonicalTemplateIdentity(legacyTemplateName(canonicalName, generation.marker, "template-row")),
+        canonicalTemplateIdentity(templateRolloverName(canonicalName, generation.marker, "template-row")),
         { canonicalName, generation: generation.marker },
       );
     }
@@ -538,7 +538,7 @@ test("the Astra-low review-fix generation is kept on record and retired from mat
     assert.equal(matchedLegacyGeneration(templateName, asPersisted(current)), null, templateName);
 
     assert.deepEqual(
-      canonicalTemplateIdentity(legacyTemplateName(templateName, generation.marker, "template-row")),
+      canonicalTemplateIdentity(templateRolloverName(templateName, generation.marker, "template-row")),
       { canonicalName: templateName, generation: generation.marker },
       templateName,
     );
@@ -668,7 +668,7 @@ test("model-neutral review names roll over exactly the deployed shapes and retai
     assert.equal(generation.promptDigest, undefined);
     assert.equal(matchedLegacyGeneration(templateName, outgoing), generation.marker);
     assert.equal(matchedLegacyGeneration(templateName, asPersisted(current)), null);
-    assert.deepEqual(canonicalTemplateIdentity(legacyTemplateName(templateName, generation.marker, "row")), {
+    assert.deepEqual(canonicalTemplateIdentity(templateRolloverName(templateName, generation.marker, "row")), {
       canonicalName: templateName, generation: generation.marker,
     });
     for (const outputKind of ["sol-findings", "blind-findings"] as const) {

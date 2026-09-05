@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import {
   LEGACY_TEMPLATE_GENERATIONS,
-  legacyTemplateName,
+  templateRolloverName,
 } from "./canonical-template-transition.js";
 import {
   gateFeedsIntegratorStep,
@@ -38,7 +38,7 @@ const EXPECTED_ROLES: Readonly<Record<string, StepRole>> = {
 for (const [templateName, generations] of Object.entries(LEGACY_TEMPLATE_GENERATIONS)) {
   for (const generation of generations) {
     test(`${templateName} ${generation.marker} exposes every registered Step role`, () => {
-      const persistedName = legacyTemplateName(templateName, generation.marker, "template-row");
+      const persistedName = templateRolloverName(templateName, generation.marker, "template-row");
       for (const step of generation.shape) {
         const { outputKind } = step;
         assert.equal(stepRole({ outputKind, taskTemplateName: persistedName }), EXPECTED_ROLES[outputKind]);
@@ -98,4 +98,20 @@ test("task and successor integrator predicates delegate to Step role", async () 
   } as unknown as Parameters<typeof gateFeedsIntegratorStep>[0];
   assert.equal(await gateFeedsIntegratorStep(tx, { projectId: "project", chainId: "chain", chainIndex: 3 }), integratorTask);
   assert.equal(await gateFeedsIntegratorStep(tx, { projectId: "project", chainId: null, chainIndex: 3 }), null);
+});
+
+test("seed-era identities select implementation guards by canonical family", () => {
+  for (const [canonicalName, markers] of [
+    ["compound-engineer-workflow", ["10", "9", "human-12", "regression-first-13"]],
+    ["direct-engineer-workflow", ["human-6"]],
+  ] as const) {
+    for (const marker of markers) {
+      const taskTemplate = { name: templateRolloverName(canonicalName, marker, "persisted-row") };
+      const step = { taskTemplate, outputKind: "implementation" };
+      assert.equal(isCompoundImplementationStep(step), canonicalName === "compound-engineer-workflow");
+      assert.equal(isDirectImplementationStep(step), canonicalName === "direct-engineer-workflow");
+      assert.equal(isCompoundImplementationStep({ ...step, outputKind: "sol-findings" }), false);
+      assert.equal(isDirectImplementationStep({ ...step, outputKind: "sol-findings" }), false);
+    }
+  }
 });

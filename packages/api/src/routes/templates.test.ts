@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  legacyTemplateName,
+  templateRolloverName,
   Prisma,
   type PrismaClient,
 } from "@anneal/db";
@@ -153,7 +153,7 @@ test("listed and single templates carry retired, true only for a renamed retired
     });
     const rows = [
       row("template-1", "direct-engineer-workflow"),
-      row("template-2", legacyTemplateName("direct-engineer-workflow", "pre-adjudication", "template-1")),
+      row("template-2", templateRolloverName("direct-engineer-workflow", "pre-adjudication", "template-1")),
       row("template-3", "my own clone of the direct chain"),
     ];
     const database = {

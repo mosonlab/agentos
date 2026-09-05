@@ -6,7 +6,7 @@ import {
   AssigneeType,
   DependencyProvisioning,
   DIRECT_TEMPLATE_NAME,
-  legacyTemplateName,
+  templateRolloverName,
   Prisma,
   RunnerKind,
   type PrismaClient,
@@ -256,7 +256,7 @@ test("clone refusals identify addressing and name conflicts without creating row
     {
       projectId: seed.project.id,
       templateId: seed.template.id,
-      body: { name: legacyTemplateName(DIRECT_TEMPLATE_NAME, "pre-narrow-regression-lease", "legacy-row") },
+      body: { name: templateRolloverName(DIRECT_TEMPLATE_NAME, "pre-narrow-regression-lease", "legacy-row") },
       status: 409,
       code: "template_name_reserved",
     },

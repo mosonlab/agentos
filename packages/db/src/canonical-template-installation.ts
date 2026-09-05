@@ -3,7 +3,7 @@ import { AssigneeType, Prisma, RunStatus, TaskStatus } from "@prisma/client";
 import { findCanonicalAgent } from "./canonical-agent-lookup.js";
 import { canonicalStepDrift } from "./canonical-step-adoption.js";
 import {
-  legacyTemplateName,
+  templateRolloverName,
   matchedLegacyGeneration,
   sourcePromptGenerationDrift,
   templateRolloverBlockerCount,
@@ -106,7 +106,7 @@ export const planCanonicalInstallation = (
             projectId: row.projectId,
             rowId: row.id,
             marker,
-            legacyName: legacyTemplateName(templateName, marker, row.id),
+            legacyName: templateRolloverName(templateName, marker, row.id),
           }
           : { kind: "refused", templateName, projectId: row.projectId, rowId: row.id, reason: sourceDrift });
         continue;

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import { AssigneeType } from "@prisma/client";
 
-import { PR_TEMPLATE_NAME } from "./agent-contract.js";
+import { DIRECT_TEMPLATE_NAME, PR_TEMPLATE_NAME } from "./agent-contract.js";
 import { stepRole, type StepRole } from "./step-role.js";
 import { retiredStepShapeDifferences, type LegacyStepRecord } from "./template-step-fields.js";
 import type { PersistedTemplateStepStructure } from "./template-sources.js";
@@ -98,7 +98,7 @@ export type LegacyTemplateGeneration = Readonly<{
 }>;
 
 const legacyTemplateGenerations = {
-  "direct-engineer-workflow": [
+  [DIRECT_TEMPLATE_NAME]: [
     {
       marker: "pre-narrow-regression-lease",
       shape: [
@@ -579,7 +579,7 @@ export const LEGACY_TEMPLATE_GENERATIONS: Readonly<
  * `agents/templates/` and fails on a mismatch.
  */
 export const CANONICAL_SOURCE_PROMPT_GENERATIONS = {
-  "direct-engineer-workflow": "8dbdb5fc5348a01eef73bd5908c4e142b4b6ca01bbb063eaf4916173fdc51543",
+  [DIRECT_TEMPLATE_NAME]: "8dbdb5fc5348a01eef73bd5908c4e142b4b6ca01bbb063eaf4916173fdc51543",
   "compound-engineer-workflow": "e1e95c18a408a0c1847508ed16d4c60ae3978007dfccdbfe50cd793ee8a78fa9",
   [PR_TEMPLATE_NAME]: "1c1169bf0586f6bb71f4ed34b3eb6b166828802a9b24c6b07844b2f526b5f8a8",
 } as const satisfies Readonly<Record<CanonicalTemplateRegistryName, string>>;
@@ -614,17 +614,48 @@ const registeredGenerations = (canonicalName: string): readonly LegacyTemplateGe
     : null;
 
 /**
+ * Seed-era rename identities predate the closed structural transition contract.
+ * Seed still authenticates those predecessor graphs with its historical
+ * predicates. Register their names here without granting sync new structural
+ * rollover authority or inventing shapes for their retired output protocols.
+ */
+const SEED_LEGACY_TEMPLATE_MARKERS = {
+  "compound-engineer-workflow": ["10", "9", "human-12", "regression-first-13"],
+  [DIRECT_TEMPLATE_NAME]: ["human-6"],
+  [PR_TEMPLATE_NAME]: [],
+} as const satisfies Readonly<Record<CanonicalTemplateRegistryName, readonly string[]>>;
+
+const generationMarkers = (name: CanonicalTemplateRegistryName): readonly string[] => [
+  ...LEGACY_TEMPLATE_GENERATIONS[name].map(({ marker }) => marker),
+  ...SEED_LEGACY_TEMPLATE_MARKERS[name],
+];
+const REGISTERED_MARKERS: Readonly<Record<CanonicalTemplateRegistryName, readonly string[]>> = {
+  "compound-engineer-workflow": generationMarkers("compound-engineer-workflow"),
+  [DIRECT_TEMPLATE_NAME]: generationMarkers(DIRECT_TEMPLATE_NAME),
+  [PR_TEMPLATE_NAME]: generationMarkers(PR_TEMPLATE_NAME),
+};
+
+/** Fixed identities used before per-row rollover names were introduced. */
+export const LEGACY_INTEGRATOR_TEMPLATE_NAME = "compound-engineer-workflow-legacy-v1";
+export const LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME = `${DIRECT_TEMPLATE_NAME}-legacy-v1`;
+const FIXED_LEGACY_IDENTITIES: Readonly<Record<string, CanonicalTemplateIdentity>> = {
+  [LEGACY_INTEGRATOR_TEMPLATE_NAME]: { canonicalName: "compound-engineer-workflow", generation: "v1" },
+  [LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME]: { canonicalName: DIRECT_TEMPLATE_NAME, generation: "v1" },
+};
+
+/**
  * Resolve a current or registered retired canonical template name through the
  * registry. Legacy names include a row id after the generation marker; a bare
  * prefix is not an identity minted by `legacyTemplateName`.
  */
 export const canonicalTemplateIdentity = (templateName: string): CanonicalTemplateIdentity | null => {
+  if (Object.hasOwn(FIXED_LEGACY_IDENTITIES, templateName)) return FIXED_LEGACY_IDENTITIES[templateName]!;
   for (const canonicalName of Object.keys(LEGACY_TEMPLATE_GENERATIONS) as CanonicalTemplateRegistryName[]) {
     if (templateName === canonicalName) return { canonicalName, generation: null };
-    for (const generation of LEGACY_TEMPLATE_GENERATIONS[canonicalName]) {
-      const prefix = `${canonicalName}-legacy-${generation.marker}-`;
+    for (const marker of REGISTERED_MARKERS[canonicalName]) {
+      const prefix = `${canonicalName}-legacy-${marker}-`;
       if (templateName.startsWith(prefix) && templateName.length > prefix.length) {
-        return { canonicalName, generation: generation.marker };
+        return { canonicalName, generation: marker };
       }
     }
   }
@@ -692,8 +723,38 @@ export const legacyGenerationMarkerForTemplateName = (templateName: string): str
  * like `-legacy-v1` are already taken by older graphs, so each retired
  * generation needs an identity of its own to roll over onto.
  */
-export const legacyTemplateName = (templateName: string, marker: string, templateId: string): string =>
-  `${templateName}-legacy-${marker}-${templateId}`;
+const legacyTemplateName = (templateName: string, marker: string, templateId: string): string => {
+  if (!Object.hasOwn(LEGACY_TEMPLATE_GENERATIONS, templateName)
+    || !REGISTERED_MARKERS[templateName as CanonicalTemplateRegistryName].includes(marker)) {
+    throw new Error(`Unregistered legacy template generation: ${templateName} / ${marker}`);
+  }
+  if (templateId.length === 0) throw new Error("A legacy template name requires a row id");
+  return `${templateName}-legacy-${marker}-${templateId}`;
+};
+
+/** Registry-owned rename target for a registered transition generation. */
+export const templateRolloverName = (templateName: string, marker: string, templateId: string): string =>
+  legacyTemplateName(templateName, marker, templateId);
+
+/**
+ * Seed rollover keeps the historical template row and its step ids intact so
+ * already-materialized tasks retain their runtime contract. The template id in
+ * this marker makes the rename deterministic and collision-free on retries.
+ */
+export const legacyTenStepTemplateName = (templateId: string): string =>
+  legacyTemplateName("compound-engineer-workflow", "10", templateId);
+
+export const legacyNineStepTemplateName = (templateId: string): string =>
+  legacyTemplateName("compound-engineer-workflow", "9", templateId);
+
+export const legacyHumanTwelveStepTemplateName = (templateId: string): string =>
+  legacyTemplateName("compound-engineer-workflow", "human-12", templateId);
+
+export const legacyRegressionFirstThirteenStepTemplateName = (templateId: string): string =>
+  legacyTemplateName("compound-engineer-workflow", "regression-first-13", templateId);
+
+export const legacyHumanSixStepTemplateName = (templateId: string): string =>
+  legacyTemplateName(DIRECT_TEMPLATE_NAME, "human-6", templateId);
 
 /**
  * A quiescent chain may move under a legacy template name without changing any
