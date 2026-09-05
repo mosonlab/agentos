@@ -531,11 +531,16 @@ process.exit(result.status ?? 1);
       baseline.autoDeployManifestEntries,
     );
     rmSync(autoHome, { recursive: true, force: true });
+    // The service plan reads $HOME/Library/LaunchAgents; a developer machine
+    // with the services installed would otherwise report a definition
+    // conflict instead of the pinned plan bytes.
+    const serviceHome = mkdtempSync(join(tmpdir(), "agentos-darwin-service-home-"));
     const entrypoint = spawnSync(process.execPath, ["scripts/deploy/install-launchd-services.mjs"], {
       cwd: root,
       encoding: "utf8",
-      env: { ...process.env, AGENTOS_SERVICE_PLATFORM: "darwin" },
+      env: { ...process.env, AGENTOS_SERVICE_PLATFORM: "darwin", HOME: serviceHome },
     });
+    rmSync(serviceHome, { recursive: true, force: true });
     assert.equal(entrypoint.status, 0, entrypoint.stderr);
     assert.equal(normalize(entrypoint.stdout), baseline.servicePlanStdout);
   } finally {
@@ -2152,6 +2157,9 @@ test("runner auto-deploy stage one prints a stage-two command carrying the role"
       sudoersPath: join(root, "etc/sudoers.d/anneal-service-control"),
       environment,
       effectiveUid: 501,
+      // The Linux arm resolves systemctl on the host; pin it as every other
+      // Linux-arm test here does so a machine without systemd still runs it.
+      systemctlPath: "/usr/bin/true",
       execute: () => "",
     };
     const output = [];
