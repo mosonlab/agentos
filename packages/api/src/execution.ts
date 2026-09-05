@@ -77,6 +77,14 @@ const PROVIDER_OUTAGE_PATTERN = /provider outage|\b(?:(?:API\s+)?Error|failed wi
 
 const PROVIDER_TRY_AGAIN_PATTERN = /try again later/iu;
 
+/** A provider refusing the request because the model pool has no room right
+ *  now: Codex's "Selected model is at capacity. Please try a different model."
+ *  and Claude's equivalent capacity wording. Nothing about the task caused it
+ *  and nothing about the task can avoid it — the same prompt on the same model
+ *  succeeds once the pool frees up — so it belongs with the transport/outage
+ *  phrases, on the verdict channels only. */
+const PROVIDER_CAPACITY_PATTERN = /\b(?:is|are|were|currently)\s+at capacity\b/iu;
+
 /**
  * Ported from `packages/runner/src/network-retry.ts` (`TRANSIENT_NETWORK_PATTERNS`
  * and `DETERMINISTIC_ACCESS_PATTERNS`), which `adapters.ts classifyError` called
@@ -135,6 +143,7 @@ const envelopeVerdictText = (envelope: FailureEnvelope): string =>
 const transientProviderText = (envelope: FailureEnvelope): boolean =>
   transientNetworkText(envelopeVerdictText(envelope))
   || PROVIDER_OUTAGE_PATTERN.test(envelopeVerdictText(envelope))
+  || PROVIDER_CAPACITY_PATTERN.test(envelopeVerdictText(envelope))
   // This generic provider prompt is authoritative only on the structured
   // provider channel. Agent stderr can contain the same words from any tool
   // the task invoked and must not decide a budget refund by itself.

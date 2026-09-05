@@ -403,3 +403,30 @@ test("a dropped connection outranks a rate limit named in the same provider erro
   const verdict = classifyEnvelope(envelope({ providerError: "connection lost while reporting 429 rate limit" }));
   assert.equal(verdict.failureClass, FailureClass.TRANSIENT_PROVIDER);
 });
+
+test("a model capacity refusal is external transience, not a spent attempt", () => {
+  // 2026-09-05: two Apply-review-fixes runs died on Codex's capacity refusal,
+  // were classified TASK_FAILED, and each charged the task an attempt for a
+  // condition no prompt of theirs could have avoided.
+  for (const providerError of [
+    "Selected model is at capacity. Please try a different model.",
+    "This model is currently at capacity. Please try again.",
+  ]) {
+    const evidence = envelope({ providerError });
+    const verdict = classifyEnvelope(evidence);
+    assert.equal(verdict.failureClass, FailureClass.TRANSIENT_PROVIDER);
+    assert.equal(verdict.retryable, true);
+    assert.equal(verdict.externalFailure, true, "the refund must apply in EXECUTE");
+    assert.equal(isTextMatchedTransientProviderFailure(evidence, verdict.failureClass), true);
+  }
+});
+
+test("a capacity refusal quoted in the agent's own stdout is not a verdict", () => {
+  const evidence = envelope({
+    stdoutSummary: "documented the retry: \"Selected model is at capacity. Please try a different model.\"",
+  });
+  const verdict = classifyEnvelope(evidence);
+  assert.equal(verdict.failureClass, FailureClass.TASK_FAILED);
+  assert.equal(verdict.retryable, false);
+  assert.equal(verdict.externalFailure, false);
+});
