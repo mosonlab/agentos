@@ -766,11 +766,13 @@ run_database_tests() {
 
 parallel_lint() {
   local biome="${GATE_TMP}/lint-biome.log" types="${GATE_TMP}/lint-types.log" biome_pid types_pid failed=0
-  local eslint_node_options="${NODE_OPTIONS:+${NODE_OPTIONS} }--max-old-space-size=2560"
+  local eslint_node_options="${NODE_OPTIONS:+${NODE_OPTIONS} }--max-old-space-size=3584"
   (cd "${REPO_ROOT}" && npm run lint:biome) >"${biome}" 2>&1 & biome_pid=$!
   # Node 26 caps its heap near 1.8 GiB on the 4 GiB worker; the type-aware
   # project service now crosses that boundary before completing. Raise only
-  # this process's ceiling. The option is a limit, not a reservation.
+  # this process's ceiling. The option is a limit, not a reservation. 2560
+  # was exceeded on 2026-09-05 (main already scavenged at ~2.5 GiB; the
+  # staffing console tree pushed it over), so the limit is 3.5 GiB now.
   (cd "${REPO_ROOT}" && NODE_OPTIONS="${eslint_node_options}" npm run lint:types) >"${types}" 2>&1 & types_pid=$!
   wait "${biome_pid}" || failed=1
   wait "${types_pid}" || failed=1
