@@ -43,13 +43,13 @@ import type { PersistedTemplateStepStructure } from "./template-sources.js";
  * tree.
  * `pre-pr-head-tree-check`: the first handover-quality prompt generation,
  * whose cleanup verification inspected the index rather than committed HEAD.
- * `model-neutral-review-step-names`: the graphs whose review labels named
- * their default models, before staffing-independent display names.
  * `pre-astra-low-review-fix`: the graphs whose review-fix step was still bound
  * to the Astra-medium senior developer before it moved to
  * `senior-dev-astra-low`. Agent-only in all three templates, so it carries
  * `retiredByBinding` and is a published-generation record rather than a
  * structural match.
+ * `model-neutral-review-step-names`: the graphs whose review labels named
+ * their default models, before staffing-independent display names.
  */
 export type LegacyTemplateGeneration = Readonly<{
   marker: string;

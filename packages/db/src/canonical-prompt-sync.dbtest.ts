@@ -1550,6 +1550,7 @@ test("sync rolls model-neutral review names across all canonical templates and c
 
   const taskIds: string[] = [];
   const legacyTemplateIds: string[] = [];
+  const legacyStepIds: string[] = [];
   const fixtures = new Map<string, {
     templateId: string;
     profileId: string;
@@ -1604,6 +1605,7 @@ test("sync rolls model-neutral review names across all canonical templates and c
       select: { id: true },
     });
     taskIds.push(task.id);
+    legacyStepIds.push(...template.steps.map(({ id }) => id));
     fixtures.set(template.name, {
       templateId: template.id,
       profileId: profile.id,
@@ -1614,9 +1616,12 @@ test("sync rolls model-neutral review names across all canonical templates and c
   }
 
   const instantiatedBefore = await snapshotInstantiatedTasks(taskIds);
+  const stepsBefore = JSON.stringify(await prisma.taskTemplateStep.findMany({ where: { id: { in: legacyStepIds } }, orderBy: { id: "asc" } }));
   const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
   assert.equal(synced.status, 0, synced.output);
   assert.equal(await snapshotInstantiatedTasks(taskIds), instantiatedBefore);
+  const stepsAfter = JSON.stringify(await prisma.taskTemplateStep.findMany({ where: { id: { in: legacyStepIds } }, orderBy: { id: "asc" } }));
+  assert.equal(stepsAfter, stepsBefore);
   const summary = parseCanonicalSyncSummary(synced.output);
   assert.deepEqual(summary.refused, {});
   assert.equal(summary.projects[project.slug]?.createdCanonicalTemplates, 3, synced.output);
