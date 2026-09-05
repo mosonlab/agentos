@@ -897,6 +897,41 @@ const validateSudoers = ({ path, visudoPath, execute = execFileSync }) => {
 };
 
 const fileDigest = (path) => existsSync(path) ? sha256(readFileSync(path)) : null;
+
+/** The recovery rules every staged-file installer depends on. A manifest entry
+ * recognises exactly the digests an interrupted install can leave at its
+ * target: what this installer installed, what it installed before that, the
+ * operator's original when it overwrote one, and nothing at all when it
+ * created the file. An entry still showing the installed digest over an
+ * operator file needs a verified backup or there is no way back. `reason`
+ * names the installer in both refusals. Returns the digest observed at the
+ * target so a caller that restores need not read the file twice. */
+export const recognizeInstalledEntry = ({ entry, reason }) => {
+  const current = fileDigest(entry.path);
+  const recognized = current === entry.installedSha256
+    || current === entry.previousInstalledSha256
+    || (entry.existed && current === entry.originalSha256)
+    || (!entry.existed && current === null);
+  if (!recognized) throw new Error(`${reason}-definition-drift:${entry.path}`);
+  if (entry.existed && current === entry.installedSha256
+      && (!entry.backupPath || fileDigest(entry.backupPath) !== entry.originalSha256)) {
+    throw new Error(`${reason}-backup-missing:${entry.path}`);
+  }
+  return current;
+};
+
+/** The staged source an entry promises to install. Every copy out of a staging
+ * root passes through here first, and so does every installer that checks the
+ * staged files before it starts. */
+export const assertStagedSource = (entry) => {
+  if (!entry.stagedPath || !existsSync(entry.stagedPath)) {
+    throw new Error(`systemd-staged-file-missing:${entry.stagedPath ?? entry.path}`);
+  }
+  if (fileDigest(entry.stagedPath) !== entry.installedSha256) {
+    throw new Error(`systemd-staged-file-drift:${entry.stagedPath}`);
+  }
+};
+
 const invalidManifest = (reason, manifestPath, field) => {
   const detail = [manifestPath, field].filter((value) => value !== undefined && value !== null && value !== "").join(":");
   throw new DeployFailure(reason, detail);
@@ -1283,8 +1318,7 @@ const readStageEntries = ({
 };
 
 const copyStagedEntry = ({ entry, unitDirectory, sudoersPath, strictOwner = true, chown = chownSync }) => {
-  if (!entry.stagedPath || !existsSync(entry.stagedPath)) throw new Error(`systemd-staged-file-missing:${entry.stagedPath ?? entry.path}`);
-  if (fileDigest(entry.stagedPath) !== entry.installedSha256) throw new Error(`systemd-staged-file-drift:${entry.stagedPath}`);
+  assertStagedSource(entry);
   if (entry.kind === "wrapper") throw new Error("systemd-root-wrapper-write-refused");
   if (entry.kind === "sudoers") assertTargetPathSafe(entry.path, dirname(sudoersPath));
   else assertTargetPathSafe(entry.path, unitDirectory);
@@ -1916,20 +1950,8 @@ export const installStagedSystemdServices = ({
     entries: entries.map((entry) => entry.path),
   });
   for (const entry of entries) {
-    const currentSha = fileDigest(entry.path);
-    const recognized = currentSha === entry.installedSha256
-      || currentSha === entry.previousInstalledSha256
-      || (entry.existed && currentSha === entry.originalSha256)
-      || (!entry.existed && currentSha === null);
-    if (!recognized) throw new Error(`systemd-service-definition-drift:${entry.path}`);
-    if (entry.existed && currentSha === entry.installedSha256) {
-      if (!entry.backupPath || !existsSync(entry.backupPath) || fileDigest(entry.backupPath) !== entry.originalSha256) {
-        throw new Error(`systemd-service-backup-missing:${entry.path}`);
-      }
-    }
-    if (!revert && fileDigest(entry.stagedPath) !== entry.installedSha256) {
-      throw new Error(`systemd-staged-file-drift:${entry.stagedPath}`);
-    }
+    recognizeInstalledEntry({ entry, reason: "systemd-service" });
+    if (!revert) assertStagedSource(entry);
   }
   const transactionStatePath = join(resolvedUnitDirectory, ".anneal-service-transaction.json");
   let previousTransactionStateContents = null;
@@ -2349,24 +2371,10 @@ export const installLaunchdServices = ({
     const { manifest } = validateServiceManifest(
       readJsonFile(manifestPath, "launchd-service-manifest-invalid"), root, manifestPath, deployRole,
     );
-    const observed = new Map();
-    for (const entry of manifest.entries) {
-      const current = existsSync(entry.path) ? readFileSync(entry.path) : null;
-      const currentSha = current === null ? null : sha256(current);
-      observed.set(entry.path, currentSha);
-      const recognized = currentSha === entry.installedSha256
-        || currentSha === entry.previousInstalledSha256
-        || (entry.existed && currentSha === entry.originalSha256)
-        || (!entry.existed && currentSha === null);
-      if (!recognized) {
-        throw new Error(`launchd-service-definition-drift:${entry.path}`);
-      }
-      if (entry.existed && currentSha === entry.installedSha256) {
-        if (!entry.backupPath || !existsSync(entry.backupPath) || sha256(readFileSync(entry.backupPath)) !== entry.originalSha256) {
-          throw new DeployFailure("launchd-service-backup-missing", entry.backupPath ?? entry.path);
-        }
-      }
-    }
+    const observed = new Map(manifest.entries.map((entry) => [
+      entry.path,
+      recognizeInstalledEntry({ entry, reason: "launchd-service" }),
+    ]));
     if (!apply) return serviceInstallerOutcome({
       platform: "darwin",
       revert: true,
@@ -3068,18 +3076,8 @@ export const installStagedSystemdAutoDeploy = ({
   });
   const systemctl = systemctlPath ?? systemdCommandPath("systemctl", null, execute);
   for (const entry of entries) {
-    const current = fileDigest(entry.path);
-    const recognized = current === entry.installedSha256
-      || (entry.existed && current === entry.originalSha256)
-      || (!entry.existed && current === null);
-    if (!recognized) throw new Error(`systemd-auto-deploy-definition-drift:${entry.path}`);
-    if (entry.existed && current === entry.installedSha256
-        && (!entry.backupPath || !existsSync(entry.backupPath) || fileDigest(entry.backupPath) !== entry.originalSha256)) {
-      throw new Error(`systemd-auto-deploy-backup-missing:${entry.path}`);
-    }
-    if (!revert && fileDigest(entry.stagedPath) !== entry.installedSha256) {
-      throw new Error(`systemd-staged-file-drift:${entry.stagedPath}`);
-    }
+    recognizeInstalledEntry({ entry, reason: "systemd-auto-deploy" });
+    if (!revert) assertStagedSource(entry);
   }
   const transactionStatePath = join(targetRoot, ".anneal-auto-deploy-transaction.json");
   const transactionState = rootTransactionState({

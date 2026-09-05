@@ -19,6 +19,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  assertStagedSource,
   autoDeployEnvironmentValues,
   controlledLaunchdPath,
   installLaunchd,
@@ -31,6 +32,7 @@ import {
   renderLaunchdPlist,
   renderServiceLaunchdPlist,
   renderServiceSystemdUnit,
+  recognizeInstalledEntry,
   renderSystemdSudoers,
   serviceEnvironmentValues,
   servicePlistValues,
@@ -600,6 +602,95 @@ test("rendered unit syntax is verified by systemd-analyze when available", (t) =
       assert.equal(verified.status, 0, output);
       assert.doesNotMatch(output, /Unknown|Failed to parse/u);
     }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the recovery rules recognise every state an interrupted install can leave", () => {
+  const root = mkdtempSync(join(tmpdir(), "agentos-staged-recovery-"));
+  try {
+    const target = join(root, "com.agentos.api.service");
+    const backup = join(root, "backup");
+    const write = (path, contents) => { writeFileSync(path, contents); return digest(contents); };
+    const installed = digest("installed\n");
+    const previous = digest("previous\n");
+    const original = digest("original\n");
+    const created = {
+      path: target,
+      existed: false,
+      backupPath: null,
+      originalSha256: null,
+      installedSha256: installed,
+    };
+    const overwritten = {
+      path: target,
+      existed: true,
+      backupPath: backup,
+      originalSha256: original,
+      installedSha256: installed,
+      previousInstalledSha256: previous,
+    };
+
+    // The copy completed over a file the installer created.
+    write(target, "installed\n");
+    assert.equal(recognizeInstalledEntry({ entry: created, reason: "systemd-service" }), installed);
+
+    // The copy completed over an operator file: the backup is the only way
+    // back, so it must be present and must still be the operator's bytes.
+    assert.throws(
+      () => recognizeInstalledEntry({ entry: overwritten, reason: "systemd-service" }),
+      /^Error: systemd-service-backup-missing:/u,
+    );
+    write(backup, "someone-elses\n");
+    assert.throws(
+      () => recognizeInstalledEntry({ entry: overwritten, reason: "launchd-service" }),
+      /^Error: launchd-service-backup-missing:/u,
+    );
+    write(backup, "original\n");
+    assert.equal(recognizeInstalledEntry({ entry: overwritten, reason: "systemd-service" }), installed);
+
+    // The copy never happened, or a partial transaction was already restored.
+    write(target, "original\n");
+    assert.equal(recognizeInstalledEntry({ entry: overwritten, reason: "systemd-service" }), original);
+    rmSync(backup, { force: true });
+    assert.equal(recognizeInstalledEntry({ entry: overwritten, reason: "systemd-service" }), original);
+
+    // An interrupted upgrade left the digest this installer wrote last time.
+    write(target, "previous\n");
+    assert.equal(recognizeInstalledEntry({ entry: overwritten, reason: "systemd-service" }), previous);
+
+    // Nothing at the target is the created entry's untouched state and the
+    // overwritten entry's drift.
+    rmSync(target, { force: true });
+    assert.equal(recognizeInstalledEntry({ entry: created, reason: "systemd-service" }), null);
+    assert.throws(
+      () => recognizeInstalledEntry({ entry: overwritten, reason: "systemd-auto-deploy" }),
+      /^Error: systemd-auto-deploy-definition-drift:/u,
+    );
+
+    // Anything else at the target is a foreign write.
+    write(target, "operator-edited\n");
+    assert.throws(
+      () => recognizeInstalledEntry({ entry: created, reason: "systemd-service" }),
+      new RegExp(`^Error: systemd-service-definition-drift:${escapeRegExp(target)}$`, "u"),
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a staged source is refused when it is missing or no longer what the manifest promised", () => {
+  const root = mkdtempSync(join(tmpdir(), "agentos-staged-source-"));
+  try {
+    const stagedPath = join(root, "staged");
+    const entry = { path: join(root, "target"), stagedPath, installedSha256: digest("installed\n") };
+    assert.throws(() => assertStagedSource(entry), /^Error: systemd-staged-file-missing:/u);
+    assert.throws(() => assertStagedSource({ ...entry, stagedPath: undefined }), /^Error: systemd-staged-file-missing:/u);
+    writeFileSync(stagedPath, "tampered\n");
+    assert.throws(() => assertStagedSource(entry), /^Error: systemd-staged-file-drift:/u);
+    writeFileSync(stagedPath, "installed\n");
+    assert.equal(assertStagedSource(entry), undefined);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
