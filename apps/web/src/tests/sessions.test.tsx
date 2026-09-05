@@ -275,6 +275,23 @@ test("a session row leads with its title and status, not table columns", () => {
   assert.doesNotMatch(markup, /<table|Started|Runner|Duration|Result/);
 });
 
+test("a session row's chip carries the model that run executed with", () => {
+  const markup = renderToStaticMarkup(<SessionRow session={session()} />);
+  // One chip, two facts: who ran it and what it ran. The row's own Run snapshot
+  // holds the model, so no second read is needed to say it.
+  assert.match(markup, /data-agent-chip-model="true"[^>]*>Claude Opus 5</u);
+
+  const withEffort = renderToStaticMarkup(<SessionRow session={session({
+    run: { id: "run-1", runNumber: 3, model: "gpt-6-astra:high", branch: null, pullRequestUrl: null, workspacePath: null, repo: null },
+  })} />);
+  assert.match(withEffort, /data-agent-chip-model="true"[^>]*>GPT-6 Astra \(codex\) · high</u);
+
+  // A row with no Run snapshot names the agent and invents no model.
+  const bare = renderToStaticMarkup(<SessionRow session={session({ run: null })} />);
+  assert.match(bare, />Frontend Dev</u);
+  assert.doesNotMatch(bare, /data-agent-chip-model/u);
+});
+
 test("a queued row uses requestedAt for its relative time when it has not started", () => {
   const requestedAt = new Date(Date.now() - 2_000).toISOString();
   const markup = renderToStaticMarkup(<SessionRow session={session({ startedAt: null, requestedAt })} />);
@@ -1311,4 +1328,38 @@ test("a failed Load more tells the operator instead of vanishing into the consol
   await act(async () => root.unmount());
   dom.window.close();
   fetchHarness.dispose();
+});
+
+test("the session detail header names the model the run executed with", async () => {
+  const dom = jsdom();
+  Object.defineProperty(dom.window, "scrollTo", { configurable: true, value: () => undefined });
+  const detail = session({
+    run: { id: "run-1", runNumber: 3, model: "gpt-6-astra:high", branch: null, pullRequestUrl: null, workspacePath: null, repo: null },
+  });
+  const fetchHarness = installFetchFunction(async (input) => {
+    const payload = String(input).includes("/runs/")
+      ? { events: [], nextAfterSeq: null, hasMore: false, total: 0 }
+      : detail;
+    return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
+  });
+  const { SessionDetailPage } = await import("../pages/Sessions");
+  const container = dom.window.document.querySelector("#root");
+  assert.ok(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => { root.render(<SessionDetailPage sessionId="session-1" />); });
+    await fetchHarness.settle();
+    const heading = container.querySelector("h1");
+    assert.ok(heading, container.innerHTML);
+    const header = heading.parentElement;
+    assert.ok(header);
+    // The heading names the Agent; beside it, the runtime that Run carried.
+    assert.match(header.textContent ?? "", /Frontend Dev/u);
+    assert.match(header.textContent ?? "", /GPT-6 Astra \(codex\)/u);
+    assert.match(header.textContent ?? "", /high/u);
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+    fetchHarness.dispose();
+  }
 });

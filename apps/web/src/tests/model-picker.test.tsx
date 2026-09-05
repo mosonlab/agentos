@@ -163,9 +163,14 @@ test("the executioner Setup page has no legacy subprocess profile controls", asy
     const edit = [...dom.window.document.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Edit");
     assert.ok(edit);
     await act(async () => edit.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true })));
+    // The name is the operator's own identifier, and the platform pins the
+    // native children by the step a run executes rather than by this Agent's
+    // name — so an effort change may be followed by the matching slug here.
     const canonicalName = dom.window.document.querySelector('input[value="plan-executor-astra-medium"]') as HTMLInputElement | null;
     assert.ok(canonicalName);
-    assert.equal(canonicalName.disabled, true);
+    assert.equal(canonicalName.disabled, false);
+    // What is pinned is said, not enforced by a dead control.
+    assert.match(dom.window.document.body.textContent ?? "", /Native Luna max children remain pinned/u);
   } finally {
     fetchHarness.dispose();
     await act(async () => root.unmount());

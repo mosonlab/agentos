@@ -4,6 +4,7 @@ import { api } from "../lib/api";
 import { useAction, usePoll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { agentOptionLabel } from "../lib/models";
+import { fatal } from "../lib/poll-state";
 import type {
   Agent, Project, Repo, StaffingProfile, StaffingProfileEntry, TaskTemplate, TaskTemplateStep,
 } from "../lib/types";
@@ -72,11 +73,17 @@ const changedGateValues = (selection: GateSelection): GateValues | undefined => 
  *  polls and the reseed effect below does not fire on every render. */
 const NO_PROFILES: StaffingProfile[] = [];
 
+/** The staffing controls' `id`s. A `<label>` names a control through `htmlFor`,
+ *  so the id has to be stable and unique on the page; the panel is a singleton
+ *  and a step id is unique within its template, which makes both. */
+const STAFFING_PROFILE_ID = "new-task-staffing-profile";
+const staffingStepId = (step: TaskTemplateStep): string => `new-task-staffing-step-${step.id}`;
+
 /** One step's staffing for this dispatch. `assigneeAgentId` is empty when the
  *  step is human, or when nothing has ever bound it. */
 type StaffingStepChoice = { assigneeAgentId: string; include: boolean };
 
-type StaffingSelection = {
+export type StaffingSelection = {
   contextKey: string;
   /** `""` is the explicit canonical option, which sends no `staffingProfileId`. */
   profileId: string;
@@ -106,6 +113,29 @@ const staffedSteps = (
     };
   }
   return steps;
+};
+
+/**
+ * The selection a render acts on: the held one while it still answers to the
+ * live context, a fresh seeding otherwise — except while a write is in flight,
+ * which owns the draft outright.
+ *
+ * Both exceptions are about a reset effect running after paint. The context key
+ * moves during render (a new template, or a profile edited elsewhere), so the
+ * frame that first sees it must already use the new seeding or an immediate
+ * Create would submit the old one. And a poll landing during the instantiate
+ * request must not reseed at all: the request carries the operator's choices,
+ * and a refusal has to come back to the panel that made them.
+ */
+export const activeStaffingSelection = (
+  held: StaffingSelection,
+  contextKey: string,
+  template: TaskTemplate | null,
+  profiles: StaffingProfile[],
+  pending: boolean,
+): StaffingSelection => {
+  const key = pending ? held.contextKey : contextKey;
+  return held.contextKey === key ? held : staffingSelectionFor(key, template, profiles);
 };
 
 const defaultProfileOf = (profiles: StaffingProfile[]): StaffingProfile | null =>
@@ -203,6 +233,19 @@ export const NewTask = ({ projectId, project, agents, repos, onClose, onCreated 
     30_000,
   );
   const profiles = staffingProfiles.data ?? NO_PROFILES;
+  /* Whether the panel yet knows how the control plane would staff this template.
+   * It matters because an absent `staffingProfileId` does not mean "no profile":
+   * the route staffs the chain from the template's default profile. Until the
+   * first read lands, the seeded steps and the preview below are the canonical
+   * bindings — a picture of a chain nobody would get — and `stepOverrides`
+   * cannot pin what it has not seen. A read that failed with nothing — or that
+   * answered 404 for a template whose profiles are gone — is the same ignorance,
+   * so both hold Create. A later poll failing over a list already read is not:
+   * the notice says so, and the plan on screen is still the one that landed. */
+  const staffingRead = mode === "template" && template !== null;
+  const staffingUnread = staffingRead && staffingProfiles.data === null && staffingProfiles.error === null;
+  const staffingError = staffingRead ? staffingProfiles.error : null;
+  const staffingBlocked = staffingUnread || (staffingRead && fatal(staffingProfiles.error, staffingProfiles.data));
   const specDefault = project?.specGateDefault ?? false;
   const mergeDefault = project?.mergeGateDefault ?? false;
   /** Defaults are part of the dispatch context: if the operator changes the
@@ -235,15 +278,13 @@ export const NewTask = ({ projectId, project, agents, repos, onClose, onCreated 
     staffingSelectionFor(staffingContextKey, template, profiles)
   ));
   useEffect(() => {
+    // A write in flight owns the draft; see `activeStaffingSelection`.
+    if (pending) return;
     setStaffingSelection((held) => held.contextKey === staffingContextKey
       ? held
       : staffingSelectionFor(staffingContextKey, template, profiles));
-  }, [staffingContextKey, profiles, template]);
-  // Same reason as the gate selection above: the reset effect runs after paint,
-  // so the render that first sees a new context must already use it.
-  const activeStaffing = staffingSelection.contextKey === staffingContextKey
-    ? staffingSelection
-    : staffingSelectionFor(staffingContextKey, template, profiles);
+  }, [staffingContextKey, pending, profiles, template]);
+  const activeStaffing = activeStaffingSelection(staffingSelection, staffingContextKey, template, profiles, pending);
   const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
 
   useEffect(() => {
@@ -251,9 +292,8 @@ export const NewTask = ({ projectId, project, agents, repos, onClose, onCreated 
     setVariables({});
   }, [projectId]);
 
-  const staffingBaseline = (held: StaffingSelection): StaffingSelection => (
-    held.contextKey === staffingContextKey ? held : staffingSelectionFor(staffingContextKey, template, profiles)
-  );
+  const staffingBaseline = (held: StaffingSelection): StaffingSelection =>
+    activeStaffingSelection(held, staffingContextKey, template, profiles, pending);
 
   const chooseStaffingProfile = (profileId: string): void => {
     setStaffingSelection((held) => {
@@ -320,13 +360,18 @@ export const NewTask = ({ projectId, project, agents, repos, onClose, onCreated 
 
   return (
     <FullPanel title={t("newTask.title")} onClose={onClose} actions={
-      <Button type="button" variant="legacyPrimary" size="legacy" disabled={pending || form.name.trim() === "" || (mode === "template" && template === null)}
+      <Button type="button" variant="legacyPrimary" size="legacy"
+        disabled={pending || form.name.trim() === "" || (mode === "template" && (template === null || staffingBlocked))}
         onClick={() => void (mode === "blank" ? createBlank() : createFromTemplate())}>
         {t("newTask.create")}
       </Button>
     }>
       <Tabs value={mode} onChange={setMode} options={[{ value: "blank", label: t("newTask.tab.blank") }, { value: "template", label: t("newTask.tab.template") }]} />
       {error === null ? null : <ErrorNotice message={error} />}
+      {staffingError === null
+        ? null
+        : <ErrorNotice message={t("newTask.staffing.error", { reason: `${staffingError.status} ${staffingError.message}` })}
+            onRetry={staffingProfiles.reload} />}
 
       {mode === "blank" ? (
         <Card title={t("newTask.card.task")}>
@@ -443,9 +488,10 @@ export const NewTask = ({ projectId, project, agents, repos, onClose, onCreated 
                 {template ? (
                   <div className="grid gap-[10px]">
                     <div className={CARD_TITLE}>{t("newTask.staffing.title")}</div>
+                    {staffingUnread ? <div className={HINT}>{t("newTask.staffing.loading")}</div> : null}
                     {profiles.length === 0 ? null : (
-                      <Field label={t("newTask.staffing.profile.label")} hint={t("newTask.staffing.profile.hint")}>
-                        <Select value={activeStaffing.profileId} onChange={(event) => chooseStaffingProfile(event.target.value)}>
+                      <Field label={t("newTask.staffing.profile.label")} hint={t("newTask.staffing.profile.hint")} htmlFor={STAFFING_PROFILE_ID}>
+                        <Select id={STAFFING_PROFILE_ID} value={activeStaffing.profileId} onChange={(event) => chooseStaffingProfile(event.target.value)}>
                           {profiles.map((profile) => (
                             <option key={profile.id} value={profile.id}>
                               {profile.isDefault ? t("newTask.staffing.profile.default", { name: profile.name }) : profile.name}
@@ -462,15 +508,18 @@ export const NewTask = ({ projectId, project, agents, repos, onClose, onCreated 
                       const chosen = activeStaffing.steps[String(step.stepIndex)];
                       const chosenId = chosen?.assigneeAgentId ?? "";
                       const listed = activeAgents.some((agent) => agent.id === chosenId);
+                      const controlId = staffingStepId(step);
                       return (
                         <div className="grid gap-[6px]" key={step.id}>
                           {/* A HUMAN step has no agent to pick, so it must not be
-                              labelled as if it had one. */}
-                          <Field label={t(step.assigneeType === "HUMAN" ? "newTask.staffing.step.human" : "newTask.staffing.step.agent", { name: step.name })}>
+                              labelled as if it had one — and with no control to
+                              name, its label carries no `htmlFor`. */}
+                          <Field label={t(step.assigneeType === "HUMAN" ? "newTask.staffing.step.human" : "newTask.staffing.step.agent", { name: step.name })}
+                            {...(step.assigneeType === "HUMAN" ? {} : { htmlFor: controlId })}>
                             {step.assigneeType === "HUMAN"
                               ? <div className={HINT}>{t("newTask.preview.human")}</div>
                               : (
-                                <Select value={chosenId}
+                                <Select id={controlId} value={chosenId}
                                   onChange={(event) => changeStaffingStep(step.stepIndex, { assigneeAgentId: event.target.value })}>
                                   {chosenId === "" ? <option value="">{t("newTask.staffing.unstaffed")}</option> : null}
                                   {/* The seeded agent may be archived or otherwise

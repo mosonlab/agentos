@@ -13,7 +13,7 @@ import { ProjectProvider } from "../lib/project";
 import { matchRoute } from "../lib/router";
 import { storage } from "../lib/storage";
 import type { Agent, Project, StaffingProfile, TaskTemplate, TaskTemplateStep } from "../lib/types";
-import { StaffingProfileEditor } from "../pages/Workflows";
+import { availableProfileName, StaffingProfileEditor } from "../pages/Workflows";
 import { mountPage, type PageHarness, type PageRoutes } from "./dom-harness";
 
 const t = (locale: "en" | "zh", key: string, vars?: Record<string, string | number>): string =>
@@ -366,6 +366,181 @@ test("a refused save keeps the draft and shows the refusal", async () => {
     assert.equal(saves(), 0, "a refused save must not report success");
     // The draft survives the refusal, so the operator can correct it in place.
     assert.equal((rowFor(page, "blind-findings").querySelector("select") as HTMLSelectElement).value, SENIOR.id);
+  } finally {
+    await page.dispose();
+  }
+});
+
+/* ------------------------------------------------------- duplicate naming */
+
+test("duplicating the same profile twice walks past the copy it already made", async () => {
+  const held: StaffingProfile[] = [FAST_LANE];
+  const names: string[] = [];
+  const page = await mountRoute("/workflows/template-1", {
+    [`/projects/${PROJECT.id}/task-templates`]: [TEMPLATE],
+    [`/projects/${PROJECT.id}/agents`]: AGENTS,
+    [PROFILES_PATH]: () => held,
+    [`POST ${PROFILES_PATH}`]: ({ init }) => {
+      const body = JSON.parse(String(init.body)) as { name: string };
+      names.push(body.name);
+      // The control plane's own rule: names are unique within a template.
+      if (held.some((candidate) => candidate.name === body.name)) {
+        return new Response(
+          JSON.stringify({ error: "A profile of this template is already named that", code: "staffing_profile_name_taken" }),
+          { status: 409, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      const created = profile({ id: `p-copy-${held.length}`, name: body.name, entries: FAST_LANE.entries });
+      held.push(created);
+      return { profile: created, warnings: [] };
+    },
+  });
+  try {
+    await page.press(t("en", "workflows.profile.duplicate"));
+    await page.press(t("en", "workflows.profile.duplicate"));
+    assert.deepEqual(names, [
+      t("en", "workflows.profile.copyName", { name: "Fast lane" }),
+      `${t("en", "workflows.profile.copyName", { name: "Fast lane" })} 2`,
+    ]);
+    // A repeatable command does not teach the operator to expect a 409.
+    assert.doesNotMatch(page.container.textContent ?? "", /already named that/u);
+  } finally {
+    await page.dispose();
+  }
+});
+
+test("a free copy name is taken as it is, and a taken one is numbered past the copies", () => {
+  assert.equal(availableProfileName("Fast lane copy", new Set()), "Fast lane copy");
+  assert.equal(availableProfileName("Fast lane copy", new Set(["Fast lane copy"])), "Fast lane copy 2");
+  assert.equal(
+    availableProfileName("Fast lane copy", new Set(["Fast lane copy", "Fast lane copy 2"])),
+    "Fast lane copy 3",
+  );
+});
+
+/* ------------------------------------------------- reading, failing, empty */
+
+test("a failed profile read shows the failure with its retry instead of an empty template", async () => {
+  const page = await mountRoute("/workflows/template-1", {
+    [`/projects/${PROJECT.id}/task-templates`]: [TEMPLATE],
+    [`/projects/${PROJECT.id}/agents`]: AGENTS,
+    [PROFILES_PATH]: () => new Response(
+      JSON.stringify({ error: "Task template not found", code: "not_found" }),
+      { status: 404, headers: { "Content-Type": "application/json" } },
+    ),
+  });
+  try {
+    const text = page.container.textContent ?? "";
+    assert.ok(text.includes(t("en", "workflows.error.profiles", { reason: "404 Task template not found" })));
+    // "No staffing profile for this template" is a fact about the template. A
+    // read that failed knows no such fact, and saying both is telling the
+    // operator that instantiation falls back to the canonical bindings.
+    assert.ok(!text.includes(t("en", "workflows.profiles.empty")));
+    assert.ok([...page.container.querySelectorAll("button")].some((node) => node.textContent?.trim() === t("en", "common.retry")));
+  } finally {
+    await page.dispose();
+  }
+});
+
+test("a template whose profiles have not landed says it is loading, not that it has none", async () => {
+  const page = await mountRoute("/workflows/template-1", {
+    [`/projects/${PROJECT.id}/task-templates`]: [TEMPLATE],
+    [`/projects/${PROJECT.id}/agents`]: AGENTS,
+    [PROFILES_PATH]: () => new Promise<Response>(() => undefined),
+  });
+  try {
+    const text = page.container.textContent ?? "";
+    assert.ok(text.includes(t("en", "common.loading")));
+    assert.ok(!text.includes(t("en", "workflows.profiles.empty")));
+  } finally {
+    await page.dispose();
+  }
+});
+
+test("a failed template read is a notice on the profile list, not a page stuck on Loading", async () => {
+  const page = await mountRoute("/workflows/template-1", {
+    [`/projects/${PROJECT.id}/task-templates`]: () => new Response(
+      JSON.stringify({ error: "boom" }), { status: 500, headers: { "Content-Type": "application/json" } },
+    ),
+    [`/projects/${PROJECT.id}/agents`]: AGENTS,
+    [PROFILES_PATH]: [FAST_LANE],
+  });
+  try {
+    assert.ok((page.container.textContent ?? "").includes(t("en", "workflows.error.templates", { reason: "500 boom" })));
+  } finally {
+    await page.dispose();
+  }
+});
+
+/* --------------------------------------------------- the editor's own reads */
+
+test("a profile that is no longer in the list says so instead of loading forever", async () => {
+  const page = await mountRoute("/workflows/template-1/profiles/p-fast", {
+    ...templateRoutes([CAREFUL]),
+  });
+  try {
+    const text = page.container.textContent ?? "";
+    assert.ok(text.includes(t("en", "workflows.profile.missing")));
+    assert.ok(!text.includes(t("en", "common.loading")));
+  } finally {
+    await page.dispose();
+  }
+});
+
+test("a failed agent read is named, so an empty picker is never mistaken for an empty project", async () => {
+  const page = await mountRoute("/workflows/template-1/profiles/p-fast", {
+    [`/projects/${PROJECT.id}/task-templates`]: [TEMPLATE],
+    [PROFILES_PATH]: [FAST_LANE],
+    [`/projects/${PROJECT.id}/agents`]: () => new Response(
+      JSON.stringify({ error: "boom" }), { status: 500, headers: { "Content-Type": "application/json" } },
+    ),
+  });
+  try {
+    const text = page.container.textContent ?? "";
+    assert.ok(text.includes(t("en", "workflows.error.agents", { reason: "500 boom" })));
+    // The editor still renders, with the canonical bindings it can name.
+    assert.ok(page.container.querySelector('[data-output-kind="implementation"]'));
+  } finally {
+    await page.dispose();
+  }
+});
+
+/* ------------------------------------------------------------ accessibility */
+
+test("every profile control is named by its own label", async () => {
+  const page = await mountRoute("/workflows/template-1/profiles/p-fast", templateRoutes([FAST_LANE]));
+  try {
+    const named = (scope: Element, label: string): Element => {
+      const node = [...scope.querySelectorAll("label")].find((candidate) => candidate.textContent?.trim() === label);
+      assert.ok(node, `no label reads ${label}`);
+      const target = node.getAttribute("for");
+      assert.ok(target, `the label ${label} names no control`);
+      const control = page.dom.window.document.getElementById(target);
+      assert.ok(control, `the label ${label} points at no element`);
+      return control;
+    };
+    const name = named(page.container, t("en", "workflows.profile.name"));
+    assert.equal((name as HTMLInputElement).value, FAST_LANE.name);
+    const row = rowFor(page, "implementation");
+    assert.equal(named(row, t("en", "workflows.editor.agent")), row.querySelector("select"));
+    // The human step names no picker, because it has none.
+    assert.equal(rowFor(page, "human-review").querySelector("label"), null);
+  } finally {
+    await page.dispose();
+  }
+});
+
+test("the create dialog's name field is named by its label", async () => {
+  const page = await mountRoute("/workflows/template-1", templateRoutes([FAST_LANE]));
+  try {
+    await page.press(t("en", "workflows.profiles.create"));
+    const document = page.dom.window.document;
+    const label = [...document.querySelectorAll("label")]
+      .find((node) => node.textContent?.trim() === t("en", "workflows.profile.name"));
+    assert.ok(label, document.body.innerHTML);
+    const target = label.getAttribute("for");
+    assert.ok(target);
+    assert.ok(document.getElementById(target), "the dialog's label should name its input");
   } finally {
     await page.dispose();
   }

@@ -4,7 +4,7 @@ import { api } from "../lib/api";
 import { formatDate } from "../lib/format";
 import { useAction, usePoll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
-import { findModel, splitModel } from "../lib/models";
+import { agentOptionLabel } from "../lib/models";
 import { fatal } from "../lib/poll-state";
 import { useProjectScope } from "../lib/project";
 import { Link, navigate } from "../lib/router";
@@ -44,15 +44,21 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from ".
 export const staffableAgents = (agents: Agent[]): Agent[] =>
   agents.filter((agent) => agent.archivedAt === null && agent.assignable !== false);
 
-/** `ModelLabel`'s two parts as one string, because an `<option>` renders text
- *  and not the component's spans. */
-const modelSummary = (model: string): string => {
-  const parsed = splitModel(model);
-  const name = findModel(parsed.model)?.label ?? parsed.model;
-  return parsed.effort === null ? name : `${name} ${parsed.effort}`;
+/** The name a duplicate takes. A profile name is unique within its template, so
+ *  one fixed `"<name> copy"` is a 409 the second time the command is used; this
+ *  walks past the copies already made, the way the Agents page does. */
+export const availableProfileName = (base: string, taken: ReadonlySet<string>): string => {
+  if (!taken.has(base)) return base;
+  let candidate = `${base} 2`;
+  for (let ordinal = 3; taken.has(candidate); ordinal += 1) candidate = `${base} ${ordinal}`;
+  return candidate;
 };
 
-export const agentOption = (agent: Agent): string => `${agent.title} · ${modelSummary(agent.model)}`;
+/** The `id` a step's Agent picker carries, so its `<label>` can name it: an
+ *  output kind is unique within a template, and the editor renders one. */
+const stepControlId = (outputKind: string): string => `staffing-step-${outputKind}`;
+const PROFILE_NAME_ID = "staffing-profile-name";
+const NEW_PROFILE_NAME_ID = "new-staffing-profile-name";
 
 type DraftEntry = { assigneeAgentId: string; include: boolean };
 type Draft = { name: string; entries: Record<string, DraftEntry> };
@@ -164,8 +170,8 @@ const NewProfile = ({ onClose, onCreate, pending }: {
         {t("workflows.profiles.create")}
       </Button>
     }>
-      <Field label={t("workflows.profile.name")}>
-        <Input type="text" value={name} autoFocus onChange={(event) => setName(event.target.value)}
+      <Field label={t("workflows.profile.name")} htmlFor={NEW_PROFILE_NAME_ID}>
+        <Input id={NEW_PROFILE_NAME_ID} type="text" value={name} autoFocus onChange={(event) => setName(event.target.value)}
           placeholder={t("workflows.profile.name.placeholder")} />
       </Field>
     </Modal>
@@ -230,6 +236,7 @@ export const WorkflowDetailPage = ({ templateId }: { templateId: string }): Reac
 
   const template = (templates.data ?? []).find((candidate) => candidate.id === templateId) ?? null;
   const held = profiles.data ?? [];
+  const profilesFailed = fatal(profiles.error, profiles.data);
 
   const create = (name: string): void => {
     void run(async () => {
@@ -242,7 +249,10 @@ export const WorkflowDetailPage = ({ templateId }: { templateId: string }): Reac
   const duplicate = (profile: StaffingProfile): void => {
     void run(async () => {
       await api.post<StaffingProfileResponse>(profilesPath!, {
-        name: t("workflows.profile.copyName", { name: profile.name }),
+        name: availableProfileName(
+          t("workflows.profile.copyName", { name: profile.name }),
+          new Set(held.map((candidate) => candidate.name)),
+        ),
         entries: profile.entries,
       });
       profiles.reload();
@@ -273,16 +283,29 @@ export const WorkflowDetailPage = ({ templateId }: { templateId: string }): Reac
       </div>
 
       <div className={STACK}>
-        {fatal(profiles.error, profiles.data)
-          ? <ErrorNotice message={`${profiles.error!.status} ${profiles.error!.message}`} onRetry={profiles.reload} />
+        {profilesFailed
+          ? <ErrorNotice message={t("workflows.error.profiles", { reason: `${profiles.error!.status} ${profiles.error!.message}` })}
+              onRetry={profiles.reload} />
+          : null}
+        {fatal(templates.error, templates.data)
+          ? <ErrorNotice message={t("workflows.error.templates", { reason: `${templates.error!.status} ${templates.error!.message}` })}
+              onRetry={templates.reload} />
           : null}
         {actionError === null ? null : <ErrorNotice message={actionError} />}
 
-        {held.length === 0 ? (
+        {/* Three states, not two. A failed read knows of no profile and an
+            unfinished one knows of none yet; neither is the template that has
+            none, and only the last of them may claim instantiation falls back to
+            the canonical bindings. */}
+        {profilesFailed ? null : held.length === 0 ? (
           <Card>
             <EmptyState>
-              <div>{t("workflows.profiles.empty")}</div>
-              <div className={cn(HINT, "mt-[6px]")}>{t("workflows.profiles.empty.hint")}</div>
+              {profiles.data === null ? <div>{t("common.loading")}</div> : (
+                <>
+                  <div>{t("workflows.profiles.empty")}</div>
+                  <div className={cn(HINT, "mt-[6px]")}>{t("workflows.profiles.empty.hint")}</div>
+                </>
+              )}
             </EmptyState>
           </Card>
         ) : held.map((profile) => (
@@ -319,10 +342,11 @@ const StepRow = ({ step, agents, entry, onChange }: {
       </div>
       {step.assigneeType === "AGENT" ? (
         <div className={FIELD_ROW}>
-          <Field label={t("workflows.editor.agent")}>
-            <Select value={entry.assigneeAgentId} onChange={(event) => onChange({ ...entry, assigneeAgentId: event.target.value })}>
+          <Field label={t("workflows.editor.agent")} htmlFor={stepControlId(step.outputKind)}>
+            <Select id={stepControlId(step.outputKind)} value={entry.assigneeAgentId}
+              onChange={(event) => onChange({ ...entry, assigneeAgentId: event.target.value })}>
               <option value="">{canonical}</option>
-              {agents.map((agent) => <option key={agent.id} value={agent.id}>{agentOption(agent)}</option>)}
+              {agents.map((agent) => <option key={agent.id} value={agent.id}>{agentOptionLabel(agent)}</option>)}
             </Select>
           </Field>
           {step.optional ? (
@@ -388,8 +412,9 @@ export const StaffingProfileEditor = ({ template, profile, agents, onSaved }: {
         </Button>
       }>
         <div className={cn(STACK, "mb-[16px]")}>
-          <Field label={t("workflows.profile.name")}>
-            <Input type="text" value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} />
+          <Field label={t("workflows.profile.name")} htmlFor={PROFILE_NAME_ID}>
+            <Input id={PROFILE_NAME_ID} type="text" value={draft.name}
+              onChange={(event) => setDraft({ ...draft, name: event.target.value })} />
           </Field>
         </div>
         {template.steps.map((step) => (
@@ -416,7 +441,29 @@ export const StaffingProfilePage = ({ templateId, profileId }: { templateId: str
   const profile = (profiles.data ?? []).find((candidate) => candidate.id === profileId) ?? null;
 
   if (fatal(profiles.error, profiles.data)) {
-    return <Page><ErrorNotice message={`${profiles.error!.status} ${profiles.error!.message}`} onRetry={profiles.reload} /></Page>;
+    return (
+      <Page>
+        <ErrorNotice message={t("workflows.error.profiles", { reason: `${profiles.error!.status} ${profiles.error!.message}` })}
+          onRetry={profiles.reload} />
+      </Page>
+    );
+  }
+  if (fatal(templates.error, templates.data)) {
+    return (
+      <Page>
+        <ErrorNotice message={t("workflows.error.templates", { reason: `${templates.error!.status} ${templates.error!.message}` })}
+          onRetry={templates.reload} />
+      </Page>
+    );
+  }
+  /* A read that landed and does not carry this row is an answer, not a wait: the
+     profile was deleted from another window, or the link is stale. Holding
+     "Loading" forever would tell the operator to keep waiting for it. */
+  if (profiles.data !== null && profile === null) {
+    return <Page><ErrorNotice message={t("workflows.profile.missing")} onRetry={profiles.reload} /></Page>;
+  }
+  if (templates.data !== null && template === null) {
+    return <Page><ErrorNotice message={t("workflows.template.missing")} onRetry={templates.reload} /></Page>;
   }
   if (template === null || profile === null) return <Page><EmptyState>{t("common.loading")}</EmptyState></Page>;
 
@@ -428,6 +475,12 @@ export const StaffingProfilePage = ({ templateId, profileId }: { templateId: str
         {profile.isDefault ? <Pill tone="green">{t("workflows.profile.default")}</Pill> : null}
         <span className={HINT}>{template.name}</span>
       </div>
+      {/* An unread roster renders an empty picker, which reads exactly like a
+          project with no agents; the failure says so instead. */}
+      {agents.error === null ? null : (
+        <ErrorNotice message={t("workflows.error.agents", { reason: `${agents.error.status} ${agents.error.message}` })}
+          onRetry={agents.reload} />
+      )}
       <StaffingProfileEditor template={template} profile={profile} agents={agents.data ?? []} onSaved={profiles.reload} />
     </Page>
   );

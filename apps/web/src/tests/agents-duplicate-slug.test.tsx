@@ -279,3 +279,95 @@ test("the detail page carries the slug with a copy button, and the list does not
     await page.dispose();
   }
 });
+
+/* ------------------------------------------------- who the exemption covers */
+
+const selectEffort = async (page: PageHarness, effort: string): Promise<void> => {
+  // The picker's order is model, effort, runner.
+  const select = [...page.container.querySelectorAll("select")][1];
+  assert.ok(select, page.container.innerHTML);
+  select.value = effort;
+  await act(async () => select.dispatchEvent(new page.dom.window.Event("change", { bubbles: true })));
+  await page.settle();
+};
+
+test("changing a canonical Agent's effort offers the matching slug and leaves the name editable", async () => {
+  const executioner = agent({
+    id: "a5", name: "plan-executor-astra-medium", title: "Executioner",
+    model: "gpt-6-astra:medium", canonicalRole: "plan-executor-astra-medium",
+  });
+  const page = await mountDetail(executioner, [executioner, ...ROSTER]);
+  try {
+    await page.press("Edit");
+    // Only `default` and `merge-integrator` name no model; this role does.
+    assert.equal(nameInput(page).disabled, false);
+    await selectEffort(page, "high");
+    assert.equal(
+      page.container.querySelector("[data-agent-slug-suggestion]")?.getAttribute("data-agent-slug-suggestion"),
+      "plan-executor-astra-high",
+    );
+    await page.press("Rename to plan-executor-astra-high");
+    assert.equal(nameInput(page).value, "plan-executor-astra-high");
+    // The platform pins the native children by the step, so the note survives
+    // the rename rather than being addressed by the old name.
+    assert.match(page.container.textContent ?? "", /Native Luna max children remain pinned/u);
+  } finally {
+    await page.dispose();
+  }
+});
+
+test("the exemption follows the canonical role, not the name an operator typed", async () => {
+  // Renamed by its operator, but still the starter Agent whose name names no model.
+  const renamed = agent({
+    id: "a6", name: "house-default", title: "Default", model: "claude-opus-5:medium",
+    canonicalRole: "default", runnerPreference: "CLAUDE",
+  });
+  const page = await mountDetail(renamed, [renamed, ...ROSTER]);
+  try {
+    await page.press("Edit");
+    await selectEffort(page, "high");
+    assert.equal(page.container.querySelector("[data-agent-slug-suggestion]"), null);
+  } finally {
+    await page.dispose();
+  }
+
+  // And an Agent of no canonical role is judged by the name it carries.
+  const ownName = agent({ id: "a7", name: "nightly-triage", title: "Nightly", model: "claude-opus-5:medium", runnerPreference: "CLAUDE" });
+  const own = await mountDetail(ownName, [ownName, ...ROSTER]);
+  try {
+    await own.press("Edit");
+    await selectEffort(own, "high");
+    assert.equal(
+      own.container.querySelector("[data-agent-slug-suggestion]")?.getAttribute("data-agent-slug-suggestion"),
+      "nightly-triage-opus-high",
+    );
+  } finally {
+    await own.dispose();
+  }
+});
+
+test("a list row carries the runtime alone, and the title is read once in its header", async () => {
+  const preload = installDom("http://127.0.0.1:5173/#/agents");
+  installMenuGlobals(preload.dom);
+  const { AgentsPage } = await agentsPage();
+  const page = await mountPage(<ProjectProvider><AgentsPage /></ProjectProvider>, {
+    "/projects": [{ id: "p1", name: "Anneal", slug: "anneal" }],
+    "/projects/p1/agents": ROSTER,
+    "*": [],
+  }, "http://127.0.0.1:5173/#/agents");
+  try {
+    const rows = [...page.container.querySelectorAll("tr")];
+    const header = rows.find((row) => row.getAttribute("data-agent-group") === "Senior Dev");
+    assert.ok(header);
+    assert.match(header.textContent ?? "", /Senior Dev/u);
+    // The two variants under it differ by runtime, and say only that.
+    const variants = rows.slice(rows.indexOf(header) + 1, rows.indexOf(header) + 3);
+    assert.deepEqual(
+      variants.map((row) => row.querySelector("td")?.textContent?.trim()),
+      ["GPT-6 Astra (codex) · medium", "GPT-5.6 Luna (codex) · max"],
+    );
+  } finally {
+    await page.dispose();
+    preload.dom.window.close();
+  }
+});

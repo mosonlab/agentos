@@ -703,9 +703,19 @@ export const FullPanel = ({ title, onClose, actions, children }: {
   );
 };
 
-export const Field = ({ label, hint, children }: { label: string; hint?: string; children: ReactNode }): ReactNode => (
+/** A labelled control. `htmlFor` is what makes the label the control's
+ *  accessible name: a `<label>` that names no control is a caption, and a
+ *  screen reader announcing "combo box" with no name cannot be operated. Pass it
+ *  together with the same `id` on the child, and the pair is queryable in tests
+ *  the way assistive technology resolves it. */
+export const Field = ({ label, hint, htmlFor, children }: {
+  label: string;
+  hint?: string;
+  htmlFor?: string;
+  children: ReactNode;
+}): ReactNode => (
   <div className={FIELD}>
-    <label className={FIELD_LABEL}>{label}</label>
+    <label className={FIELD_LABEL} {...(htmlFor === undefined ? {} : { htmlFor })}>{label}</label>
     {children}
     {hint === undefined ? null : <div className={HINT}>{hint}</div>}
   </div>

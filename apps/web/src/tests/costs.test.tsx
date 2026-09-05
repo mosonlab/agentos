@@ -9,10 +9,19 @@ import {
   ChainsTable, PHONE_CHART, WIDE_CHART, sortCostChains, chartSegments, chartSeries, percent,
   seriesColor, sharePct, wasteShare,
 } from "../pages/Costs";
-import type { CostsReport } from "../lib/types";
+import type { Agent, CostsReport } from "../lib/types";
 import type { CostsPageReport } from "../pages/Costs";
 
 const bucket = (date: string, byAgent: Record<string, string>): CostsReport["daily"][number] => ({ date, byAgent });
+
+/** The roster's answer for the agent the report keys as `Senior Developer`:
+ *  a title, and the model it is configured to run today. */
+const SENIOR: Agent = {
+  id: "a1", projectId: "p1", environmentId: "e1", name: "Senior Developer", canonicalRole: null,
+  customizedFields: [], title: "Senior Dev", model: "gpt-6-astra:medium", codexServiceTier: "DEFAULT",
+  runnerPreference: "CODEX", inboxAccess: false, disabledTools: [], foundationalPrompt: "f", rolePrompt: "r",
+  createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z", archivedAt: null,
+};
 
 const colorsFor = (order: readonly string[]) => {
   const assigned = new Map(order.map((agent, rank) => [agent, seriesColor(rank)]));
@@ -153,6 +162,18 @@ test("the legend names every series, so identity is never colour alone", () => {
   const markup = renderToStaticMarkup(<ChartLegend order={order} colors={colorsFor(order)} />);
   for (const agent of order) assert.ok(markup.includes(agent), agent);
   assert.equal(markup.match(/var\(--series-\d\)/g)?.length, 3);
+});
+
+test("a legend series reads as the same agent the table below it names", () => {
+  const order = ["Senior Developer", "Planner"];
+  const markup = renderToStaticMarkup(
+    <ChartLegend order={order} colors={colorsFor(order)} agents={new Map([[SENIOR.name, SENIOR]])} />,
+  );
+  // The roster knows this one: its title, and what it runs today.
+  assert.match(markup, />Senior Dev</u);
+  assert.match(markup, /data-agent-chip-model="true"[^>]*>GPT-6 Astra \(codex\) · medium</u);
+  // It knows nothing about the other, which keeps the name the report recorded.
+  assert.match(markup, />Planner</u);
 });
 
 /* ---------------------------------------------------------- all agents */
@@ -487,12 +508,7 @@ test("the agent column names the agent's current configuration, and the model br
   /* The report keys an agent by the `Agent.name` its runs carried. The roster
    * says what that agent runs today, which is a different fact from the model
    * any one of those runs actually executed with. */
-  const roster = [{
-    id: "a1", projectId: "p1", environmentId: "e1", name: "Senior Developer", canonicalRole: null,
-    customizedFields: [], title: "Senior Dev", model: "gpt-6-astra:medium", codexServiceTier: "DEFAULT",
-    runnerPreference: "CODEX", inboxAccess: false, disabledTools: [], foundationalPrompt: "f", rolePrompt: "r",
-    createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z", archivedAt: null,
-  }];
+  const roster = [SENIOR];
   const page = await mountPage(<ProjectProvider><CostsPage /></ProjectProvider>, { "*": ({ input }) => {
     const url = String(input).replace(/^.*\/api/, "");
     if (url === "/projects") return [{ id: "p1", name: "Anneal Example", slug: "agentos" }];
@@ -513,6 +529,23 @@ test("the agent column names the agent's current configuration, and the model br
     assert.match(text, /What each run actually executed with/u);
     // An agent the roster no longer holds still names itself.
     assert.match(text, /Planner/u);
+
+    // Row by row, not page-wide: the top-run row's Agent cell is the chip for
+    // the current configuration, and the cell beside it is the model that run
+    // executed with.
+    const topRun = [...page.container.querySelectorAll("tr")]
+      .find((row) => (row.textContent ?? "").includes("Costs dashboard page: Implementation"));
+    assert.ok(topRun, page.container.innerHTML);
+    const cells = [...topRun.querySelectorAll("td")];
+    assert.match(cells[1]?.textContent ?? "", /Senior Dev/u);
+    assert.equal(cells[1]?.querySelector("[data-agent-chip-model]")?.textContent, "GPT-6 Astra (codex) · medium");
+    assert.equal(cells[2]?.textContent, "openai-codex/gpt-5.6-sol");
+
+    // The legend carries the same chip, so one agent reads as one thing.
+    const legendModels = [...page.container.querySelectorAll("[data-agent-chip-model]")]
+      .map((node) => node.textContent);
+    assert.ok(legendModels.filter((label) => label === "GPT-6 Astra (codex) · medium").length >= 3,
+      "legend, top run and the by-agent table each carry the chip");
   } finally {
     await page.dispose();
   }

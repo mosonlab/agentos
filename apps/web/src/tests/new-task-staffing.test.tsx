@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { act } from "react";
 
-import { NewTask } from "../components/new-task-panel";
+import { activeStaffingSelection, NewTask } from "../components/new-task-panel";
 import { LocaleProvider } from "../lib/i18n";
 import { translate } from "../lib/i18n-core";
 import type { Agent, Repo, StaffingProfile, TaskTemplate, TaskTemplateStep } from "../lib/types";
@@ -103,8 +103,16 @@ const response = (body: unknown): Response => new Response(JSON.stringify(body),
 
 type Panel = Awaited<ReturnType<typeof mountPage>> & { posts: Array<Record<string, unknown>> };
 
-const mount = async (profiles: StaffingProfile[], locale: "en" | "zh" = "en"): Promise<Panel> => {
+/** How one test answers the profile reads: by path, and by which read it is. */
+type Staffing = (path: string, attempt: number) => Response | Promise<Response>;
+
+const mountPanel = async (
+  staffing: Staffing,
+  locale: "en" | "zh" = "en",
+  templates: TaskTemplate[] = [template],
+): Promise<Panel> => {
   const posts: Array<Record<string, unknown>> = [];
+  const reads = new Map<string, number>();
   const page = await mountPage(
     <LocaleProvider initialLocale={locale}>
       <NewTask
@@ -118,13 +126,46 @@ const mount = async (profiles: StaffingProfile[], locale: "en" | "zh" = "en"): P
     { "*": ({ input, init, method }) => {
       const path = String(input).replace(/^.*\/api/u, "");
       if (method === "POST") posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
-      if (path === "/projects/project-1/task-templates") return response([template]);
-      if (path.endsWith("/staffing-profiles")) return response(profiles);
+      if (path === "/projects/project-1/task-templates") return response(templates);
+      if (path.endsWith("/staffing-profiles")) {
+        const attempt = (reads.get(path) ?? 0) + 1;
+        reads.set(path, attempt);
+        return staffing(path, attempt);
+      }
       return response({});
     } },
   );
   await page.press(translate(locale, "newTask.tab.template"));
   return Object.assign(page, { posts });
+};
+
+const mount = async (profiles: StaffingProfile[], locale: "en" | "zh" = "en"): Promise<Panel> =>
+  await mountPanel(() => response(profiles), locale);
+
+/** A response this test hands over when it chooses to, not when the page asks. */
+const deferred = (): { promise: Promise<Response>; answer: (body: unknown) => void } => {
+  let settle: (value: Response) => void = () => undefined;
+  const promise = new Promise<Response>((resolve) => { settle = resolve; });
+  return { promise, answer: (body) => settle(response(body)) };
+};
+
+const createButton = (page: Panel): HTMLButtonElement => {
+  const button = [...page.container.querySelectorAll("button")]
+    .find((node) => node.textContent?.trim() === en("newTask.create"));
+  assert.ok(button, "the Create button should be present");
+  return button as HTMLButtonElement;
+};
+
+/** The control a visible label names, resolved the way assistive technology
+ *  resolves it: `label[for]` to the element that owns the id. */
+const labelledControl = (page: Panel, label: string): HTMLElement => {
+  const node = [...page.container.querySelectorAll("label")].find((candidate) => candidate.textContent?.trim() === label);
+  assert.ok(node, `no label reads ${label}`);
+  const target = node.getAttribute("for");
+  assert.ok(target, `the label ${label} names no control`);
+  const control = page.dom.window.document.getElementById(target);
+  assert.ok(control, `the label ${label} points at no element`);
+  return control;
 };
 
 const selects = (page: Panel): HTMLSelectElement[] =>
@@ -326,3 +367,103 @@ test("the staffing controls are translated in Chinese", async () => {
     await page.dispose();
   }
 });
+
+/* --------------------------------------------- the profile read is a gate */
+
+test("Create waits for the first profile read, and says what it is waiting for", async () => {
+  const gate = deferred();
+  const page = await mountPanel(() => gate.promise);
+  try {
+    await fillTitle(page, "Ship it");
+    // The steps on screen are the canonical bindings, and the control plane
+    // would staff this chain from the default profile instead. Dispatching here
+    // creates something other than what the preview shows.
+    assert.equal(createButton(page).disabled, true);
+    assert.ok((page.container.textContent ?? "").includes(en("newTask.staffing.loading")));
+
+    await act(async () => { gate.answer([fastLane, thorough]); });
+    await page.settle();
+    assert.equal(createButton(page).disabled, false);
+    assert.ok(!(page.container.textContent ?? "").includes(en("newTask.staffing.loading")));
+    assert.equal(profileSelect(page).value, fastLane.id);
+  } finally {
+    await page.dispose();
+  }
+});
+
+test("a failed profile read is on screen with a retry, and holds Create until it lands", async () => {
+  const page = await mountPanel((_path, attempt) => (attempt === 1
+    ? new Response(JSON.stringify({ error: "profiles unavailable" }), {
+      status: 503, headers: { "Content-Type": "application/json" },
+    })
+    : response([fastLane, thorough])));
+  try {
+    await fillTitle(page, "Ship it");
+    assert.equal(createButton(page).disabled, true);
+    assert.ok((page.container.textContent ?? "").includes(en("newTask.staffing.error", { reason: "503 profiles unavailable" })));
+
+    await page.press(en("common.retry"));
+    assert.equal(createButton(page).disabled, false);
+    assert.equal(profileSelect(page).value, fastLane.id);
+    assert.equal(page.posts.length, 0, "nothing may be dispatched while the plan is unknown");
+  } finally {
+    await page.dispose();
+  }
+});
+
+test("switching templates holds Create until the new template's profiles answer", async () => {
+  const second: TaskTemplate = { ...template, id: "template-2", name: "Second" };
+  const gate = deferred();
+  const page = await mountPanel(
+    (path) => (path.includes("template-2") ? gate.promise : response([fastLane, thorough])),
+    "en",
+    [template, second],
+  );
+  try {
+    await fillTitle(page, "Ship it");
+    assert.equal(createButton(page).disabled, false);
+
+    const templateSelect = selects(page)[0];
+    assert.ok(templateSelect);
+    await choose(page, templateSelect, second.id);
+    // The old template's profiles say nothing about this one's steps.
+    assert.equal(createButton(page).disabled, true);
+
+    await act(async () => { gate.answer([]); });
+    await page.settle();
+    assert.equal(createButton(page).disabled, false);
+  } finally {
+    await page.dispose();
+  }
+});
+
+test("a poll that moves the profiles under an open write does not reseed the draft", async () => {
+  const seeded = { contextKey: "before", profileId: fastLane.id, steps: { "1": { assigneeAgentId: reviewer.id, include: true } } };
+  // The operator's own choice, held against the context it was made in.
+  const moved = activeStaffingSelection(seeded, "after", template, [thorough], true);
+  assert.equal(moved, seeded, "a write in flight owns the draft it is submitting");
+  // With no write open the panel reseeds, which is what a profile edited
+  // elsewhere has to mean.
+  const reseeded = activeStaffingSelection(seeded, "after", template, [thorough], false);
+  assert.equal(reseeded.contextKey, "after");
+  assert.equal(reseeded.steps["1"]?.assigneeAgentId, implementer.id);
+});
+
+/* ------------------------------------------------------------ accessibility */
+
+test("every staffing control is named by its own label", async () => {
+  const page = await mount([fastLane, thorough]);
+  try {
+    assert.equal(labelledControl(page, en("newTask.staffing.profile.label")), profileSelect(page));
+    assert.equal(labelledControl(page, en("newTask.staffing.step.agent", { name: "Implementation" })), stepSelect(page, 0, true));
+    assert.equal(labelledControl(page, en("newTask.staffing.step.agent", { name: "Review" })), stepSelect(page, 1, true));
+    // A human step has no control, so its label claims none.
+    const human = [...page.container.querySelectorAll("label")]
+      .find((node) => node.textContent?.trim() === en("newTask.staffing.step.human", { name: "Sign off" }));
+    assert.ok(human);
+    assert.equal(human.getAttribute("for"), null);
+  } finally {
+    await page.dispose();
+  }
+});
+

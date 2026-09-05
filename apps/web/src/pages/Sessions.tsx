@@ -28,8 +28,9 @@ import {
   PAGE_ACTIONS, PAGE_HEAD, PAGE_HEAD_H1, PAGE_HEAD_SUBTITLE, PAGE_HEAD_TITLES, ROW, STACK,
   STAT_PILL, STAT_PILLS,
   AgentChip, Card, EmptyState, ErrorNotice, GapNotice, KeyValue, MarkdownClamp, Page, Pill, Segmented,
-  type PillTone,
+  type AgentChipAgent, type PillTone,
 } from "../components/ui";
+import { ModelLabel } from "../components/model-picker";
 import { Button } from "../components/ui/button";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "../components/ui/hover-card";
 import { Select } from "../components/ui/select";
@@ -105,6 +106,15 @@ export const WaitingNotice = ({ status, messageId }: { status: SessionExecutionS
   );
 };
 
+/** The chip's subject for a session row: who ran it, and the model that run
+ *  carried. `run` is absent on the session rows nested inside a Run, so the chip
+ *  degrades to the title rather than inventing a model. */
+export const sessionChipAgent = (session: Session): AgentChipAgent | null => {
+  if (!session.agent) return null;
+  const model = session.run?.model;
+  return model === undefined ? session.agent : { ...session.agent, model };
+};
+
 const resultWord = (session: Session): string =>
   formatT(isLiveStatus(session.executionStatus) ? "sessions.result.inProgress"
     : session.executionStatus === "SUCCEEDED" ? "sessions.result.success" : "sessions.result.failed");
@@ -147,7 +157,10 @@ const SessionHoverCard = ({ session, unseen }: { session: Session; unseen: boole
                 : session.id}
           </div>
           <div className="mt-[3px] flex text-[11.5px] text-muted-foreground">
-            <AgentChip agent={session.agent ?? null} name={session.agentId} />
+            {/* The chip carries the model this session actually executed, which
+                the row's own Run snapshot already holds. The roster's current
+                configuration is a different fact and belongs on the Agent. */}
+            <AgentChip agent={sessionChipAgent(session)} name={session.agentId} />
           </div>
         </div>
       </HoverCardTrigger>
@@ -705,7 +718,11 @@ export const SessionDetailPage = ({ sessionId }: { sessionId: string }): ReactNo
     <Page className="text-foreground">
       <div className={DETAIL_HEAD}>
         <Link to="/sessions" className={BACK_LINK}><IconArrowLeft /></Link>
+        {/* The heading already names the Agent, so the header's missing half is
+            the runtime: the model and effort this run executed with, in the same
+            grey model pill the Agent detail header carries. */}
         <h1 className={DETAIL_HEAD_H1}>{session.agent?.title ?? session.agentId}</h1>
+        {session.run?.model === undefined ? null : <Pill tone="grey"><ModelLabel model={session.run.model} /></Pill>}
         <SessionStatusPill status={session.executionStatus} mergeOutcome={session.mergeOutcome} />
         <Pill tone="grey">{session.runner}</Pill>
         <span className="flex-1" />

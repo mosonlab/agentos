@@ -268,16 +268,20 @@ export const DailySpendChart = ({ daily, order, colors, geometry = WIDE_CHART }:
   );
 };
 
-export const ChartLegend = ({ order, colors }: {
+/** The legend names each series with the same roster-backed chip the table
+ *  below uses, so one agent reads as one thing on both. `agents` is what the
+ *  roster answered; a series with no row there keeps its recorded slug. */
+export const ChartLegend = ({ order, colors, agents }: {
   order: readonly string[];
   colors: (agent: string) => string;
+  agents?: ReadonlyMap<string, Agent>;
 }): ReactNode => {
   return (
     <div className={`${ROW_WRAP} mt-[12px]`}>
       {order.map((agent) => (
         <span key={agent} className="inline-flex items-center gap-[6px] text-[11.5px] text-muted-foreground">
           <span className="size-[9px] rounded-[2px]" style={{ background: colors(agent) }} aria-hidden="true" />
-          {agent}
+          <AgentChip agent={agents?.get(agent) ?? null} name={agent} />
         </span>
       ))}
     </div>
@@ -610,7 +614,7 @@ export const CostsPage = (): ReactNode => {
               <div className={STACK}>
                 <Card title={t("costs.chart.title")}>
                   <DailySpendChart daily={daily} order={order} colors={colors} geometry={narrow ? PHONE_CHART : WIDE_CHART} />
-                  {order.length > 1 ? <ChartLegend order={order} colors={colors} /> : null}
+                  {order.length > 1 ? <ChartLegend order={order} colors={colors} agents={agentsByName} /> : null}
                 </Card>
 
                 <Card title={t("costs.chains.title")} flush>
@@ -648,7 +652,14 @@ export const CostsPage = (): ReactNode => {
                                     <span className={TABLE_SUB}>{run.runId}</span>
                                   </div>
                                 </TableCell>
-                                <TableCell>{run.agent}</TableCell>
+                                {/* Two different facts, side by side: the chip is
+                                    the Agent as it is configured now, and the
+                                    column beside it is the model this run
+                                    actually executed with. */}
+                                <TableCell>
+                                  <AgentChip agent={agentsByName.get(run.agent) ?? null} name={run.agent} />
+                                  <span className={TABLE_SUB}>{run.agent}</span>
+                                </TableCell>
                                 <TableCell>{run.model}</TableCell>
                                 <TableCell className={TABLE_TIGHT}>{formatDateTime(run.startedAt)}</TableCell>
                                 <TableCell className={TABLE_TIGHT}>

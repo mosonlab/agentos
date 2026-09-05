@@ -10,7 +10,7 @@ import type { Agent, CodexServiceTier, Environment, FilesystemGrant, MCPConnecti
 import { IconArrowLeft, IconPlus, IconRobot } from "../components/icons";
 import { ModelLabel, ModelPicker, modelForSave } from "../components/model-picker";
 import {
-  runnerFor, runnerForModel, slugForModel, SLUG_EXEMPT_AGENT_NAMES,
+  modelChipLabel, runnerFor, runnerForModel, slugForModel, SLUG_EXEMPT_AGENT_NAMES,
   supportsCodexServiceTier, validateModelPair,
 } from "../lib/models";
 import { isEnforced, TOOL_KEYS, TOOL_LABEL_KEYS, type ToolKey } from "../lib/tools";
@@ -258,8 +258,12 @@ export const AgentsPage = (): ReactNode => {
                   {group.agents.map((agent) => (
                     <TableRow key={agent.id} className="cursor-pointer" onClick={() => navigate(`/agents/${agent.id}`)}>
                       <TableCell className={TABLE_NAME}>
+                        {/* Model and effort only: the header above already said
+                            which job these rows are variants of, and repeating
+                            the title on every one of them is what made the two
+                            Senior Dev rows read as duplicates. */}
                         <span className={ROW_WRAP}>
-                          <AgentChip agent={agent} />
+                          <Pill tone="grey">{modelChipLabel(agent.model)}</Pill>
                           {agent.archivedAt ? <Pill tone="grey">{t("tasks.tab.archived")}</Pill> : null}
                           {isMechanicalAgent(agent) ? <Pill tone="grey">{t("agents.pill.mechanical")}</Pill> : null}
                         </span>
@@ -611,7 +615,12 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
    *  behind a model change would be a surprise. Null when there is nothing to
    *  offer — the name already is the slug, the model names no short name, or the
    *  role is one whose name never carries a model. */
-  const nameIsPinned = SLUG_EXEMPT_AGENT_NAMES.includes(agent.name) || agent.name === "plan-executor-astra-medium";
+  /* The exemption is a property of the role, not of the current name: `default`
+     renamed by an operator is still the starter Agent whose name names no model,
+     and an Agent that merely happens to be called `default` is not. Only these
+     two roles are exempt (R10); every other Agent, canonical or not, is offered
+     its regenerated slug and may take or refuse it. */
+  const nameIsPinned = SLUG_EXEMPT_AGENT_NAMES.includes(agent.canonicalRole ?? agent.name);
   const suggestedSlug = ((): string | null => {
     if (draft === null || nameIsPinned) return null;
     const slug = slugForModel(view.name, view.model);
@@ -709,7 +718,6 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
               <div className={STACK}>
                 <div className={FIELD_ROW}>
                   <Field label={t("agents.field.name.label")}><Input type="text" value={view.name}
-                    disabled={agent.name === "plan-executor-astra-medium"}
                     onChange={(event) => patch({ name: event.target.value })} /></Field>
                   <Field label={t("agents.field.title")}><Input type="text" value={view.title} onChange={(event) => patch({ title: event.target.value })} /></Field>
                 </div>
@@ -731,7 +739,11 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
                     <option value="FAST">{t("serviceTier.FAST")}</option>
                   </Select>
                 </Field>
-                {view.name === "plan-executor-astra-medium" ? <div>{t("agents.executioner.outerHint")}</div> : null}
+                {/* The platform pins the native children by the *step* the run
+                    executes (`nativeImplementationSubagentRunConfig`), so this
+                    note follows the canonical role and not a name the operator
+                    is free to change. */}
+                {(view.canonicalRole ?? view.name) === "plan-executor-astra-medium" ? <div>{t("agents.executioner.outerHint")}</div> : null}
                 <div><Link to="/settings" className="text-[var(--accent)] hover:underline">{t("agents.model.settingsHint")}</Link></div>
                 <div className={ROW}>
                   <Toggle on={view.inboxAccess} onChange={(next) => patch({ inboxAccess: next })} label={t("agents.inbox.label")} />
