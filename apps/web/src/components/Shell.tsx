@@ -36,7 +36,7 @@ const NAV: NavEntry[] = [
   { to: "/agents", labelKey: "sidebar.nav.agents", icon: <IconAgents />, match: ["/agents"] },
   // The label key sits in the `workflows.` namespace with the rest of the page
   // it opens, rather than in `sidebar.`, so the whole surface moves as one block.
-  { to: "/workflows", labelKey: "workflows.nav.label", icon: <IconWorkflows />, match: ["/workflows"] },
+  { to: "/workflows", labelKey: "sidebar.nav.workflows", icon: <IconWorkflows />, match: ["/workflows"] },
   { to: "/projects", labelKey: "sidebar.nav.projects", icon: <IconProjects />, match: ["/projects", "/"] },
   { to: "/connections", labelKey: "sidebar.nav.connections", icon: <IconConnections />, match: ["/connections"] },
   { to: "/secrets", labelKey: "sidebar.nav.secrets", icon: <IconSecrets />, match: ["/secrets"] },

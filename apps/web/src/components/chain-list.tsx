@@ -257,6 +257,7 @@ export const ChainRow = ({
   const gateToggleChange = step.status === "TODO" && onToggleGate !== undefined
     ? { onChange: (next: boolean) => onToggleGate(step.taskId, next) }
     : {};
+  const staffable = onReassign !== undefined && step.executionOwner === "agent";
   return (
     <div data-chain-node={step.taskId} className={cn(STEP_ROW, here && STEP_ROW_HERE)}>
       <span className={STEP_POSITION}>{step.position}</span>
@@ -285,12 +286,14 @@ export const ChainRow = ({
           </span>
         ) : null}
       </span>
-      <ExecutionOwnerChip step={step} />
-      {/* Only agent-owned Steps: a human Step's owner is a person and the merge
-          tail's Steps are bound to the mechanical sentinel, so neither has an
-          Agent an operator may pick. Absent `onReassign` the card stays the
-          read-only projection it was. */}
-      {onReassign === undefined || step.executionOwner !== "agent" ? null : (
+      {/* Only agent-owned Steps get a picker: a human Step's owner is a person
+          and the merge tail's Steps are bound to the mechanical sentinel, so
+          neither has an Agent an operator may pick. Absent `onReassign` the card
+          stays the read-only projection it was. Where the picker renders it
+          already names the Agent and its model, so the chip would say the same
+          thing twice; the chip stands in for it everywhere else. */}
+      {staffable ? null : <ExecutionOwnerChip step={step} />}
+      {!staffable ? null : (
         <ReassignSelect
           agents={agents}
           current={step.agent}

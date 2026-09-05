@@ -626,7 +626,7 @@ export const CostsPage = (): ReactNode => {
                             <TableRow>
                               <TableHead>{t("costs.topRuns.task")}</TableHead>
                               <TableHead>{t("costs.topRuns.agent")}</TableHead>
-                              <TableHead>{t("agents.costs.runModel")}</TableHead>
+                              <TableHead>{t("costs.runModel")}</TableHead>
                               <TableHead className={TABLE_TIGHT}>{t("costs.topRuns.started")}</TableHead>
                               <TableHead className={TABLE_TIGHT}>{t("costs.topRuns.cost")}</TableHead>
                             </TableRow>
@@ -728,12 +728,12 @@ export const CostsPage = (): ReactNode => {
                     ? <EmptyState>{t("costs.byModel.empty")}</EmptyState>
                     : (
                         <>
-                          <div className={`${HINT} mb-[10px]`}>{t("agents.costs.runModel.hint")}</div>
+                          <div className={`${HINT} mb-[10px]`}>{t("costs.runModel.hint")}</div>
                           <ModelBar byModel={report.byModel} totalUsd={report.totalUsd} colors={modelColors} />
                           <Table>
                             <TableHeader>
                               <TableRow>
-                                <TableHead>{t("agents.costs.runModel")}</TableHead>
+                                <TableHead>{t("costs.runModel")}</TableHead>
                                 <TableHead className={TABLE_TIGHT}>{t("costs.byModel.spend")}</TableHead>
                                 <TableHead className={TABLE_TIGHT}>{t("costs.byModel.share")}</TableHead>
                               </TableRow>
