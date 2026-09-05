@@ -5,7 +5,7 @@ import { after, before, beforeEach, test } from "node:test";
 import {
   AssigneeType,
   DIRECT_TEMPLATE_NAME,
-  legacyTemplateName,
+  templateRolloverName,
   Prisma,
   RunnerKind,
   type PrismaClient,
@@ -318,7 +318,7 @@ test("replace addresses the project and refuses canonical or registered-legacy t
   const currentCanonical = await seedTemplate("replace-current-canonical", DIRECT_TEMPLATE_NAME);
   const legacyCanonical = await seedTemplate(
     "replace-legacy-canonical",
-    legacyTemplateName(DIRECT_TEMPLATE_NAME, "pre-narrow-regression-lease", "legacy-row"),
+    templateRolloverName(DIRECT_TEMPLATE_NAME, "pre-narrow-regression-lease", "legacy-row"),
   );
   const cases = [
     {

@@ -366,7 +366,7 @@ export const ChainList = ({
         <span data-chain-hold-reason="" className={HINT}>{t("chain.holdReason", { reason: chain.control.holdReason })}</span>
       ) : null}
       <Button type="button" variant="legacy" size="legacySmall" className="shadow-none" disabled={pending} onClick={() => onControl?.()}>
-        {t(held ? "chain.resume" : "chain.stopAfterLayer")}
+        {t(held ? "chain.resume" : "chain.hold")}
       </Button>
       <span className={COUNT}>{t("chain.completed", { done: chain.done, total: chain.total })}</span>
     </div>

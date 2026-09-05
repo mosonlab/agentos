@@ -7,7 +7,7 @@ import {
   INTEGRATOR_TEMPLATE_NAME,
   RunStatus,
   TaskStatus,
-  legacyTemplateName,
+  templateRolloverName,
 } from "@anneal/db";
 import { runDbScript } from "./test-db-script.js";
 import { resetTestDb } from "./testdb.js";
@@ -484,7 +484,7 @@ test("a faithful rolled-over compound chain still resolves the approved specific
   const fixture = await instantiateFullAtReviewFrontier();
   await db.taskTemplate.update({
     where: { id: fixture.fullTemplateId },
-    data: { name: legacyTemplateName(INTEGRATOR_TEMPLATE_NAME, "pre-zero-gate", fixture.fullTemplateId) },
+    data: { name: templateRolloverName(INTEGRATOR_TEMPLATE_NAME, "pre-zero-gate", fixture.fullTemplateId) },
   });
   await completeImplementation(fixture, "legacy-compound-implementation");
   const reviewed = await claim("legacy-compound-review");

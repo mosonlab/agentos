@@ -281,7 +281,7 @@ test("a parked Step's board card never describes a held Chain", () => {
     chainProgress: progress({ position: 4 }),
   });
   assert.match(markup, /step 4\/9/);
-  assert.doesNotMatch(markup, /Held after layer|Resume Chain|Stop after current layer|Waiting for the operator/);
+  assert.doesNotMatch(markup, /Held after layer|Resume Chain|Hold Chain|Waiting for the operator/);
 });
 
 test("a bound board card names its unresolved predecessor without adding a board column", () => {
@@ -1133,7 +1133,7 @@ test("aggregate Hold and Resume post fresh chain-control request ids", async () 
     "*": [],
   });
   try {
-    await page.press(en("tasks.aggregate.stopAfter"));
+    await page.press(en("tasks.aggregate.hold"));
     await page.press(en("tasks.aggregate.resume"));
     const controlRequests = page.requests.filter(({ method, path }) => method === "POST" && /chain\/(?:hold|resume)$/u.test(path));
     assert.deepEqual(controlRequests.map(({ path }) => path), [
