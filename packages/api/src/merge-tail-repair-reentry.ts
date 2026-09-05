@@ -243,6 +243,12 @@ export const requestMergeTailRepair = async (
   }
 
   const assignee = await dependencies.resolveAssignee(tx, { ...regressionTask, repairKind });
+  // The same rule the automatic tail follows: a chain that never staffed a
+  // fixed-implementation step has no agent for this repair, and inventing one
+  // would put the work on somebody nobody configured.
+  if (assignee.kind === "unstaffed") {
+    return refused("merge_tail_repair_unstaffed", `The repair cannot be staffed: ${assignee.reason}`);
+  }
   const repair = await dependencies.createRepairTask(tx, {
     regressionTask,
     sourceRun,

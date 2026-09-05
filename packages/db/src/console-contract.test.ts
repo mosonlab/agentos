@@ -18,7 +18,9 @@ test("the browser-safe console contract imports only types", () => {
   const typeSpecifiers = [
     ...source.matchAll(/(?:^|\n)\s*import\s+type\b[^;]*?from\s+"([^"]+)"/gu),
   ].map((match) => match[1]);
-  assert.deepEqual(typeSpecifiers, ["@prisma/client", "./wire-contract.js"]);
+  // `board-contract.js` is the sibling browser-safe contract; the console reads
+  // one execution-owner union, not a second copy of it.
+  assert.deepEqual(typeSpecifiers, ["@prisma/client", "./board-contract.js", "./wire-contract.js"]);
 });
 
 test("the package publishes the console contract as an isolated subpath", () => {

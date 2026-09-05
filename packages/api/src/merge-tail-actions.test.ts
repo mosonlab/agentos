@@ -564,3 +564,107 @@ test("stopMergeTail refuses an illegal recovery transition before writing it", a
   );
   assert.deepEqual(observed.recoveryUpdates, []);
 });
+
+/** A chain whose template has no fixed-implementation step: `task.findFirst`
+ *  finds no fix task to staff the repair from. */
+const unstaffedRepairTx = (fixTask: { id: string; assigneeAgent: null } | null = null) => {
+  const observed = stopTx(MergeRecoveryStatus.REPAIRING);
+  const created: Array<Record<string, any>> = [];
+  const tx = observed.tx as unknown as Record<string, any>;
+  tx.mergeRecoveryAttempt.findFirst = async () => null;
+  tx.taskActivity.findMany = async () => [];
+  tx.task.findFirst = async () => fixTask;
+  tx.task.create = async (args: Record<string, any>) => {
+    created.push(args);
+    return { id: "repair-1" };
+  };
+  return { ...observed, created };
+};
+
+test("a chain with no fixed-implementation step stops instead of staffing an unconfigured agent", async () => {
+  const observed = unstaffedRepairTx();
+
+  const result = await handleRegressionCompletion(observed.tx, {
+    task: {
+      id: "regression-1",
+      projectId: "project-1",
+      repoId: "repo-1",
+      templateId: "template-1",
+      chainId: "chain-1",
+      chainIndex: 5,
+      targetBranch: "main",
+    },
+    run: {
+      id: "run-1",
+      agentId: "regression-agent-1",
+      branch: "feat/shared",
+      headSha: "e".repeat(40),
+      sessionId: "session-1",
+    },
+    qualifiedVerdict: {
+      schemaVersion: 2,
+      outcome: "review-fail",
+      headSha: "e".repeat(40),
+      baseHeadSha: "f".repeat(40),
+      summary: "the reviewer found a defect",
+    },
+    now: new Date("2026-09-03T12:00:00Z"),
+  });
+
+  assert.equal(result, "handled");
+  const reason = "chain chain-1 has no fixed-implementation step to staff the review-fix repair";
+  // No repair card at all, and none assigned to a canonical role the chain
+  // never named.
+  assert.deepEqual(observed.created, []);
+  assert.deepEqual(observed.taskUpdates, [{
+    where: { id: "regression-1" },
+    data: { status: TaskStatus.REVIEW, failureReason: reason },
+  }]);
+  assert.equal(observed.notices.length, 1);
+  assert.equal(observed.notices[0]?.create.body, `Autonomous merge tail stopped: ${reason}`);
+  assert.equal(observed.notices[0]?.create.taskId, "regression-1");
+});
+
+test("a fixed-implementation task with no agent stops with an accurate notice", async () => {
+  const observed = unstaffedRepairTx({ id: "fix-1", assigneeAgent: null });
+
+  const result = await handleRegressionCompletion(observed.tx, {
+    task: {
+      id: "regression-1",
+      projectId: "project-1",
+      repoId: "repo-1",
+      templateId: "template-1",
+      chainId: "chain-1",
+      chainIndex: 5,
+      targetBranch: "main",
+    },
+    run: {
+      id: "run-1",
+      agentId: "regression-agent-1",
+      branch: "feat/shared",
+      headSha: "e".repeat(40),
+      sessionId: "session-1",
+    },
+    qualifiedVerdict: {
+      schemaVersion: 2,
+      outcome: "review-fail",
+      headSha: "e".repeat(40),
+      baseHeadSha: "f".repeat(40),
+      summary: "the reviewer found a defect",
+    },
+    now: new Date("2026-09-03T12:00:00Z"),
+  });
+
+  assert.equal(result, "handled");
+  const reason = "chain chain-1 fixed-implementation task fix-1 staffs no Agent for the review-fix repair";
+  // No repair card at all, and none assigned to a canonical role the chain
+  // never named.
+  assert.deepEqual(observed.created, []);
+  assert.deepEqual(observed.taskUpdates, [{
+    where: { id: "regression-1" },
+    data: { status: TaskStatus.REVIEW, failureReason: reason },
+  }]);
+  assert.equal(observed.notices.length, 1);
+  assert.equal(observed.notices[0]?.create.body, `Autonomous merge tail stopped: ${reason}`);
+  assert.equal(observed.notices[0]?.create.taskId, "regression-1");
+});
