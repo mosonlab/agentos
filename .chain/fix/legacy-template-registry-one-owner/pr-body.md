@@ -13,4 +13,8 @@ Seed rollover could preserve historical template rows under names that `canonica
 
 ## Validation
 
-The new enumeration test failed on the starting implementation with the unregistered compound `10` name, then passed after the registry change. DB workspace tests, typecheck (including CLI), and lint are the Run proof boundary. API typecheck checks existing re-export consumers. Repository-wide typecheck/lint and canonical prompt sync database tests are Regression/Merge Gate evidence, per the Run instructions; they are not executed independently here.
+The new enumeration test failed on the starting implementation with the unregistered compound `10` name, then passed after the registry change. DB workspace tests, typecheck (including CLI), and lint are the Run proof boundary. API typecheck and lint check migrated registry-helper consumers. Repository-wide typecheck/lint and canonical prompt sync database tests are Regression/Merge Gate evidence, per the Run instructions; they are not executed independently here.
+
+Review fixes adopt SPEC-LEGACY-001 and BLIND-01 through BLIND-08. Validation: all 490 DB unit tests pass; DB typecheck (including CLI), API typecheck, DB lint, API lint, and the exact registry-only call-site grep pass. The fixed-v1 regression checks the exported constants as well as their exact persisted spelling.
+
+The retry began at runner salvage commit `ea414d78`, whose parent is the common reviewed head `38d04655`. The operator authorized completing and validating these salvaged fixes against that original review head, preserving append-only lineage.

@@ -3,7 +3,7 @@ import { readdir, readFile } from "node:fs/promises";
 import test from "node:test";
 import ts from "typescript";
 
-import { canonicalTemplateIdentity, templateRolloverName } from "./canonical-template-transition.js";
+import { canonicalTemplateIdentity, LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME, LEGACY_INTEGRATOR_TEMPLATE_NAME, templateRolloverName } from "./canonical-template-transition.js";
 
 /** Discover declarations rather than maintaining a second list of name helpers. */
 test("every exported legacy template name helper produces a registered identity", async () => {
@@ -84,7 +84,11 @@ test("name minting refuses unknown generations and missing row identities", () =
 });
 
 test("fixed v1 legacy identities remain recognizable", () => {
-  for (const canonicalName of ["compound-engineer-workflow", "direct-engineer-workflow"]) {
-    assert.deepEqual(canonicalTemplateIdentity(`${canonicalName}-legacy-v1`), { canonicalName, generation: "v1" });
+  for (const [name, canonicalName] of [
+    [LEGACY_INTEGRATOR_TEMPLATE_NAME, "compound-engineer-workflow"],
+    [LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME, "direct-engineer-workflow"],
+  ] as const) {
+    assert.equal(name, `${canonicalName}-legacy-v1`);
+    assert.deepEqual(canonicalTemplateIdentity(name), { canonicalName, generation: "v1" });
   }
 });
