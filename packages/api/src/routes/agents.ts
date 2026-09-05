@@ -4,6 +4,7 @@ import {
   catalogRunnerForModel,
   CodexServiceTier,
   INTEGRATOR_AGENT_NAME,
+  isCompoundImplementationStep,
   loadAgentSources,
   lockAgentRepoGrantForRevocation,
   lockAgentRow,
@@ -78,6 +79,12 @@ const agentInput = z.object({
 });
 const agentPatch = z.object(agentFields).partial().refine((value) => Object.keys(value).length > 0);
 
+/**
+ * The fields canonical sync adopts until the operator edits them (R9). Prompts are
+ * absent on purpose: they always follow canonical, so editing one marks nothing.
+ */
+const CUSTOMIZABLE_AGENT_FIELDS = ["name", "title", "model", "runnerPreference"] as const;
+
 const codexServiceTierRefusal = (agent: {
   model: string;
   runnerPreference: RunnerPreference;
@@ -98,27 +105,40 @@ const runnerModelRefusal = (agent: { model: string; runnerPreference: RunnerPref
   return `Model ${agent.model} requires ${expected}, but this Agent stores ${agent.runnerPreference}`;
 };
 
-const executionerRuntimeRefusal = (agent: {
-  name: string;
-  model: string;
-  runnerPreference: RunnerPreference;
-}): string | null => {
-  if (agent.name !== "implementation-plan-executioner") return null;
+/**
+ * The compound implementation root is a capability requirement, not a name: the
+ * step drives an entire plan through subagents and only a Codex `gpt-*` runtime
+ * can. Which Agent holds it is now a staffing choice, so this refusal follows the
+ * binding — an Agent bound to that step cannot be patched onto another runtime,
+ * and one that is not may take any runtime it likes.
+ */
+const compoundImplementationRuntimeRefusal = (
+  agent: { model: string; runnerPreference: RunnerPreference },
+  bindsCompoundImplementationRoot: boolean,
+): string | null => {
+  if (!bindsCompoundImplementationRoot) return null;
   if (runnerFor(agent.runnerPreference, agent.model) === RunnerKind.CODEX
     && catalogRunnerForModel(agent.model) === RunnerPreference.CODEX) return null;
-  return "implementation-plan-executioner requires a Codex gpt-* model";
+  return "An Agent bound to a compound implementation root requires a Codex gpt-* model";
 };
 
 const runtimeConfigRefusal = (agent: {
-  name: string;
   model: string;
   runnerPreference: RunnerPreference;
   codexServiceTier: CodexServiceTier;
 }): string | null => (
   runnerModelRefusal(agent)
-  ?? executionerRuntimeRefusal(agent)
   ?? codexServiceTierRefusal(agent)
 );
+
+/** Does this Agent hold a compound implementation root on any template step? */
+const bindsCompoundImplementationRoot = async (
+  tx: Prisma.TransactionClient,
+  agentId: string,
+): Promise<boolean> => (await tx.taskTemplateStep.findMany({
+  where: { assigneeAgentId: agentId },
+  select: { stepIndex: true, outputKind: true, taskTemplate: { select: { name: true } } },
+})).some((step) => isCompoundImplementationStep(step));
 
 const isDependencyProvisioning = (value: unknown): value is DependencyProvisioning => (
   value === "NONE" || value === "NPM_CI"
@@ -214,6 +234,30 @@ const filesystemGrantPatch = filesystemGrantFields.partial().refine((value) => O
 const collaboratorInput = z.object({ allowedAgentId: id });
 
 type AgentResponse = AgentContract<Date>;
+
+/**
+ * §D-P4. The sentinel Agent row exists so the merge step can carry a non-null
+ * `Run.agentId`; it is not something an operator may assign. It is returned
+ * rather than hidden so an operator can still see that it exists and read its
+ * role prompt, but `assignable: false` is what the pickers filter on — and
+ * `POST /projects/:projectId/tasks` refuses it regardless of any client.
+ *
+ * Sentinel identity is the canonical role: `merge-integrator` is the one slug the
+ * rename table leaves alone, and a row that carries the role is the sentinel even
+ * if its name was edited.
+ */
+const isMechanical = (agent: { name: string; canonicalRole: string | null }): boolean => (
+  (agent.canonicalRole ?? agent.name) === INTEGRATOR_AGENT_NAME
+);
+
+const agentResponse = <T extends { name: string; canonicalRole: string | null }>(agent: T): T & {
+  mechanical: boolean;
+  assignable: boolean;
+} => {
+  const mechanical = isMechanical(agent);
+  return { ...agent, mechanical, assignable: !mechanical };
+};
+
 type SkillResponse = SkillContract<Date>;
 type MCPConnectionResponse = MCPConnectionContract<Date>;
 type RepoResponse = RepoContract<Date>;
@@ -221,18 +265,10 @@ type RepoResponse = RepoContract<Date>;
 export const registerAgentsRoutes = (app: RouteApp, deps: RouteDeps): void => {
   const { db } = deps;
 
-  // §D-P4. The sentinel Agent row exists so step 12 can carry a non-null
-  // `Run.agentId`; it is not something an operator may assign. It is returned
-  // rather than hidden so an operator can still see that it exists and read its
-  // role prompt, but `assignable: false` is what the pickers filter on — and
-  // `POST /projects/:projectId/tasks` refuses it regardless of any client.
   app.get("/projects/:projectId/agents", async (context) => validated(context, (await db.agent.findMany({
     where: { projectId: id.parse(context.req.param("projectId")) },
     orderBy: { createdAt: "asc" },
-  })).map((agent) => {
-    const mechanical = agent.name === INTEGRATOR_AGENT_NAME;
-    return { ...agent, mechanical, assignable: !mechanical };
-  }) satisfies AgentResponse[]));
+  })).map(agentResponse) satisfies AgentResponse[]));
   app.post("/projects/:projectId/agents", async (context) => {
     const projectId = id.parse(context.req.param("projectId"));
     const body = await readJson(context.req.raw, agentInput);
@@ -248,7 +284,7 @@ export const registerAgentsRoutes = (app: RouteApp, deps: RouteDeps): void => {
     if (foundationalPrompt === undefined) {
       return context.json({ error: "This project has no foundation yet. Run npm run db:seed." }, 400);
     }
-    return context.json((await db.agent.create({
+    return context.json(agentResponse(await db.agent.create({
       data: { ...body, foundationalPrompt, projectId },
     })) satisfies AgentResponse, 201);
   });
@@ -265,7 +301,7 @@ export const registerAgentsRoutes = (app: RouteApp, deps: RouteDeps): void => {
         collaborators: { include: { allowedAgent: true } },
       },
     });
-    return agent ? context.json(agent satisfies AgentResponse) : context.json({ error: "Agent not found" }, 404);
+    return agent ? context.json(agentResponse(agent) satisfies AgentResponse) : context.json({ error: "Agent not found" }, 404);
   });
   app.patch("/agents/:agentId", async (context) => {
     const agentId = id.parse(context.req.param("agentId"));
@@ -275,28 +311,33 @@ export const registerAgentsRoutes = (app: RouteApp, deps: RouteDeps): void => {
       if (!before) return refusal("not-found", "Agent not found");
       const patch = withoutUndefined(body);
       const merged = { ...before, ...patch };
-      if (before.name === "implementation-plan-executioner" && merged.name !== before.name) {
-        return refusal("invalid-request", "implementation-plan-executioner is a canonical Agent name and cannot be changed");
+      if (isMechanical(before) && merged.name !== before.name) {
+        return refusal("invalid-request", `${INTEGRATOR_AGENT_NAME} is the mechanical merge sentinel and its name cannot be changed`);
       }
-      const runtimeRefusal = runtimeConfigRefusal(merged);
+      const runtimeRefusal = runtimeConfigRefusal(merged)
+        ?? compoundImplementationRuntimeRefusal(merged, await bindsCompoundImplementationRoot(tx, agentId));
       if (runtimeRefusal) return refusal("invalid-request", runtimeRefusal);
       if (body.environmentId) {
         const environment = await tx.environment.findFirst({ where: { id: body.environmentId, projectId: before.projectId } });
         if (!environment) return refusal("invalid-request", "Environment does not belong to this project");
       }
+      // R9: an edited field stops following canonical. Only a field whose value
+      // actually changes is marked, so re-submitting the canonical value in a form
+      // does not pin it.
+      const edited = CUSTOMIZABLE_AGENT_FIELDS.filter((field) => (
+        body[field] !== undefined && body[field] !== before[field]
+      ));
+      const customizedFields = [...new Set([...before.customizedFields, ...edited])].sort();
       return { agent: await tx.agent.update({
         where: { id: agentId },
         data: {
           ...patch,
-          ...((body.model !== undefined && body.model !== before.model)
-            || (body.runnerPreference !== undefined && body.runnerPreference !== before.runnerPreference)
-            ? { runtimeConfigCustomized: true }
-            : {}),
+          ...(edited.length > 0 ? { customizedFields } : {}),
         } as Prisma.AgentUncheckedUpdateInput,
       }) };
     });
     if ("message" in result) return refusalJson(context, result);
-    return context.json(result.agent satisfies AgentResponse);
+    return context.json(agentResponse(result.agent) satisfies AgentResponse);
   });
   app.post("/agents/:agentId/reset-runtime-config", async (context) => {
     const agentId = id.parse(context.req.param("agentId"));
@@ -304,32 +345,40 @@ export const registerAgentsRoutes = (app: RouteApp, deps: RouteDeps): void => {
     // missing or malformed source is a release error and must not turn into a
     // best-effort reset that guesses at the canonical values.
     const sources = await loadAgentSources();
-    const rolesByName = new Map(sources.roles.map((role) => [role.name, role]));
+    const rolesByRole = new Map(sources.roles.map((role) => [role.canonicalRole, role]));
     const result = await db.$transaction(async (tx) => {
       const before = await lockAgentRow(tx, agentId);
       if (!before) return refusal("not-found", "Agent not found");
       if (before.archivedAt) return refusal("conflict", "Cannot reset runtime configuration for an archived Agent");
-      const role = rolesByName.get(before.name);
+      // The source is found by canonical role, not by name: an Agent the operator
+      // renamed is still the role it was installed from, and that is the runtime
+      // configuration a reset restores.
+      const role = before.canonicalRole === null ? undefined : rolesByRole.get(before.canonicalRole);
       if (!role) return refusal("invalid-request", `Agent ${before.name} has no canonical role source`);
       const runtimeRefusal = runtimeConfigRefusal({
-        name: before.name,
         model: role.model,
         runnerPreference: role.runnerPreference,
         codexServiceTier: before.codexServiceTier,
-      });
+      }) ?? compoundImplementationRuntimeRefusal(
+        { model: role.model, runnerPreference: role.runnerPreference },
+        await bindsCompoundImplementationRoot(tx, agentId),
+      );
       if (runtimeRefusal) return refusal("invalid-request", runtimeRefusal);
       return { agent: await tx.agent.update({
         where: { id: agentId },
         data: {
           model: role.model,
           runnerPreference: role.runnerPreference,
-          runtimeConfigCustomized: false,
+          // Only the fields this reset actually restores stop being customized.
+          customizedFields: before.customizedFields.filter((field) => (
+            field !== "model" && field !== "runnerPreference"
+          )),
           runtimeConfigDriftNoticeFingerprint: null,
         },
       }) };
     });
     if ("message" in result) return refusalJson(context, result);
-    return context.json(result.agent satisfies AgentResponse);
+    return context.json(agentResponse(result.agent) satisfies AgentResponse);
   });
   app.delete("/agents/:agentId", async (context) => {
     try {
@@ -357,23 +406,119 @@ export const registerAgentsRoutes = (app: RouteApp, deps: RouteDeps): void => {
       if (agent.archivedAt) return { agent };
       const blocker = await agentArchiveBlocker(tx, agentId);
       if (blocker) return refusal("conflict", blocker);
+      // TODO(staffing-profiles integrator): R6 — refuse with the referencing
+      // profiles before archiving, under this same Agent-row mutex:
+      //   const profiles = await profilesReferencingAgent(tx, agentId);
+      //   if (profiles.length > 0) {
+      //     return refusal("conflict", `Agent is staffed by profiles ${profiles.map(({ name }) => name).join(", ")}; change them first`);
+      //   }
+      // `profilesReferencingAgent` is exported by packages/api/src/staffing-profiles.ts
+      // (lane L1); neither it nor the StaffingProfileEntry model exists in this
+      // worktree, so the call is left here rather than compiled against nothing.
       return { agent: await tx.agent.update({ where: { id: agentId }, data: { archivedAt: now } }) };
     });
     if ("message" in result) return refusalJson(context, result);
     // Unchanged sweep: rows archived before this protocol existed — or queued by
     // a writer that committed first — still get their explanatory activity.
     await noteArchivedQueuedRuns(db, { agentId });
-    return context.json(result.agent satisfies AgentResponse);
+    return context.json(agentResponse(result.agent) satisfies AgentResponse);
   });
   app.post("/agents/:agentId/unarchive", async (context) => {
     const agentId = id.parse(context.req.param("agentId"));
     const agent = await db.agent.findUnique({ where: { id: agentId } });
     if (!agent) return context.json({ error: "Agent not found" }, 404);
-    if (!agent.archivedAt) return context.json(agent satisfies AgentResponse);
-    return context.json((await db.agent.update({
+    if (!agent.archivedAt) return context.json(agentResponse(agent) satisfies AgentResponse);
+    return context.json(agentResponse(await db.agent.update({
       where: { id: agentId },
       data: { archivedAt: null },
     })) satisfies AgentResponse);
+  });
+  /**
+   * Duplicate an Agent so two staffings of one role can coexist — the same job at
+   * two models, say. The copy is a new Agent with the same setup: prompts, runtime,
+   * tools, environment, and every grant and binding that describes what it may
+   * reach. What it deliberately does not copy is history and inbound trust:
+   * tasks, steps, sessions, runs and inbox belong to the original, and another
+   * Agent's decision to allow this one as a collaborator is that Agent's to make.
+   * It is a copy, not the canonical role, so `canonicalRole` is null and
+   * `customizedFields` empty: canonical sync will never rewrite it.
+   */
+  app.post("/agents/:agentId/duplicate", async (context) => {
+    const agentId = id.parse(context.req.param("agentId"));
+    const body = await readJson(context.req.raw, z.object({ name: agentFields.name }));
+    const result = await db.$transaction(async (tx) => {
+      const source = await tx.agent.findUnique({
+        where: { id: agentId },
+        include: {
+          repoAccess: { select: { repoId: true, mountPath: true, permissions: true } },
+          skills: { select: { skillId: true } },
+          mcpConnections: { select: { mcpConnectionId: true } },
+          secretGrants: { select: { secretId: true, envVar: true } },
+          filesystemGrants: { select: { folderPath: true, canRead: true, canWrite: true, canDelete: true } },
+          collaborators: { select: { allowedAgentId: true } },
+        },
+      });
+      if (!source) return refusal("not-found", "Agent not found");
+      if (isMechanical(source)) {
+        return refusal("conflict", `${INTEGRATOR_AGENT_NAME} is the mechanical merge sentinel and cannot be duplicated`);
+      }
+      const taken = await tx.agent.findFirst({
+        where: { projectId: source.projectId, name: body.name },
+        select: { id: true },
+      });
+      if (taken) return refusal("conflict", `Agent ${body.name} already exists in this project`);
+      const copy = await tx.agent.create({ data: {
+        projectId: source.projectId,
+        environmentId: source.environmentId,
+        canonicalRole: null,
+        customizedFields: [],
+        name: body.name,
+        title: source.title,
+        model: source.model,
+        codexServiceTier: source.codexServiceTier,
+        foundationalPrompt: source.foundationalPrompt,
+        rolePrompt: source.rolePrompt,
+        runnerPreference: source.runnerPreference,
+        inboxAccess: source.inboxAccess,
+        disabledTools: source.disabledTools,
+        archivedAt: null,
+      } });
+      // Join rows carry the new Agent id; `FilesystemGrant` has its own id, which
+      // the database generates for the copy rather than reusing the source's.
+      if (source.repoAccess.length > 0) {
+        await tx.agentRepoAccess.createMany({ data: source.repoAccess.map((grant) => ({
+          ...grant, agentId: copy.id, projectId: source.projectId,
+        })) });
+      }
+      if (source.skills.length > 0) {
+        await tx.agentSkill.createMany({ data: source.skills.map(({ skillId }) => ({
+          agentId: copy.id, skillId, projectId: source.projectId,
+        })) });
+      }
+      if (source.mcpConnections.length > 0) {
+        await tx.agentMCPConnection.createMany({ data: source.mcpConnections.map(({ mcpConnectionId }) => ({
+          agentId: copy.id, mcpConnectionId, projectId: source.projectId,
+        })) });
+      }
+      if (source.secretGrants.length > 0) {
+        await tx.agentSecretGrant.createMany({ data: source.secretGrants.map((grant) => ({
+          ...grant, agentId: copy.id,
+        })) });
+      }
+      if (source.filesystemGrants.length > 0) {
+        await tx.filesystemGrant.createMany({ data: source.filesystemGrants.map((grant) => ({
+          ...grant, agentId: copy.id,
+        })) });
+      }
+      if (source.collaborators.length > 0) {
+        await tx.agentCollaboration.createMany({ data: source.collaborators.map(({ allowedAgentId }) => ({
+          agentId: copy.id, allowedAgentId, projectId: source.projectId,
+        })) });
+      }
+      return { agent: copy };
+    });
+    if ("message" in result) return refusalJson(context, result);
+    return context.json(agentResponse(result.agent) satisfies AgentResponse, 201);
   });
 
   app.get("/agents/:agentId/secret-grants", async (context) => context.json(await db.agentSecretGrant.findMany({
