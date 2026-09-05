@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 
 import {
   AssigneeType,
-  canonicalTemplateIdentity,
+  legacyGenerationMarkerForTemplateName,
   Prisma,
   RunnerKind,
   SecretPurpose,
@@ -124,7 +124,7 @@ type TriggerFireResponse = SerializesTo<TriggerFireContract<Date>, TriggerFireCo
  * an operator's own clone resolves to no identity at all. Both are current.
  */
 const isRetiredTemplate = (name: string): boolean =>
-  canonicalTemplateIdentity(name)?.generation != null;
+  legacyGenerationMarkerForTemplateName(name) !== null;
 
 export const registerTemplateRoutes = (app: RouteApp, { db }: RouteDeps): (() => void) => {
   app.use("/hooks/templates/:templateId", bodyLimit({

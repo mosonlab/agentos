@@ -102,24 +102,49 @@ const seedOf = (profile: StaffingProfile): string =>
 /** The rows the list may render. A read that landed with something else is a
  *  failure the operator must see: rendering the readable part of an unknown
  *  shape would silently claim the project has fewer templates than it has. */
-const isTemplateList = (value: unknown): value is TaskTemplate[] =>
-  Array.isArray(value) && value.every((row) =>
-    typeof row === "object" && row !== null
-    && typeof (row as TaskTemplate).id === "string"
-    && typeof (row as TaskTemplate).name === "string"
-    && typeof (row as TaskTemplate).retired === "boolean"
-    && Array.isArray((row as TaskTemplate).steps));
+// The list does not consume the nested agent payload; leave it unknown instead
+// of claiming this boundary validates the detail page's full Agent contract.
+type ListedTemplate = Omit<TaskTemplate, "steps"> & {
+  steps: (Omit<TaskTemplateStep, "assigneeAgent"> & { assigneeAgent: unknown })[];
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null;
+const isStrings = (value: unknown): value is string[] =>
+  Array.isArray(value) && value.every((item) => typeof item === "string");
+const isListedStep = (value: unknown): value is ListedTemplate["steps"][number] =>
+  isRecord(value)
+  && ["id", "name", "prompt", "outputKind"].every((key) => typeof value[key] === "string")
+  && Number.isInteger(value.stepIndex)
+  && (value.assigneeType === "AGENT" || value.assigneeType === "HUMAN")
+  && typeof value.approvalGate === "boolean"
+  && typeof value.optional === "boolean"
+  && isStrings(value.priorOutputKinds)
+  && (value.baseFromStepIndex === null || Number.isInteger(value.baseFromStepIndex))
+  && (value.runner === null || value.runner === "CLAUDE" || value.runner === "CODEX" || value.runner === "PI")
+  && (value.assigneeAgentId === null || typeof value.assigneeAgentId === "string")
+  && (value.assigneeAgent === null || isRecord(value.assigneeAgent));
+const isTemplateList = (value: unknown): value is ListedTemplate[] =>
+  Array.isArray(value) && value.every((row: unknown) =>
+    isRecord(row)
+    && typeof row.id === "string"
+    && typeof row.projectId === "string"
+    && typeof row.name === "string"
+    && typeof row.description === "string"
+    && typeof row.retired === "boolean"
+    && isStrings(row.variables)
+    && Array.isArray(row.steps) && row.steps.every(isListedStep));
 
 /** Current templates first and by name, retired generations after them in the
  *  order the control plane listed them. Retirement is the API's `retired`
  *  field and never a guess from the name: the console does not own that rule. */
-export const partitionTemplates = (templates: TaskTemplate[]): { current: TaskTemplate[]; retired: TaskTemplate[] } => ({
+const partitionTemplates = (templates: ListedTemplate[]): { current: ListedTemplate[]; retired: ListedTemplate[] } => ({
   current: templates.filter((template) => !template.retired)
     .sort((left, right) => left.name.localeCompare(right.name)),
   retired: templates.filter((template) => template.retired),
 });
 
-const TemplateRow = ({ template }: { template: TaskTemplate }): ReactNode => {
+const TemplateRow = ({ template }: { template: ListedTemplate }): ReactNode => {
   const t = useT();
   return (
     <TableRow data-template-row={template.id} className="cursor-pointer" onClick={(event) => {
@@ -136,7 +161,7 @@ const TemplateRow = ({ template }: { template: TaskTemplate }): ReactNode => {
 
 export const WorkflowsPage = (): ReactNode => {
   const { projectId } = useProjectScope();
-  const { data, loading, error, reload } = usePoll<TaskTemplate[]>(
+  const { data, loading, error, reload, lastSuccessAt } = usePoll<unknown>(
     projectId === "" ? null : `/projects/${projectId}/task-templates`, 30_000,
   );
   /* Collapsed on every visit by design: the group is history, and the three
@@ -145,8 +170,9 @@ export const WorkflowsPage = (): ReactNode => {
   const t = useT();
 
   if (projectId === "") return <Page><EmptyState>{t("common.selectProject")}</EmptyState></Page>;
-  const malformed = data !== null && !isTemplateList(data);
-  const { current, retired } = partitionTemplates(malformed ? [] : data ?? []);
+  const valid = isTemplateList(data);
+  const malformed = lastSuccessAt !== null && !valid;
+  const { current, retired } = partitionTemplates(valid ? data : []);
 
   return (
     <Page className="text-foreground">

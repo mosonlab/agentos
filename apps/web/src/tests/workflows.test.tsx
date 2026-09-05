@@ -243,6 +243,27 @@ test("a template list of an unexpected shape is an error on screen, not an empty
   }
 });
 
+for (const [label, body] of [
+  ["object description", [{ ...TEMPLATE, description: { bad: true } }]],
+  ["missing description", [{ ...TEMPLATE, description: undefined }]],
+  ["invalid variables", [{ ...TEMPLATE, variables: [123] }]],
+  ["invalid step", [{ ...TEMPLATE, steps: [null] }]],
+  ["null body", null],
+  ["empty body", new Response(null, { status: 200 })],
+  ["malformed step fields", [{ ...TEMPLATE, steps: [{ ...TEMPLATE.steps[0], priorOutputKinds: [123] }] }]],
+] as const) {
+  test(`the template list rejects ${label} with a localized error`, async () => {
+    const page = await mountRoute("/workflows", { [`/projects/${PROJECT.id}/task-templates`]: body });
+    try {
+      assert.ok((page.container.textContent ?? "").includes(t("en", "workflows.error.shape")));
+      assert.equal(page.container.querySelector("table"), null);
+      assert.ok(!(page.container.textContent ?? "").includes(t("en", "workflows.templates.empty")));
+    } finally {
+      await page.dispose();
+    }
+  });
+}
+
 test("the profile list shows the default badge and refuses to delete the default while others exist", async () => {
   const page = await mountRoute("/workflows/template-1", templateRoutes([FAST_LANE, CAREFUL]));
   try {
