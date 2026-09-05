@@ -1555,6 +1555,7 @@ test("sync rolls model-neutral review names across all canonical templates and c
     profileId: string;
     taskId: string;
     blindPrompt: string;
+    blindOptional: boolean;
   }>();
   t.after(async () => {
     await prisma.task.deleteMany({ where: { id: { in: taskIds } } });
@@ -1567,7 +1568,7 @@ test("sync rolls model-neutral review names across all canonical templates and c
     assert.ok(sol);
     assert.ok(blind);
 
-    // Seed has the new source labels on the parent branch. These two updates
+    // The seed installs the current source labels. These two updates
     // reconstruct the shape deployed before the staffing-neutral rename.
     await restoreRetiredReviewStepNames(template.id);
 
@@ -1580,7 +1581,7 @@ test("sync rolls model-neutral review names across all canonical templates and c
         entries: {
           create: [
             { outputKind: "sol-findings", assigneeAgentId: staffedAgent.id, include: null },
-            { outputKind: "blind-findings", assigneeAgentId: staffedAgent.id, include: true },
+            { outputKind: "blind-findings", assigneeAgentId: staffedAgent.id, include: blind.optional ? true : null },
           ],
         },
       },
@@ -1608,6 +1609,7 @@ test("sync rolls model-neutral review names across all canonical templates and c
       profileId: profile.id,
       taskId: task.id,
       blindPrompt: blind.prompt,
+      blindOptional: blind.optional,
     });
   }
 
@@ -1629,6 +1631,13 @@ test("sync rolls model-neutral review names across all canonical templates and c
     legacyTemplateIds.push(legacy.id);
     assert.equal(legacy.steps.find(({ outputKind }) => outputKind === "sol-findings")?.name, "Code review (Sol)");
     assert.equal(legacy.steps.find(({ outputKind }) => outputKind === "blind-findings")?.name, "Code review (Opus blind)");
+    assert.deepEqual(
+      await prisma.staffingProfile.findUniqueOrThrow({
+        where: { id: fixture.profileId },
+        select: { taskTemplateId: true, name: true, isDefault: true },
+      }),
+      { taskTemplateId: fixture.templateId, name: "Operator review staffing", isDefault: true },
+    );
 
     const current = await prisma.taskTemplate.findUniqueOrThrow({
       where: { projectId_name: { projectId: project.id, name: templateName } },
@@ -1641,10 +1650,11 @@ test("sync rolls model-neutral review names across all canonical templates and c
     const carried = current.staffingProfiles.find(({ id }) => id !== fixture.profileId);
     assert.ok(carried);
     assert.equal(carried.name, "Operator review staffing");
+    assert.equal(carried.isDefault, true);
     assert.deepEqual(
       carried.entries.map(({ outputKind, assigneeAgentId, include }) => ({ outputKind, assigneeAgentId, include })),
       [
-        { outputKind: "blind-findings", assigneeAgentId: staffedAgent.id, include: true },
+        { outputKind: "blind-findings", assigneeAgentId: staffedAgent.id, include: fixture.blindOptional ? true : null },
         { outputKind: "sol-findings", assigneeAgentId: staffedAgent.id, include: null },
       ],
     );
@@ -1654,6 +1664,7 @@ test("sync rolls model-neutral review names across all canonical templates and c
       include: { templateStep: true },
     });
     assert.equal(task.templateId, fixture.templateId);
+    assert.equal(task.name, `retired review evidence ${templateName}`);
     assert.equal(task.templateStep?.name, "Code review (Opus blind)");
     assert.equal(task.templateStep?.prompt, fixture.blindPrompt);
   }
