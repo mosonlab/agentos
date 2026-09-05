@@ -122,7 +122,8 @@ test("the canonical-role migration renames in place, preserves references, and b
     ].join("\n"));
 
     const taskBefore = await db.task.findUniqueOrThrow({ where: { id: `${prefix}-task` } });
-    const runBefore = await db.run.findUniqueOrThrow({ where: { id: `${prefix}-run` } });
+    // Read the historical row without asking the current client for later columns.
+    const runBefore = await db.$queryRaw`SELECT * FROM "Run" WHERE "id" = ${`${prefix}-run`}`;
     const sessionBefore = await db.session.findUniqueOrThrow({ where: { id: `${prefix}-session` } });
 
     applyTarget(staged);
@@ -149,7 +150,7 @@ test("the canonical-role migration renames in place, preserves references, and b
     );
 
     assert.deepEqual(await db.task.findUniqueOrThrow({ where: { id: `${prefix}-task` } }), taskBefore);
-    assert.deepEqual(await db.run.findUniqueOrThrow({ where: { id: `${prefix}-run` } }), runBefore);
+    assert.deepEqual(await db.$queryRaw`SELECT * FROM "Run" WHERE "id" = ${`${prefix}-run`}`, runBefore);
     assert.deepEqual(await db.session.findUniqueOrThrow({ where: { id: `${prefix}-session` } }), sessionBefore);
     assert.equal(
       (await db.taskTemplateStep.findUniqueOrThrow({ where: { id: `${prefix}-step` } })).assigneeAgentId,
