@@ -82,12 +82,16 @@ export const planCanonicalInstallation = (
   const plan: CanonicalInstallationAction[] = [];
   for (const [templateName, sourceSteps] of sources) {
     const matchingRows = rows.filter((row) => row.name === templateName);
-    // Every rollover of this template installs the same graph, so the source
-    // is authenticated once, before any row decides what to do.
+    // Every write of this template installs the same graph, so the source is
+    // authenticated once, before any row decides what to do. A created row is
+    // referenced by no task, exactly as a rolled-over row is, so first
+    // installation is guarded by the same pin.
     const sourceDrift = sourcePromptGenerationDrift(templateName, sourceSteps);
     for (const projectId of requiredProjectIds) {
       if (!matchingRows.some((row) => row.projectId === projectId)) {
-        plan.push({ kind: "create", templateName, projectId });
+        plan.push(sourceDrift === null
+          ? { kind: "create", templateName, projectId }
+          : { kind: "refused", templateName, projectId, rowId: null, reason: sourceDrift });
       }
     }
     for (const row of matchingRows) {

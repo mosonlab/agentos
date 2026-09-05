@@ -466,11 +466,13 @@ export const LEGACY_TEMPLATE_GENERATIONS: Readonly<
  * only half the transition: it says nothing about what the source tree holds
  * when the rollover finally runs. Everywhere else an unregistered prompt edit
  * refuses the deploy because the persisted step is referenced by instantiated
- * tasks and its prompt no longer matches source. A rollover has no such
- * witness: it renames the retired row away and writes a brand-new template row
- * from source, and a brand-new row is referenced by nothing. Without this pin,
- * prompts edited between registering a rollover and deploying it would be
- * installed on the registered transition's authority.
+ * tasks and its prompt no longer matches source. Writing a template row has no
+ * such witness: a rollover renames the retired row away and writes a brand-new
+ * row from source, first installation writes one into a project that had none,
+ * and a brand-new row is referenced by nothing. Without this pin, prompts
+ * edited between registering a rollover and deploying it would be installed on
+ * the registered transition's authority, and onboarding a project would install
+ * whatever the tree happened to hold.
  *
  * It is pinned rather than read from the tree on purpose: a digest computed
  * from the same tree it is meant to authenticate proves nothing. Re-pin it, in
@@ -683,11 +685,12 @@ const shapeMatches = (
  */
 /**
  * A named reason the source tree does not hold the prompt generation this
- * template's rollovers are registered to install, or null when it does.
+ * template is registered to install, or null when it does.
  *
- * Every rollover installs the same thing -- the current source graph -- so
- * this is asked once per template rather than once per retired generation, and
- * it covers structural rollovers as well as prompt-only ones.
+ * Every write of this template installs the same thing -- the current source
+ * graph -- so this is asked once per template rather than once per retired
+ * generation, and it covers first installation and structural rollovers as
+ * well as prompt-only ones.
  */
 export const sourcePromptGenerationDrift = (
   templateName: CanonicalTemplateRegistryName,
@@ -696,7 +699,7 @@ export const sourcePromptGenerationDrift = (
   const registered = CANONICAL_SOURCE_PROMPT_GENERATIONS[templateName];
   const actual = templatePromptGenerationDigest(sourceSteps);
   if (actual === registered) return null;
-  return `${templateName} rollover is registered to install prompt generation ${registered}, but the source tree holds ${actual}`;
+  return `${templateName} is registered to install prompt generation ${registered}, but the source tree holds ${actual}`;
 };
 
 export const legacyGenerationMatches = (

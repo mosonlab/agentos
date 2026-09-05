@@ -170,3 +170,28 @@ test("current installation adopts review provisioning and the optional-step addi
     /provisionDependencies/u,
   );
 });
+
+test("first installation is refused when the source tree is not the pinned generation", async () => {
+  const loaded = await loadTemplateStepSources("direct-engineer-workflow");
+  const editedSource = loaded.map((step, index) => (
+    index === 0 ? { ...step, prompt: `${step.prompt}\n\nunregistered edit` } : step
+  ));
+  const sources = (steps: readonly TemplateStepSource[]): CanonicalInstallationSources => new Map([
+    ["direct-engineer-workflow", steps],
+  ]);
+
+  assert.deepEqual(planCanonicalInstallation([], sources(loaded), ["project"]), [{
+    kind: "create",
+    templateName: "direct-engineer-workflow",
+    projectId: "project",
+  }]);
+
+  const refusal = planCanonicalInstallation([], sources(editedSource), ["project"]);
+  assert.equal(refusal.length, 1);
+  assert.equal(refusal[0]?.kind, "refused");
+  assert.equal(refusal[0]?.kind === "refused" ? refusal[0].rowId : "unset", null);
+  assert.match(
+    refusal[0]?.kind === "refused" ? refusal[0].reason : "",
+    /registered to install prompt generation/u,
+  );
+});
