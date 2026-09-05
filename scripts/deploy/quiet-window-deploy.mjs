@@ -599,9 +599,9 @@ const pruneHistory = () => {
   return { ...result, releases };
 };
 
-export const createDefaultServiceControl = () => createServiceControl({
+const createDefaultServiceControl = (inventory) => createServiceControl({
   platform: resolveServicePlatform(),
-  inventory: resolveServiceInventory(),
+  inventory,
   run: command,
   checked,
   wrapperPath: serviceWrapperPath(REPOSITORY_ROOT),
@@ -682,7 +682,7 @@ const makeWritable = (root) => {
 };
 
 export const createDeployHost = ({
-  serviceControl = createDefaultServiceControl(),
+  serviceControl: providedServiceControl,
   verifyRecoveredServices = verifyStableServicePaths,
   environment = process.env,
   deployRole = resolveDeployRoleOrFail(environment),
@@ -692,7 +692,11 @@ export const createDeployHost = ({
   serviceVerificationWait = sleep,
 } = {}) => {
   const runnerConfig = deployRole === "runner" ? requireRunnerDeployPreflight(environment) : null;
+  // The one inventory this invocation installs, controls and verifies. The
+  // service control is built from it rather than resolving a second one, so a
+  // caller naming an explicit role cannot give the two different inventories.
   const serviceInventory = resolveServiceInventory(environment, deployRole);
+  const serviceControl = providedServiceControl ?? createDefaultServiceControl(serviceInventory);
   const serviceLabels = serviceInventory.labels;
   const localRunnerIds = runnerIdsFromInventory(serviceInventory.entries);
   const scopedBlockingRuns = blockingRunsAdapter

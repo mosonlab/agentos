@@ -2065,3 +2065,15 @@ test("privileged auto-deploy install rejects tampered targets and root service c
     }
   });
 });
+
+test("the exported verification and sudoers entry points refuse an inventory the generator did not produce", () => {
+  const forged = {
+    runnerCount: DEFAULT_INVENTORY.runnerCount,
+    runnerIdPrefix: DEFAULT_INVENTORY.runnerIdPrefix,
+    deployRole: DEFAULT_INVENTORY.deployRole,
+    labels: ["com.agentos.api"],
+    entries: [{ label: "com.agentos.api", runnerIndex: null, runnerId: null, unitName: "com.agentos.api.service", plistName: "com.agentos.api.plist" }],
+  };
+  assert.throws(() => renderSystemdSudoers({ serviceUser: "anneal-test", inventory: forged }), /systemd-service-inventory-invalid/u);
+  assert.throws(() => verifySystemdServiceDefinitions({}, forged), /systemd-service-inventory-invalid/u);
+});

@@ -36,6 +36,7 @@ import {
   MAX_RUNNER_COUNT,
   SERVICE_WRAPPER_FILE_NAME,
   generateServiceInventory,
+  isGeneratedServiceInventory,
   plistNameForLabel,
   resolveRunnerCount,
   resolveRunnerIdPrefix,
@@ -554,7 +555,7 @@ const directiveCount = (text, directive) => (text.match(new RegExp(`^${directive
  * systemd-analyze is an optional stronger parser in the test harness; these
  * checks are always available on both operator platforms. */
 export const verifySystemdServiceDefinitions = (definitions, inventory) => {
-  if (!definitions || !Array.isArray(inventory?.labels) || inventory.labels.length === 0) {
+  if (!definitions || !isGeneratedServiceInventory(inventory) || inventory.labels.length === 0) {
     throw new Error("systemd-service-inventory-invalid");
   }
   for (const label of inventory.labels) {
@@ -632,7 +633,7 @@ export const verifySystemdAutoDeployDefinitions = ({ service, timer }) => {
  * only the source inputs: a plist that still contains a source checkout path
  * or an unresolved placeholder must never reach launchctl. */
 export const verifyServicePlistDefinitions = (definitions, inventory) => {
-  if (!definitions || !Array.isArray(inventory?.labels) || inventory.labels.length === 0) {
+  if (!definitions || !isGeneratedServiceInventory(inventory) || inventory.labels.length === 0) {
     throw new Error("launchd-service-inventory-invalid");
   }
   for (const label of inventory.labels) {
@@ -871,7 +872,7 @@ export const renderSystemdSudoers = ({
   systemctlPath = "/bin/systemctl",
 } = {}) => {
   if (!validAccountName(serviceUser) || serviceUser === "root") throw new Error("systemd-service-user-invalid");
-  if (!Array.isArray(inventory?.entries) || inventory.entries.length === 0) {
+  if (!isGeneratedServiceInventory(inventory) || inventory.entries.length === 0) {
     throw new Error("systemd-service-inventory-invalid");
   }
   if (typeof systemctlPath !== "string" || systemctlPath === "" || !systemctlPath.startsWith("/")) {

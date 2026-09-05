@@ -47,9 +47,18 @@ done
 agentos_load_service_inventory || exit 64
 SERVICE_RUNNER_COUNT="$AGENTOS_RUNNER_SERVICE_COUNT"
 API_LABEL="com.agentos.api"
-agentos_service_entry_for_label "$API_LABEL" || exit 64
-API_UNIT="$AGENTOS_SERVICE_UNIT"
-API_PLIST="$AGENTOS_SERVICE_PLIST"
+# A runner-role host's inventory has no control plane in it. The API checks
+# below then describe a service this host does not run, so they are not asked;
+# a missing label is only a refusal on a host whose inventory names it.
+API_IN_INVENTORY=0
+API_UNIT=""
+API_PLIST=""
+if agentos_service_inventory_has_label "$API_LABEL"; then
+  agentos_service_entry_for_label "$API_LABEL" || exit 64
+  API_IN_INVENTORY=1
+  API_UNIT="$AGENTOS_SERVICE_UNIT"
+  API_PLIST="$AGENTOS_SERVICE_PLIST"
+fi
 ACCOUNT_COUNT="${ACCOUNT_COUNT-8}"
 case "$ACCOUNT_COUNT" in
     ''|*[!0-9]*)
@@ -406,15 +415,19 @@ verify_linux() {
   done
 
   # The API uses runner 1's account/home for ownership locks and workspace GC.
-  label="$API_LABEL"
-  unit="$API_UNIT"
-  account="${ACCOUNT_PREFIX}1"
-  check_reload_linux "$label" "$unit"
-  check_loaded_env_linux "$label" "$unit" RUNNER_WORKSPACE_ROOT "$WORKSPACE_ROOT"
-  check_loaded_env_linux "$label" "$unit" RUNNER_RUN_AS_PREFIX "sudo -u $account -E --"
-  check_loaded_env_linux "$label" "$unit" RUNNER_HOME "$HOME_BASE/$account"
-  check_loaded_env_linux "$label" "$unit" RUNNER_REPO_MIRROR_ROOT "$HOME_BASE/$account/.agentos/repo-mirrors"
-  check_active_linux "$label" "$unit"
+  if [ "$API_IN_INVENTORY" = 1 ]; then
+    label="$API_LABEL"
+    unit="$API_UNIT"
+    account="${ACCOUNT_PREFIX}1"
+    check_reload_linux "$label" "$unit"
+    check_loaded_env_linux "$label" "$unit" RUNNER_WORKSPACE_ROOT "$WORKSPACE_ROOT"
+    check_loaded_env_linux "$label" "$unit" RUNNER_RUN_AS_PREFIX "sudo -u $account -E --"
+    check_loaded_env_linux "$label" "$unit" RUNNER_HOME "$HOME_BASE/$account"
+    check_loaded_env_linux "$label" "$unit" RUNNER_REPO_MIRROR_ROOT "$HOME_BASE/$account/.agentos/repo-mirrors"
+    check_active_linux "$label" "$unit"
+  else
+    pass_linux "$API_LABEL is not in this host's service inventory; this host runs no control plane"
+  fi
 
   step_linux "toolchain reachable by every account, on that runner's own PATH"
   local runner_path cli
@@ -716,8 +729,11 @@ for i in $(seq 1 "$SERVICE_RUNNER_COUNT"); do
   fi
 done
 
-api_plist="$AGENT_DIR/$API_PLIST"
-if [ -f "$api_plist" ]; then
+api_plist=""
+[ "$API_IN_INVENTORY" != 1 ] || api_plist="$AGENT_DIR/$API_PLIST"
+if [ "$API_IN_INVENTORY" != 1 ]; then
+  pass "$API_LABEL is not in this host's service inventory; this host runs no control plane"
+elif [ -f "$api_plist" ]; then
   # The API canonicalises this root for the ownership lock and sweeps it for GC.
   # Disagreement here points the control plane at a directory the runners left.
   check_env "$api_plist" "$API_LABEL" RUNNER_WORKSPACE_ROOT "$WORKSPACE_ROOT"

@@ -81,9 +81,18 @@ fi
 . "$SERVICE_INVENTORY_HELPER"
 agentos_load_service_inventory || exit 64
 RUNNER_SERVICE_COUNT="$AGENTOS_RUNNER_SERVICE_COUNT"
-agentos_service_entry_for_label "$API_LABEL" || exit 64
-API_UNIT="$AGENTOS_SERVICE_UNIT"
-API_PLIST="$AGENTOS_SERVICE_PLIST"
+# A runner-role host's inventory carries no control plane, so there is no API
+# plist or drop-in on it to patch. API_TARGETS carries the label exactly when
+# the inventory does, so the loops below patch what this host actually runs.
+API_IN_INVENTORY=0
+API_PLIST=""
+API_TARGETS=()
+if agentos_service_inventory_has_label "$API_LABEL"; then
+  agentos_service_entry_for_label "$API_LABEL" || exit 64
+  API_IN_INVENTORY=1
+  API_PLIST="$AGENTOS_SERVICE_PLIST"
+  API_TARGETS=("$API_LABEL")
+fi
 
 if [ "$(id -u)" = 0 ]; then
   echo "Do not run this as root: it would rewrite the operator's LaunchAgents as root-owned files." >&2
@@ -428,10 +437,12 @@ linux_main() {
       # manifest is present it is a drift/error, not a reason to skip silently.
       [ -f "$file" ] || fail "$label drop-in is missing at $file"
     done
-    api_dropin="$(dropin_for "$API_LABEL")"
-    api_manifest="$(manifest_for "$API_LABEL")"
-    [ -f "$api_manifest" ] || fail "$API_LABEL has no manifest at $api_manifest; there is no record of what to undo"
-    [ -f "$api_dropin" ] || fail "$API_LABEL drop-in is missing at $api_dropin"
+    if [ "$API_IN_INVENTORY" = 1 ]; then
+      api_dropin="$(dropin_for "$API_LABEL")"
+      api_manifest="$(manifest_for "$API_LABEL")"
+      [ -f "$api_manifest" ] || fail "$API_LABEL has no manifest at $api_manifest; there is no record of what to undo"
+      [ -f "$api_dropin" ] || fail "$API_LABEL drop-in is missing at $api_dropin"
+    fi
   else
     for i in $(seq 1 "$RUNNER_SERVICE_COUNT"); do
       account="$(account_for "$i")"
@@ -460,11 +471,15 @@ linux_main() {
     echo "$failures pre-flight problem(s). Nothing was changed." >&2
     return 1
   fi
-  ok "pre-flight clean: $RUNNER_SERVICE_COUNT runner drop-ins and the API drop-in"
+  if [ "$API_IN_INVENTORY" = 1 ]; then
+    ok "pre-flight clean: $RUNNER_SERVICE_COUNT runner drop-ins and the API drop-in"
+  else
+    ok "pre-flight clean: $RUNNER_SERVICE_COUNT runner drop-ins ($API_LABEL is not in this host's inventory)"
+  fi
 
   if [ "$REVERT" = 1 ]; then
     step "revert pre-flight: has anything moved since the patch?"
-    for label in "${AGENTOS_RUNNER_LABELS[@]}" "$API_LABEL"; do
+    for label in "${AGENTOS_RUNNER_LABELS[@]}" "${API_TARGETS[@]:-}"; do
       [ -n "$label" ] || continue
       file="$(dropin_for "$label")"
       manifest="$(manifest_for "$label")"
@@ -489,7 +504,7 @@ linux_main() {
       return 1
     fi
     step "field-level revert"
-    for label in "${AGENTOS_RUNNER_LABELS[@]}" "$API_LABEL"; do
+    for label in "${AGENTOS_RUNNER_LABELS[@]}" "${API_TARGETS[@]:-}"; do
       [ -n "$label" ] || continue
       file="$(dropin_for "$label")"
       manifest="$(manifest_for "$label")"
@@ -551,19 +566,21 @@ linux_main() {
       labels_touched+=("$label")
     done
 
-    account1="$(account_for 1)"
-    api_dropin="$(dropin_for "$API_LABEL")"
-    api_manifest="$(manifest_for "$API_LABEL")"
-    step "$API_LABEL -> $account1"
-    manifest_records=""
-    linux_desired_records=""
-    linux_set_env "$api_dropin" "$API_LABEL" RUNNER_WORKSPACE_ROOT "$WORKSPACE_ROOT" "$api_manifest"
-    linux_set_env "$api_dropin" "$API_LABEL" RUNNER_HOME "$HOME_BASE/$account1" "$api_manifest"
-    linux_set_env "$api_dropin" "$API_LABEL" RUNNER_REPO_MIRROR_ROOT "$HOME_BASE/$account1/.agentos/repo-mirrors" "$api_manifest"
-    linux_set_env "$api_dropin" "$API_LABEL" RUNNER_RUN_AS_PREFIX "sudo -u $account1 -E --" "$api_manifest"
-    linux_write_dropin "$api_dropin" "$linux_desired_records" "$API_LABEL"
-    linux_write_manifest "$API_LABEL" "$api_dropin"
-    labels_touched+=("$API_LABEL")
+    if [ "$API_IN_INVENTORY" = 1 ]; then
+      account1="$(account_for 1)"
+      api_dropin="$(dropin_for "$API_LABEL")"
+      api_manifest="$(manifest_for "$API_LABEL")"
+      step "$API_LABEL -> $account1"
+      manifest_records=""
+      linux_desired_records=""
+      linux_set_env "$api_dropin" "$API_LABEL" RUNNER_WORKSPACE_ROOT "$WORKSPACE_ROOT" "$api_manifest"
+      linux_set_env "$api_dropin" "$API_LABEL" RUNNER_HOME "$HOME_BASE/$account1" "$api_manifest"
+      linux_set_env "$api_dropin" "$API_LABEL" RUNNER_REPO_MIRROR_ROOT "$HOME_BASE/$account1/.agentos/repo-mirrors" "$api_manifest"
+      linux_set_env "$api_dropin" "$API_LABEL" RUNNER_RUN_AS_PREFIX "sudo -u $account1 -E --" "$api_manifest"
+      linux_write_dropin "$api_dropin" "$linux_desired_records" "$API_LABEL"
+      linux_write_manifest "$API_LABEL" "$api_dropin"
+      labels_touched+=("$API_LABEL")
+    fi
   fi
 
   step "next steps (not done here)"
@@ -638,19 +655,22 @@ for file in "${found[@]:-}"; do
   esac
 done
 
-api_plist="$AGENT_DIR/$API_PLIST"
-if [ -f "$api_plist" ]; then
-  [ -w "$api_plist" ] || fail "$api_plist is not writable by $(id -un)"
-  plutil -lint "$api_plist" >/dev/null 2>&1 || fail "$api_plist is not a valid plist; refusing to edit it"
-else
-  # The API resolves the same root for the ownership lock and for workspace GC.
-  # Isolating the runners while the API still sweeps ~/.agentos/runs is not a
-  # half-done rollout, it is a control plane pointed at the wrong directory.
-  fail "$api_plist does not exist; the API's workspace root cannot be moved with the runners"
+api_plist=""
+if [ "$API_IN_INVENTORY" = 1 ]; then
+  api_plist="$AGENT_DIR/$API_PLIST"
+  if [ -f "$api_plist" ]; then
+    [ -w "$api_plist" ] || fail "$api_plist is not writable by $(id -un)"
+    plutil -lint "$api_plist" >/dev/null 2>&1 || fail "$api_plist is not a valid plist; refusing to edit it"
+  else
+    # The API resolves the same root for the ownership lock and for workspace GC.
+    # Isolating the runners while the API still sweeps ~/.agentos/runs is not a
+    # half-done rollout, it is a control plane pointed at the wrong directory.
+    fail "$api_plist does not exist; the API's workspace root cannot be moved with the runners"
+  fi
 fi
 
 if [ "$REVERT" = 1 ]; then
-  for label in "${targets[@]:-}" "$API_LABEL"; do
+  for label in "${targets[@]:-}" "${API_TARGETS[@]:-}"; do
     [ -n "$label" ] || continue
     manifest="$(manifest_for "$label")"
     [ -f "$manifest" ] || fail "$label has no manifest at $manifest; there is no record of what to undo (see 'Rollback' in the runbook)"
@@ -816,7 +836,7 @@ if [ "$REVERT" = 1 ]; then
   # Checked for every label before the first write. A revert that stops halfway
   # leaves some runners isolated and some not, which is the one state neither
   # this script nor verify.sh can describe in a single sentence.
-  for label in "${targets[@]:-}" "$API_LABEL"; do
+  for label in "${targets[@]:-}" "${API_TARGETS[@]:-}"; do
     [ -n "$label" ] || continue
     file="$(plist_for "$label")"
     manifest="$(manifest_for "$label")"
@@ -846,7 +866,7 @@ if [ "$REVERT" = 1 ]; then
   fi
 
   step "field-level revert"
-  for label in "${targets[@]:-}" "$API_LABEL"; do
+  for label in "${targets[@]:-}" "${API_TARGETS[@]:-}"; do
     [ -n "$label" ] || continue
     file="$(plist_for "$label")"
     manifest="$(manifest_for "$label")"
@@ -938,19 +958,21 @@ else
     labels_touched+=("$label")
   done
 
-  step "$API_LABEL"
-  manifest_records=""
-  backup "$api_plist"
-  set_env "$api_plist" "$API_LABEL" RUNNER_WORKSPACE_ROOT "$WORKSPACE_ROOT" "$(manifest_for "$API_LABEL")"
-  # Claim-side specification verification runs git as runner 1, so it must use
-  # that same principal's home and persistent repository mirror.
-  set_env "$api_plist" "$API_LABEL" RUNNER_HOME "$HOME_BASE/$(account_for 1)" "$(manifest_for "$API_LABEL")"
-  set_env "$api_plist" "$API_LABEL" RUNNER_REPO_MIRROR_ROOT "$HOME_BASE/$(account_for 1)/.agentos/repo-mirrors" "$(manifest_for "$API_LABEL")"
-  # Advisory only: the API reads this to decide whether to warn that
-  # FilesystemGrant has no OS backstop (packages/api/src/files/config.ts).
-  set_env "$api_plist" "$API_LABEL" RUNNER_RUN_AS_PREFIX "sudo -u $(account_for 1) -E --" "$(manifest_for "$API_LABEL")"
-  write_manifest "$API_LABEL" "$api_plist"
-  labels_touched+=("$API_LABEL")
+  if [ "$API_IN_INVENTORY" = 1 ]; then
+    step "$API_LABEL"
+    manifest_records=""
+    backup "$api_plist"
+    set_env "$api_plist" "$API_LABEL" RUNNER_WORKSPACE_ROOT "$WORKSPACE_ROOT" "$(manifest_for "$API_LABEL")"
+    # Claim-side specification verification runs git as runner 1, so it must use
+    # that same principal's home and persistent repository mirror.
+    set_env "$api_plist" "$API_LABEL" RUNNER_HOME "$HOME_BASE/$(account_for 1)" "$(manifest_for "$API_LABEL")"
+    set_env "$api_plist" "$API_LABEL" RUNNER_REPO_MIRROR_ROOT "$HOME_BASE/$(account_for 1)/.agentos/repo-mirrors" "$(manifest_for "$API_LABEL")"
+    # Advisory only: the API reads this to decide whether to warn that
+    # FilesystemGrant has no OS backstop (packages/api/src/files/config.ts).
+    set_env "$api_plist" "$API_LABEL" RUNNER_RUN_AS_PREFIX "sudo -u $(account_for 1) -E --" "$(manifest_for "$API_LABEL")"
+    write_manifest "$API_LABEL" "$api_plist"
+    labels_touched+=("$API_LABEL")
+  fi
 
   if [ "$APPLY" = 1 ]; then
     step "re-read after apply"
@@ -986,13 +1008,15 @@ else
         fi
       done
     done
-    plutil -lint "$api_plist" >/dev/null 2>&1 || fail "$API_LABEL is no longer a valid plist"
-    api_root="$(buddy_get "$api_plist" RUNNER_WORKSPACE_ROOT)"
-    [ "$api_root" = "$WORKSPACE_ROOT" ] || fail "$API_LABEL: RUNNER_WORKSPACE_ROOT is '${api_root:-<unset>}', expected $WORKSPACE_ROOT"
-    api_runner_home="$(buddy_get "$api_plist" RUNNER_HOME)"
-    [ "$api_runner_home" = "$HOME_BASE/$(account_for 1)" ] || fail "$API_LABEL: RUNNER_HOME is '${api_runner_home:-<unset>}', expected $HOME_BASE/$(account_for 1)"
-    api_mirror_root="$(buddy_get "$api_plist" RUNNER_REPO_MIRROR_ROOT)"
-    [ "$api_mirror_root" = "$HOME_BASE/$(account_for 1)/.agentos/repo-mirrors" ] || fail "$API_LABEL: RUNNER_REPO_MIRROR_ROOT is '${api_mirror_root:-<unset>}', expected $HOME_BASE/$(account_for 1)/.agentos/repo-mirrors"
+    if [ "$API_IN_INVENTORY" = 1 ]; then
+      plutil -lint "$api_plist" >/dev/null 2>&1 || fail "$API_LABEL is no longer a valid plist"
+      api_root="$(buddy_get "$api_plist" RUNNER_WORKSPACE_ROOT)"
+      [ "$api_root" = "$WORKSPACE_ROOT" ] || fail "$API_LABEL: RUNNER_WORKSPACE_ROOT is '${api_root:-<unset>}', expected $WORKSPACE_ROOT"
+      api_runner_home="$(buddy_get "$api_plist" RUNNER_HOME)"
+      [ "$api_runner_home" = "$HOME_BASE/$(account_for 1)" ] || fail "$API_LABEL: RUNNER_HOME is '${api_runner_home:-<unset>}', expected $HOME_BASE/$(account_for 1)"
+      api_mirror_root="$(buddy_get "$api_plist" RUNNER_REPO_MIRROR_ROOT)"
+      [ "$api_mirror_root" = "$HOME_BASE/$(account_for 1)/.agentos/repo-mirrors" ] || fail "$API_LABEL: RUNNER_REPO_MIRROR_ROOT is '${api_mirror_root:-<unset>}', expected $HOME_BASE/$(account_for 1)/.agentos/repo-mirrors"
+    fi
     if [ "$failures" -eq 0 ]; then ok "every managed key re-read from disk with the expected value"; fi
   fi
 fi
@@ -1004,8 +1028,12 @@ for label in "${labels_touched[@]:-}"; do
   echo "    launchctl bootout gui/\$(id -u)/$label 2>/dev/null || true"
   echo "    launchctl bootstrap gui/\$(id -u) $(plist_for "$label")"
 done
-echo "  Reload the API first — it canonicalises the root and holds the ownership"
-echo "  lock — then the runners. To reverse, re-run with --revert."
+if [ "$API_IN_INVENTORY" = 1 ]; then
+  echo "  Reload the API first — it canonicalises the root and holds the ownership"
+  echo "  lock — then the runners. To reverse, re-run with --revert."
+else
+  echo "  To reverse, re-run with --revert."
+fi
 echo "  Then: scripts/os-isolation/verify.sh --probe   (it checks the LOADED environment)"
 
 echo

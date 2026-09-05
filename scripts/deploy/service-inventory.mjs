@@ -114,6 +114,35 @@ export const resolveServiceInventory = (
   deployRole,
 });
 
+/** True when the argument is exactly what the generator produces for the inputs
+ * it claims to carry. The exported verification and sudoers entry points render
+ * or approve a privileged grant from an inventory, so an inventory-shaped
+ * literal must not be able to drive them. */
+export const isGeneratedServiceInventory = (inventory) => {
+  if (!inventory || !Array.isArray(inventory.entries) || !Array.isArray(inventory.labels)) return false;
+  let regenerated;
+  try {
+    regenerated = generateServiceInventory({
+      runnerCount: inventory.runnerCount,
+      runnerIdPrefix: inventory.runnerIdPrefix,
+      deployRole: inventory.deployRole,
+    });
+  } catch {
+    return false;
+  }
+  if (regenerated.entries.length !== inventory.entries.length) return false;
+  if (regenerated.labels.length !== inventory.labels.length) return false;
+  return regenerated.entries.every((entry, index) => {
+    const candidate = inventory.entries[index];
+    return inventory.labels[index] === entry.label
+      && candidate?.label === entry.label
+      && candidate.unitName === entry.unitName
+      && candidate.plistName === entry.plistName
+      && candidate.runnerIndex === entry.runnerIndex
+      && candidate.runnerId === entry.runnerId;
+  });
+};
+
 /** Look one label up in a resolved inventory. An unknown label is a refusal:
  * no caller may name a service the inventory does not contain. */
 export const serviceInventoryEntry = (inventory, label) => {

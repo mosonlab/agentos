@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
@@ -8,6 +11,7 @@ import {
   MAX_RUNNER_COUNT,
   formatServiceInventory,
   generateServiceInventory,
+  isGeneratedServiceInventory,
   plistNameForLabel,
   resolveRunnerCount,
   resolveRunnerIdPrefix,
@@ -18,6 +22,7 @@ import {
 } from "./service-inventory.mjs";
 
 const EMITTER = fileURLToPath(new URL("./service-inventory.mjs", import.meta.url));
+const SHELL_FACE = fileURLToPath(new URL("./service-inventory.sh", import.meta.url));
 
 const emit = (environment) => spawnSync(process.execPath, [EMITTER], {
   encoding: "utf8",
@@ -116,4 +121,50 @@ test("the emitter is also where a shell entrypoint reads the installed wrapper p
     assert.equal(refused.status, 64, argv.join(" "));
     assert.match(refused.stderr, /^usage: service-inventory\.mjs/mu);
   }
+});
+
+test("only what the generator produced for the inputs it carries is a service inventory", () => {
+  const inventory = generateServiceInventory({ runnerCount: 2, runnerIdPrefix: "vm-", deployRole: "control-plane" });
+  assert.equal(isGeneratedServiceInventory(inventory), true);
+  for (const forged of [
+    { ...inventory, runnerCount: 3 },
+    { ...inventory, runnerIdPrefix: "other-" },
+    { ...inventory, deployRole: "runner" },
+    { ...inventory, entries: inventory.entries.slice(0, 2), labels: inventory.labels.slice(0, 2) },
+    { ...inventory, labels: [...inventory.labels].reverse() },
+    { labels: ["com.agentos.api"], entries: [{ label: "com.agentos.api", runnerIndex: null, runnerId: null, unitName: "com.agentos.api.service", plistName: "com.agentos.api.plist" }] },
+  ]) {
+    assert.equal(isGeneratedServiceInventory(forged), false, JSON.stringify(forged.labels));
+  }
+});
+
+test("the shell face keeps the emitter's stderr out of the listing it parses", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "agentos-service-inventory-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const bin = join(root, "bin");
+  mkdirSync(bin, { recursive: true });
+  const shim = join(bin, "node");
+  writeFileSync(shim, [
+    "#!/bin/bash",
+    "printf 'ExperimentalWarning: a diagnostic line carrying no tab\\n' >&2",
+    `exec ${JSON.stringify(process.execPath)} "$@"`,
+    "",
+  ].join("\n"));
+  chmodSync(shim, 0o755);
+  const loaded = spawnSync("bash", [
+    "-c",
+    `. ${JSON.stringify(SHELL_FACE)} && agentos_load_service_inventory && printf '%s\\n' "\${AGENTOS_SERVICE_LABELS[@]}"`,
+  ], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      PATH: `${bin}:${process.env.PATH}`,
+      AGENTOS_DEPLOY_ROLE: "runner",
+      AGENTOS_RUNNER_COUNT: "2",
+      AGENTOS_RUNNER_ID_PREFIX: "",
+    },
+  });
+  assert.equal(loaded.status, 0, loaded.stderr);
+  assert.deepEqual(loaded.stdout.trim().split("\n"), ["com.agentos.runner", "com.agentos.runner-2"]);
+  assert.match(loaded.stderr, /ExperimentalWarning/u);
 });

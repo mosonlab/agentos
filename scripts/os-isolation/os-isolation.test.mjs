@@ -591,6 +591,36 @@ test("Linux patch maps runners to accounts and field-level revert preserves unre
   }
 });
 
+test("a runner-role host has no control plane in its inventory and both scripts still run", (t) => {
+  const fixture = makeLinuxFixture(t, { runnerCount: 2, accountCount: 2 });
+  const runnerRole = { ...fixture.environment, AGENTOS_DEPLOY_ROLE: "runner" };
+
+  const verified = runScript("verify.sh", [], runnerRole);
+  assert.notEqual(verified.status, 64, verified.output);
+  assert.doesNotMatch(verified.output, /service-label-unknown/u);
+  assert.match(verified.output, /com\.agentos\.api is not in this host's service inventory/u);
+  assert.match(verified.output, /loaded systemd service wiring/u);
+
+  const runnerStaging = join(fixture.root, "runner-staging");
+  mkdirSync(runnerStaging, { recursive: true });
+  const patched = runScript("patch-runner-plists.sh", ["--apply"], { ...runnerRole, SYSTEMD_STAGING_DIR: runnerStaging });
+  assert.equal(patched.status, 0, patched.output);
+  assert.equal(existsSync(join(runnerStaging, "com.agentos.runner.service.d", "os-isolation.conf")), true);
+  assert.equal(existsSync(join(runnerStaging, "com.agentos.api.service.d")), false);
+
+  // The same fixture on a control-plane host still patches the API drop-in, so
+  // the runner-role result above is the inventory speaking, not a dead branch.
+  const controlPlaneStaging = join(fixture.root, "control-plane-staging");
+  mkdirSync(controlPlaneStaging, { recursive: true });
+  const controlPlane = runScript("patch-runner-plists.sh", ["--apply"], {
+    ...fixture.environment,
+    AGENTOS_DEPLOY_ROLE: "control-plane",
+    SYSTEMD_STAGING_DIR: controlPlaneStaging,
+  });
+  assert.equal(controlPlane.status, 0, controlPlane.output);
+  assert.equal(existsSync(join(controlPlaneStaging, "com.agentos.api.service.d", "os-isolation.conf")), true);
+});
+
 test("Linux rollback refuses wired or uninspectable systemd runners and force is explicit", (t) => {
   const root = mkdtempSync(join(tmpdir(), "agentos-os-rollback-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
