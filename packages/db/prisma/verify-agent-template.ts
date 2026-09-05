@@ -1,4 +1,4 @@
-import { AssigneeType, PrismaClient, RunnerKind, RunnerPreference } from "@prisma/client";
+import { AssigneeType, Prisma, PrismaClient, RunnerKind, RunnerPreference } from "@prisma/client";
 
 import {
   DIRECT_TEMPLATE_NAME,
@@ -16,6 +16,8 @@ import {
   INTEGRATOR_TEMPLATE_NAME,
   integratorBindingValid,
 } from "../src/merge-integrator.js";
+import { stepRole } from "../src/step-role.js";
+import { persistedStepAgentIdentity } from "../src/template-step-fields.js";
 import {
   loadAllTemplateStepSources,
   templateMetadataDifferences,
@@ -62,7 +64,13 @@ type TemplateStepRow = {
   requiresCommit: boolean;
   provisionDependencies: boolean;
   baseFromStepIndex: number | null;
-  assigneeAgent: { id: string; name: string; model: string } | null;
+  assigneeAgent: {
+    id: string;
+    name: string;
+    canonicalRole?: string | null;
+    model: string;
+    runnerPreference: RunnerPreference;
+  } | null;
 };
 
 type TemplateRow = {
@@ -72,6 +80,29 @@ type TemplateRow = {
   variables: string[];
   steps: TemplateStepRow[];
 };
+
+/**
+ * `Agent.canonicalRole` is the column identity is read from, and it arrives in
+ * its own change. Until the generated client carries it, the verifier selects
+ * nothing extra and `persistedStepAgentIdentity` falls back to the Agent name.
+ */
+const AGENT_CANONICAL_ROLE_SELECT: { canonicalRole?: true } = Object.hasOwn(
+  Prisma.AgentScalarFieldEnum as Record<string, unknown>,
+  "canonicalRole",
+)
+  ? { canonicalRole: true }
+  : {};
+
+/**
+ * The compound implementation root is a capability, not a name: the step that
+ * drives implementation from a plan must bind an Agent that runs on the Codex
+ * runner with a `gpt-*` model. `run-open.ts` states the same rule at Run open.
+ */
+const compoundImplementationRootCapable = (
+  agent: { model: string; runnerPreference: RunnerPreference } | null,
+): boolean => agent !== null
+  && agent.runnerPreference === RunnerPreference.CODEX
+  && agent.model.startsWith("gpt-");
 
 const scopedError = (context: VerificationContext, message: string): string => (
   context.partial ? `Project ${context.project.slug}: ${message}` : message
@@ -203,8 +234,8 @@ const specialError = (context: VerificationContext, message: string): Error => n
 const verifyCompoundSpecialChecks = (template: TemplateRow, context: VerificationContext): void => {
   const integrator = template.steps.find((step) => step.stepIndex === INTEGRATOR_STEP_INDEX);
   if (!integrator) throw specialError(context, `template must contain step ${INTEGRATOR_STEP_INDEX}`);
-  if (integrator.assigneeAgent?.name !== INTEGRATOR_AGENT_NAME) {
-    throw specialError(context, `${stepReference(context, template, integrator)} must bind ${INTEGRATOR_AGENT_NAME}; found ${integrator.assigneeAgent?.name ?? "HUMAN"}`);
+  if (persistedStepAgentIdentity(integrator.assigneeAgent) !== INTEGRATOR_AGENT_NAME) {
+    throw specialError(context, `${stepReference(context, template, integrator)} must bind ${INTEGRATOR_AGENT_NAME}; found ${persistedStepAgentIdentity(integrator.assigneeAgent) ?? "HUMAN"}`);
   }
   const integratorAgent = integrator.assigneeAgent;
   if (!integratorAgent) throw specialError(context, `${stepLabel(template, integrator)} has no bound Agent`);
@@ -230,23 +261,29 @@ const verifyCompoundSpecialChecks = (template: TemplateRow, context: Verificatio
     throw specialError(context, `${stepReference(context, template, integrator)} must not claim a spawn policy`);
   }
 
-  const executor = template.steps.find((step) => step.assigneeAgent?.name === "implementation-plan-executioner");
-  if (!executor) throw specialError(context, "template must contain an implementation-plan-executioner step");
+  const executor = template.steps.find((step) => stepRole({ outputKind: step.outputKind }) === "implementation");
+  if (!executor) throw specialError(context, "template must contain a compound implementation root step");
+  if (!compoundImplementationRootCapable(executor.assigneeAgent)) {
+    throw specialError(
+      context,
+      `${stepReference(context, template, executor)} must bind a Codex gpt-* Agent; found ${executor.assigneeAgent === null ? "HUMAN" : `${executor.assigneeAgent.runnerPreference}/${executor.assigneeAgent.model}`}`,
+    );
+  }
   const priorPlan = template.steps.some((step) => (
     step.stepIndex < executor.stepIndex
       && IMPLEMENTATION_PLAN_OUTPUT_KINDS.includes(step.outputKind as typeof IMPLEMENTATION_PLAN_OUTPUT_KINDS[number])
   ));
-  if (!priorPlan) throw specialError(context, "implementation-plan-executioner requires an earlier plan or revised-plan output");
+  if (!priorPlan) throw specialError(context, "the compound implementation root requires an earlier plan or revised-plan output");
 };
 
 const verifyDirectSpecialChecks = (template: TemplateRow, context: VerificationContext): void => {
   const directLast = template.steps.at(-1);
   if (!directLast) throw specialError(context, `${DIRECT_TEMPLATE_NAME} must contain a final step`);
-  if (directLast.assigneeAgent?.name !== INTEGRATOR_AGENT_NAME || directLast.approvalGate !== false) {
+  if (persistedStepAgentIdentity(directLast.assigneeAgent) !== INTEGRATOR_AGENT_NAME || directLast.approvalGate !== false) {
     throw specialError(context, `${stepReference(context, template, directLast)} must end at mechanical merge execution`);
   }
   for (const step of template.steps) {
-    if (!integratorBindingValid(step.assigneeAgent?.name ?? null, {
+    if (!integratorBindingValid(persistedStepAgentIdentity(step.assigneeAgent), {
       stepIndex: step.stepIndex,
       outputKind: step.outputKind,
       taskTemplate: { name: DIRECT_TEMPLATE_NAME },
@@ -324,7 +361,9 @@ const main = async (): Promise<void> => {
           requiresCommit: true,
           provisionDependencies: true,
           baseFromStepIndex: true,
-          assigneeAgent: { select: { id: true, name: true, model: true } },
+          assigneeAgent: {
+            select: { id: true, name: true, model: true, runnerPreference: true, ...AGENT_CANONICAL_ROLE_SELECT },
+          },
         },
         orderBy: { stepIndex: "asc" },
       },
