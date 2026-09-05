@@ -106,14 +106,14 @@ export const SIDEBAR_FOOT = "mt-auto grid gap-[2px] pt-[10px]";
 /* The phone shell. A top bar that carries the project and the runner's one dot,
  * a fixed five-slot tab bar for the four places an operator goes many times a
  * day, and a sheet behind the fifth slot for everything else. Sticky and fixed
- * geometry is stated here once: `MobileTaskList` pins its status strip under
- * the top bar, and `PAGE` / `BOARD_PAGE` clear the tab bar. */
-export const MOBILE_TOPBAR_HEIGHT = 52;
+ * geometry is stated here once: the top bar is 52px, which `MobileTaskList`
+ * repeats as the `top` of its sticky status strip, and `PAGE` / `BOARD_PAGE`
+ * clear the tab bar. */
 export const MOBILE_TOPBAR = "sticky top-0 z-[5] flex h-[52px] items-center gap-[4px] border-b border-[color:var(--border-soft)] bg-sidebar px-[8px]";
 export const MOBILE_TABBAR = "fixed inset-x-0 bottom-0 z-[5] grid grid-cols-5 border-t border-[color:var(--border-soft)] bg-sidebar pb-[env(safe-area-inset-bottom)]";
 export const MOBILE_TAB = "relative flex h-[56px] flex-col items-center justify-center gap-[5px] border-0 bg-transparent text-[10.5px] leading-none text-muted-foreground [&_svg]:size-[20px] [&_svg]:opacity-85";
 export const MOBILE_TAB_ACTIVE = "text-foreground [&_svg]:opacity-100 after:absolute after:top-0 after:h-[2px] after:w-[28px] after:rounded-full after:bg-primary";
-export const MOBILE_TAB_BADGE = "absolute top-[7px] left-[calc(50%+6px)]";
+export const MOBILE_TAB_BADGE = "absolute top-[6px] left-[calc(50%+4px)] inline-grid";
 export const SHEET = "inset-x-0 top-auto bottom-0 left-0 max-h-[85dvh] w-full translate-x-0 translate-y-0 overflow-y-auto rounded-t-[16px] rounded-b-none border-[color:var(--border-soft)] bg-popover px-[10px] pt-[14px] pb-[calc(10px+env(safe-area-inset-bottom))] font-mono";
 export const SHEET_TITLE = "mb-[8px] px-[12px] text-[11.5px] font-normal tracking-[.04em] text-[color:var(--faint)] uppercase";
 export const SHEET_ITEM = "flex w-full items-center gap-[12px] rounded-lg border-0 bg-transparent px-[12px] py-[12px] text-left text-[14px] text-secondary-foreground [&_svg]:flex-none [&_svg]:opacity-85";

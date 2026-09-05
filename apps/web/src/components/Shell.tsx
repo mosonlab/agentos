@@ -86,17 +86,21 @@ export const ThemeCycleButton = ({ className }: { className?: string }): ReactNo
 /** Count meaning and cadence unchanged (spec §4.4.4) — only the transport moved.
  *  The label is there because a bare number beside "Inbox" reads as nothing at
  *  all to a screen reader. */
-const InboxBadge = ({ summaryError, openCount, className }: {
+const InboxBadge = ({ summaryError, openCount, className, bare = false }: {
   summaryError: unknown;
   openCount: number | undefined;
   className: string;
+  /** The tab bar shows the red count alone; the sidebar's grey `COUNT` capsule
+   *  around it is a 32px halo on a 20px icon. */
+  bare?: boolean;
 }): ReactNode => {
   const t = useT();
+  const shell = bare ? className : cn(COUNT, className);
   if (summaryError !== null) {
-    return <span className={cn(COUNT, className)} aria-label={t("sidebar.inbox.unavailable")}><span className={BADGE_COUNT}>!</span></span>;
+    return <span className={shell} aria-label={t("sidebar.inbox.unavailable")}><span className={BADGE_COUNT}>!</span></span>;
   }
   if (openCount === undefined || openCount === 0) return null;
-  return <span className={cn(COUNT, className)} aria-label={t("sidebar.inbox.unread", { n: openCount })}><span className={BADGE_COUNT}>{openCount}</span></span>;
+  return <span className={shell} aria-label={t("sidebar.inbox.unread", { n: openCount })}><span className={BADGE_COUNT}>{openCount}</span></span>;
 };
 
 const Sidebar = ({ path, badge }: { path: string; badge: ReactNode }): ReactNode => {
@@ -156,7 +160,9 @@ const MobileChrome = ({ path, badge, children }: { path: string; badge: ReactNod
           <IconMore />{t("sidebar.nav.more")}
         </button>
       </nav>
-      <Dialog open={open} onOpenChange={setOpen}>
+      {/* Mounted only while open, like `Modal`: a closed Radix dialog in the tree
+          is one more portal root for nothing. */}
+      {open ? <Dialog open onOpenChange={setOpen}>
         <DialogContent className={SHEET}>
           <DialogTitle className={SHEET_TITLE}>{t("sidebar.nav.more")}</DialogTitle>
           <nav className="grid gap-[2px]">
@@ -173,7 +179,7 @@ const MobileChrome = ({ path, badge, children }: { path: string; badge: ReactNod
             <ThemeCycleButton className={SHEET_ITEM} />
           </nav>
         </DialogContent>
-      </Dialog>
+      </Dialog> : null}
     </>
   );
 };
@@ -199,7 +205,7 @@ export const Shell = ({ children }: { children: ReactNode }): ReactNode => {
   if (narrow) {
     return (
       <div className={SHELL}>
-        <MobileChrome path={path} badge={<InboxBadge summaryError={summaryError} openCount={openCount} className={MOBILE_TAB_BADGE} />}>
+        <MobileChrome path={path} badge={<InboxBadge summaryError={summaryError} openCount={openCount} className={MOBILE_TAB_BADGE} bare />}>
           {children}
         </MobileChrome>
       </div>
