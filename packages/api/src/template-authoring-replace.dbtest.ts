@@ -408,3 +408,111 @@ test("replace rejects an empty graph with graph_empty and leaves all side effect
   assert.equal(await db.task.count(), beforeTasks);
   assert.equal(await db.taskActivity.count(), beforeActivities);
 });
+
+test("replace remaps staffing entries by exact output kind and reports the orphans", async () => {
+  const seed = await seedTemplate("replace-staffing");
+  await db.staffingProfile.create({
+    data: {
+      projectId: seed.project.id,
+      taskTemplateId: seed.template.id,
+      name: "Default",
+      isDefault: true,
+      entries: {
+        create: [
+          { outputKind: "implementation", assigneeAgentId: seed.agents[0]!.id, include: null },
+          { outputKind: "sol-findings", assigneeAgentId: seed.agents[1]!.id, include: null },
+          { outputKind: "documentation", assigneeAgentId: seed.agents[2]!.id, include: null },
+        ],
+      },
+    },
+  });
+
+  const result = await request(seed.project.id, seed.template.id, {
+    steps: [
+      replacementStep(seed),
+      {
+        name: "Optional blind review",
+        assigneeType: AssigneeType.AGENT,
+        assigneeAgentId: seed.agents[1]!.id,
+        prompt: "Review blind",
+        approvalGate: false,
+        optional: true,
+        attachmentsFromPrevious: true,
+        priorOutputKinds: ["implementation"],
+        spawnPolicy: null,
+        runner: null,
+        outputKind: "sol-findings",
+        opensPullRequest: false,
+        requiresCommit: false,
+        baseFromStepIndex: 1,
+        layer: 2,
+      },
+    ],
+  });
+  assert.equal(result.status, 200, JSON.stringify(result.body));
+  assert.deepEqual(
+    result.body.warnings.filter((warning: { code: string }) => warning.code === "staffing_profile_entry_dropped"),
+    [{
+      code: "staffing_profile_entry_dropped",
+      message: "Staffing profile Default entry documentation was dropped: the replacement graph has no step producing it",
+      outputKind: "documentation",
+    }],
+  );
+
+  const entries = await db.staffingProfileEntry.findMany({
+    where: { profile: { taskTemplateId: seed.template.id } },
+    orderBy: { outputKind: "asc" },
+  });
+  // The surviving kinds keep their exact opinions; the orphan is gone rather
+  // than re-pointed at a step the operator never chose.
+  assert.deepEqual(
+    entries.map(({ outputKind, assigneeAgentId, include }) => ({ outputKind, assigneeAgentId, include })),
+    [
+      { outputKind: "implementation", assigneeAgentId: seed.agents[0]!.id, include: null },
+      { outputKind: "sol-findings", assigneeAgentId: seed.agents[1]!.id, include: null },
+    ],
+  );
+});
+
+test("replace clears an include flag from a step that stopped being optional", async () => {
+  const seed = await seedTemplate("replace-staffing-optional");
+  await db.staffingProfile.create({
+    data: {
+      projectId: seed.project.id,
+      taskTemplateId: seed.template.id,
+      name: "Default",
+      isDefault: true,
+      entries: { create: [{ outputKind: "sol-findings", assigneeAgentId: null, include: false }] },
+    },
+  });
+  // The seeded graph already has a non-optional `sol-findings` step; replacing
+  // it with itself is enough to prove the flag cannot survive.
+  const result = await request(seed.project.id, seed.template.id, {
+    steps: [
+      replacementStep(seed),
+      {
+        name: "Code review",
+        assigneeType: AssigneeType.AGENT,
+        assigneeAgentId: seed.agents[1]!.id,
+        prompt: "Review the implementation",
+        approvalGate: false,
+        optional: false,
+        attachmentsFromPrevious: true,
+        priorOutputKinds: ["implementation"],
+        spawnPolicy: null,
+        runner: null,
+        outputKind: "sol-findings",
+        opensPullRequest: false,
+        requiresCommit: false,
+        baseFromStepIndex: 1,
+        layer: 2,
+      },
+    ],
+  });
+  assert.equal(result.status, 200, JSON.stringify(result.body));
+  assert.deepEqual(
+    (await db.staffingProfileEntry.findMany({ where: { profile: { taskTemplateId: seed.template.id } } }))
+      .map(({ outputKind, include }) => ({ outputKind, include })),
+    [{ outputKind: "sol-findings", include: null }],
+  );
+});

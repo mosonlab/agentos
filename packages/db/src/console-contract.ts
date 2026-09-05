@@ -76,6 +76,82 @@ export type TaskTemplate<DateTime = string> = {
   steps: TaskTemplateStep<DateTime>[];
 };
 
+/**
+ * One profile opinion about one template step.
+ *
+ * `outputKind` is the exact kind the step declares, never a normalised one:
+ * `foo` and `foo-v2` are separate steps in a custom graph and therefore
+ * separate entries. `assigneeAgentId` null means the profile has no opinion
+ * and the canonical step binding stands. `include` is meaningful only for a
+ * step the template marks optional and is null everywhere else.
+ */
+export type StaffingProfileEntry = {
+  outputKind: string;
+  assigneeAgentId: string | null;
+  include: boolean | null;
+};
+
+/** A named staffing plan for one TaskTemplate. Exactly one profile of a
+ *  template is its default; a template may also have none, in which case
+ *  instantiation uses the canonical step bindings. */
+export type StaffingProfile<DateTime = string> = {
+  id: string;
+  projectId: string;
+  taskTemplateId: string;
+  name: string;
+  isDefault: boolean;
+  createdAt: DateTime;
+  updatedAt: DateTime;
+  entries: StaffingProfileEntry[];
+};
+
+/** The entry shape a write accepts. Both opinion fields are optional so a
+ *  caller can name a step without staffing it, or staff it without touching
+ *  the include flag. */
+export type StaffingProfileEntryInput = {
+  outputKind: string;
+  assigneeAgentId?: string | null;
+  include?: boolean | null;
+};
+
+/** `POST …/staffing-profiles`. `isDefault` defaults to false unless the
+ *  template has no profile yet, where the first one is always the default. */
+export type StaffingProfileCreateInput = {
+  name: string;
+  entries: StaffingProfileEntryInput[];
+  isDefault?: boolean;
+};
+
+/** `PUT /staffing-profiles/:profileId`: a whole-profile replacement. Default
+ *  membership is not part of it; `PATCH` owns that transition. */
+export type StaffingProfileReplaceInput = {
+  name: string;
+  entries: StaffingProfileEntryInput[];
+};
+
+/** `PATCH /staffing-profiles/:profileId`. Only promotion is expressible:
+ *  clearing the default would leave a template with none. */
+export type StaffingProfileDefaultInput = {
+  isDefault: true;
+};
+
+/** Warnings describe the plan being saved and never block the write. Entries
+ *  dropped by a step-graph replacement are reported by that route instead, in
+ *  its own authoring warning shape. */
+export type StaffingProfileWarningCode = "same_agent_implements_and_reviews";
+
+export type StaffingProfileWarning = {
+  code: StaffingProfileWarningCode;
+  message: string;
+};
+
+/** Every write route answers with the saved profile and the warnings the
+ *  save produced; a warning never blocks the write. */
+export type StaffingProfileResponse<DateTime = string> = {
+  profile: StaffingProfile<DateTime>;
+  warnings: StaffingProfileWarning[];
+};
+
 export type InboxChoice = { id: string; label: string };
 
 export type InboxDecision<DateTime = string> = {

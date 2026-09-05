@@ -24,6 +24,7 @@ import { registerGoalsRoutes } from "./routes/goals.js";
 import { registerInboxRoutes } from "./routes/inbox.js";
 import { registerRunnerRoutes } from "./routes/runner.js";
 import { registerSessionRoutes } from "./routes/session.js";
+import { registerStaffingProfileRoutes } from "./routes/staffing-profiles.js";
 import { registerSystemRoutes } from "./routes/system.js";
 import { registerTasksRoutes } from "./routes/tasks.js";
 import { registerTemplateRoutes } from "./routes/templates.js";
@@ -126,6 +127,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   registerAgentsRoutes(app, routeDeps);
   registerGoalsRoutes(app, routeDeps);
   registerTemplateTail();
+  registerStaffingProfileRoutes(app, routeDeps);
 
   registerTasksRoutes(app, routeDeps);
   registerInboxRoutes(app, routeDeps);

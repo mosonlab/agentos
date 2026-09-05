@@ -14,6 +14,8 @@ import {
 } from "@anneal/db";
 import { z } from "zod";
 
+import { installDefaultStaffingProfile } from "./staffing-profiles.js";
+
 /** The public fields accepted by `POST /projects`. */
 export const projectFields = {
   name: z.string().trim().min(1).max(120),
@@ -163,6 +165,20 @@ export const createProjectBootstrap = async (
 
       const plan = planCanonicalInstallation([], templateSources, [createdProject.id]);
       await applyCanonicalInstallation(tx, plan, templateSources);
+      // Every installed template gets its initial "Default" staffing profile
+      // from the bindings just written, so a fresh project instantiates from a
+      // profile rather than from the template rows directly.
+      const installed = await tx.taskTemplate.findMany({
+        where: { projectId: createdProject.id },
+        orderBy: { name: "asc" },
+        select: { id: true },
+      });
+      for (const template of installed) {
+        await installDefaultStaffingProfile(tx, {
+          projectId: createdProject.id,
+          taskTemplateId: template.id,
+        });
+      }
       return createdProject;
     }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
     return { ok: true, project };

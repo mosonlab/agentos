@@ -260,3 +260,36 @@ test("role and template source failures happen before any Project row is written
     assert.equal(await db.project.count({ where: { slug } }), 0, slug);
   }
 });
+
+test("POST /projects installs one default staffing profile per installed template", async () => {
+  const created = await call("POST", "/projects", body("staffing-bootstrap"));
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  const project = created.body as Project;
+
+  const templates = await db.taskTemplate.findMany({ where: { projectId: project.id }, select: { id: true } });
+  const profiles = await db.staffingProfile.findMany({
+    where: { projectId: project.id },
+    include: { entries: { orderBy: { outputKind: "asc" } } },
+  });
+  assert.deepEqual(
+    profiles.map(({ taskTemplateId, name, isDefault }) => ({ taskTemplateId, name, isDefault })),
+    templates.map(({ id }) => ({ taskTemplateId: id, name: "Default", isDefault: true })),
+  );
+
+  // The initial profile is the canonical plan: each step's own binding, and
+  // every optional step kept.
+  const steps = await db.taskTemplateStep.findMany({
+    where: { taskTemplateId: profiles[0]!.taskTemplateId },
+    orderBy: { outputKind: "asc" },
+    select: { outputKind: true, assigneeAgentId: true, optional: true },
+  });
+  assert.ok(steps.length > 0);
+  assert.deepEqual(
+    profiles[0]!.entries.map(({ outputKind, assigneeAgentId, include }) => ({ outputKind, assigneeAgentId, include })),
+    steps.map((step) => ({
+      outputKind: step.outputKind,
+      assigneeAgentId: step.assigneeAgentId,
+      include: step.optional ? true : null,
+    })),
+  );
+});

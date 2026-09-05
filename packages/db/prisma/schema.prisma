@@ -239,7 +239,6 @@ model Project {
   maxSessionsPerTask Int             @default(3)
   specGateDefault    Boolean         @default(false)
   mergeGateDefault   Boolean         @default(false)
-  skipOptionalSteps  Boolean         @default(false)
   spendCap           Decimal?        @db.Decimal(12, 2)
   createdAt          DateTime        @default(now())
   updatedAt          DateTime        @updatedAt
@@ -253,6 +252,7 @@ model Project {
   goals              Goal[]
   runs               Run[]
   chainControls      ChainControl[]
+  staffingProfiles   StaffingProfile[]
 }
 
 model Environment {
@@ -316,6 +316,7 @@ model Agent {
   secretGrants                        AgentSecretGrant[]
   assignedTasks                       Task[]
   templateSteps                       TaskTemplateStep[]
+  staffingProfileEntries              StaffingProfileEntry[]
   sessions                            Session[]
   runs                                Run[]
   inboxMessages                       InboxMessage[]
@@ -511,6 +512,7 @@ model TaskTemplate {
   steps                  TaskTemplateStep[]
   tasks                  Task[]
   fires                  TriggerFire[]
+  staffingProfiles       StaffingProfile[]
 
   @@unique([projectId, name])
   @@index([projectId])
@@ -545,6 +547,49 @@ model TaskTemplateStep {
   tasks                   Task[]
 
   @@unique([taskTemplateId, stepIndex])
+  @@index([assigneeAgentId])
+}
+
+/// One named staffing plan for one TaskTemplate: who runs each step and which
+/// optional steps a chain instantiated from it keeps. Profiles hang off the
+/// template rather than the project so a project may keep several plans for
+/// the same graph; exactly one of a template's profiles is its default, and
+/// instantiation falls back to the canonical step bindings when a template has
+/// no profile at all.
+model StaffingProfile {
+  id             String                 @id @default(cuid())
+  projectId      String
+  taskTemplateId String
+  name           String
+  isDefault      Boolean                @default(false)
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
+  project        Project                @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  taskTemplate   TaskTemplate           @relation(fields: [taskTemplateId], references: [id], onDelete: Cascade)
+  entries        StaffingProfileEntry[]
+
+  @@unique([taskTemplateId, name])
+  @@index([projectId])
+  @@index([taskTemplateId])
+}
+
+/// One profile opinion about one template step, keyed by the step's exact
+/// `outputKind`. Authoring already forbids duplicate output kinds inside a
+/// graph, so the kind identifies the step without depending on its index, and
+/// `foo` and `foo-v2` are deliberately distinct keys. `include` is meaningful
+/// only for steps the template marks optional; it is null everywhere else.
+/// The Agent reference is `Restrict` on purpose: dropping an operator's
+/// staffing decision because an Agent row disappeared would be a silent
+/// fallback to the canonical assignee.
+model StaffingProfileEntry {
+  profileId       String
+  outputKind      String
+  assigneeAgentId String?
+  include         Boolean?
+  profile         StaffingProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  assigneeAgent   Agent?          @relation(fields: [assigneeAgentId], references: [id], onDelete: Restrict)
+
+  @@id([profileId, outputKind])
   @@index([assigneeAgentId])
 }
 

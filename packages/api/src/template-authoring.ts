@@ -10,6 +10,10 @@ import {
 } from "@anneal/db";
 
 import {
+  copyStaffingProfiles,
+  remapStaffingProfiles,
+} from "./staffing-profiles.js";
+import {
   TemplateAuthoringRefusal,
   type TemplateAuthoringRefusalCode,
 } from "./template-authoring-errors.js";
@@ -59,12 +63,15 @@ export type TemplateAuthoringAgent = {
 export type TemplateAuthoringWarningCode =
   | "no_review_step"
   | "same_agent_implements_and_reviews"
-  | "pull_request_without_regression";
+  | "pull_request_without_regression"
+  | "staffing_profile_entry_dropped";
 
 export type TemplateAuthoringWarning = {
   code: TemplateAuthoringWarningCode;
   message: string;
   stepIndex?: number;
+  /** Set only by `staffing_profile_entry_dropped`: the kind that was dropped. */
+  outputKind?: string;
 };
 
 export type TemplateGraphValidation = {
@@ -453,7 +460,7 @@ export const cloneTemplate = async (
         );
       }
 
-      return tx.taskTemplate.create({
+      const clone = await tx.taskTemplate.create({
         data: {
           projectId,
           name,
@@ -491,6 +498,15 @@ export const cloneTemplate = async (
           },
         },
       });
+      // Staffing profiles are part of what a clone is for: the copy is only a
+      // usable starting point if it staffs its steps the way the source did.
+      // The graphs are identical here, so entries carry by exact output kind.
+      await copyStaffingProfiles(tx, {
+        projectId,
+        fromTaskTemplateId: source.id,
+        toTaskTemplateId: clone.id,
+      });
+      return clone;
     });
   } catch (error: unknown) {
     if (isUniqueConstraintError(error)) {
@@ -592,6 +608,16 @@ export const replaceTemplateSteps = async (
     })),
   });
 
+  // Profiles point at output kinds, not step rows, so a replacement remaps
+  // them by exact kind. An entry whose kind the new graph does not produce is
+  // dropped rather than reassigned, and the response says so: a silently
+  // re-pointed staffing decision is worse than a visible gap.
+  const droppedEntries = await remapStaffingProfiles(tx, {
+    taskTemplateId: templateId,
+    outputKinds: normalizedSteps.map((step) => step.outputKind),
+    optionalOutputKinds: normalizedSteps.filter((step) => step.optional).map((step) => step.outputKind),
+  });
+
   const savedTemplate = await tx.taskTemplate.findUniqueOrThrow({
     where: { id: templateId },
     include: {
@@ -601,5 +627,15 @@ export const replaceTemplateSteps = async (
       },
     },
   });
-  return { template: savedTemplate, warnings: validation.warnings };
+  return {
+    template: savedTemplate,
+    warnings: [
+      ...validation.warnings,
+      ...droppedEntries.map(({ profileName, outputKind }): TemplateAuthoringWarning => ({
+        code: "staffing_profile_entry_dropped",
+        message: `Staffing profile ${profileName} entry ${outputKind} was dropped: the replacement graph has no step producing it`,
+        outputKind,
+      })),
+    ],
+  };
 });
