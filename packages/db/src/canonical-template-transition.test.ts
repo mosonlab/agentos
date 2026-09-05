@@ -412,7 +412,7 @@ test("the pull-request workflow has a registered prompt-only generation and curr
   // the retired shape does not read, so it is not a structural difference.
   assert.deepEqual(
     asPersisted(current).map((step, index) => retiredStepShapeDifferences(step, generation.shape[index]!)),
-    [[], ["provisionDependencies"], ["provisionDependencies"], []],
+    [[], ["name", "provisionDependencies"], ["name", "provisionDependencies"], []],
   );
   assert.equal(templatePromptGenerationDigest(current), CANONICAL_SOURCE_PROMPT_GENERATIONS[PR_TEMPLATE_NAME]);
   assert.equal(matchedLegacyGeneration(PR_TEMPLATE_NAME, asPersisted(current)), null);
@@ -501,7 +501,7 @@ test("optional review omission is a registered prompt-only rollover in both temp
     assert.equal(
       legacyGenerationMatches(
         { marker: generation.marker, shape: generation.shape },
-        asPersisted(current).map((step) => ({ ...step, optional: false })),
+        asPersisted(current).map((step, index) => ({ ...step, name: generation.shape[index]!.name, optional: false })),
       ),
       true,
     );
@@ -518,7 +518,7 @@ test("the Astra-low review-fix generation is kept on record and retired from mat
   for (const templateName of Object.keys(LEGACY_TEMPLATE_GENERATIONS) as CanonicalTemplateRegistryName[]) {
     const current = sources.get(templateName);
     assert.ok(current, `${templateName} must load from source`);
-    const generation = LEGACY_TEMPLATE_GENERATIONS[templateName].at(-1);
+    const generation = generationOf(templateName, "pre-astra-low-review-fix");
     assert.ok(generation);
     assert.equal(generation.marker, "pre-astra-low-review-fix");
     assert.equal(generation.retiredByBinding, true, templateName);
@@ -527,11 +527,11 @@ test("the Astra-low review-fix generation is kept on record and retired from mat
     const fixIndex = current.findIndex((step) => step.outputKind === "fixed-implementation");
     assert.equal(current[fixIndex]!.agentName, "senior-dev-astra-low", templateName);
 
-    // Every step of the current graph is structurally the retired shape: the
-    // rebinding left no other trace, which is the whole reason for the flag.
+    // Apart from the later review rename, the rebinding left no structural
+    // trace, which is the reason for the flag.
     assert.deepEqual(
       asPersisted(current).map((step, index) => retiredStepShapeDifferences(step, generation.shape[index]!)),
-      current.map(() => []),
+      current.map((step) => ["sol-findings", "blind-findings"].includes(step.outputKind) ? ["name"] : []),
       templateName,
     );
     assert.equal(legacyGenerationMatches(generation, asPersisted(current)), false, templateName);
@@ -652,4 +652,31 @@ test("a retired generation is identified without its prior-output whitelist", ()
     ),
     true,
   );
+});
+
+
+test("model-neutral review names roll over exactly the deployed shapes and retain repair ordinals", async () => {
+  const sources = await loadAllTemplateStepSources();
+  for (const templateName of Object.keys(LEGACY_TEMPLATE_GENERATIONS) as CanonicalTemplateRegistryName[]) {
+    const current = sources.get(templateName)!;
+    const generation = generationOf(templateName, "model-neutral-review-step-names");
+    const outgoing = asPersisted(current).map((step) => ({
+      ...step,
+      name: step.outputKind === "sol-findings" ? "Code review (Sol)"
+        : step.outputKind === "blind-findings" ? "Code review (Opus blind)" : step.name,
+    }));
+    assert.equal(generation.promptDigest, undefined);
+    assert.equal(matchedLegacyGeneration(templateName, outgoing), generation.marker);
+    assert.equal(matchedLegacyGeneration(templateName, asPersisted(current)), null);
+    assert.deepEqual(canonicalTemplateIdentity(legacyTemplateName(templateName, generation.marker, "row")), {
+      canonicalName: templateName, generation: generation.marker,
+    });
+    for (const outputKind of ["sol-findings", "blind-findings"] as const) {
+      const ordinal = current.findIndex((step) => step.outputKind === outputKind) + 1;
+      assert.equal(canonicalStepOrdinals(templateName, null)?.[outputKind], ordinal);
+      assert.equal(canonicalStepOrdinals(templateName, generation.marker)?.[outputKind], ordinal);
+      assert.equal(current[ordinal - 1]!.name, outputKind === "sol-findings" ? "Code review" : "Blind code review");
+    }
+    assert.equal(templatePromptGenerationDigest(outgoing), CANONICAL_SOURCE_PROMPT_GENERATIONS[templateName]);
+  }
 });
