@@ -281,7 +281,7 @@ test("a parked Step's board card never describes a held Chain", () => {
     chainProgress: progress({ position: 4 }),
   });
   assert.match(markup, /step 4\/9/);
-  assert.doesNotMatch(markup, /Held after layer|Resume Chain|Stop after current layer|Waiting for the operator/);
+  assert.doesNotMatch(markup, /Held after layer|Resume Chain|Hold Chain|Waiting for the operator/);
 });
 
 test("a bound board card names its unresolved predecessor without adding a board column", () => {
