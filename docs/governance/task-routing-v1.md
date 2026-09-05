@@ -200,8 +200,8 @@ own. The board holds either the card or its chain, never both.
 
 - Create it with `assigneeType: HUMAN` so no runner claims it. Its description
   is the brief from `docs/BRIEF-TEMPLATE.md`, plus the `Route:` line when the
-  implementation assignee is non-default. The create API accepts an optional
-  `status` of `BACKLOG` or `TODO` and defaults to `TODO`; pass `status: BACKLOG` to create
+  implementation assignee is non-default. The create API accepts an
+  optional `status` of `BACKLOG` or `TODO` and defaults to `TODO`; pass `status: BACKLOG` to create
   a human Backlog card atomically, without a follow-up PATCH.
 - Dispatch passes the card's name as instantiate `name` and the brief as
   instantiate `description`; the chain implementation task then owns the
