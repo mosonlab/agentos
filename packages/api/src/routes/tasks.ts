@@ -71,6 +71,8 @@ import {
 } from "../canonical-task-output.js";
 import {
   chainProgress,
+  chainStepAgent,
+  chainStepReassignable,
   positions,
   readChainDetail,
   readStepAdmission,
@@ -434,12 +436,13 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
         gateSlot: gateSlotOf(row.templateStep),
         assigneeType: row.assigneeType,
         executionOwner: chainExecutionOwner(row),
-        agent: row.assigneeAgent ? { id: row.assigneeAgent.id, title: row.assigneeAgent.title } : null,
+        agent: chainStepAgent(row),
         archivedAt: row.archivedAt,
         failureReason: row.failureReason,
         latestRun: row.runs[0]
           ? { id: row.runs[0].id, status: row.runs[0].status, runNumber: row.runs[0].runNumber }
           : null,
+        reassignable: chainStepReassignable(admissions.get(row.id)),
         startable: admissions.get(row.id)?.verdict.startable ?? false,
         startAction: admissions.get(row.id)?.verdict.startable
           ? row.status === TaskStatus.BACKLOG ? "recover" : "start"

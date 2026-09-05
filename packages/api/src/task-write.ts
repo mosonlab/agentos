@@ -134,9 +134,54 @@ const assertCompoundImplementationAssignment = async (
   }
 };
 
+/**
+ * §R5. The assignment freeze: a task whose work is already in flight may not
+ * change hands.
+ *
+ * A Run snapshots the Agent it opened with — runner, model, service tier,
+ * prompt and tool grants — so moving the assignee out from under a live Run
+ * leaves a Run executing as one Agent while the board, the cost attribution and
+ * every later retry read another. The guard is per *task*, not per chain: a
+ * sibling step's Run says nothing about this one.
+ *
+ * `ACTIVE_RUN_STATUSES` is the same set the claim query and `startable` read,
+ * so QUEUED and WAITING_INBOX count — a queued Run is already promised to its
+ * Agent, and one waiting on an inbox answer will resume into its snapshot.
+ * Terminal Runs are history and freeze nothing, which is what keeps "retry
+ * after a failure with a different agent" working.
+ *
+ * Called with the Task rows already locked and before the Agent row is taken,
+ * which keeps the one global lock order and makes the Run read decide at the
+ * same serialization point as run creation: `reconcile` and `openRun` take this
+ * same Task row, so one of the two observes the other's committed effect.
+ *
+ * The comparison is against the *locked* row, so a request that restates the
+ * assignment a task already has is not a change and is not refused.
+ */
+const reassignmentBlocked = async (
+  tx: Prisma.TransactionClient,
+  locked: LockedTask,
+  assigneeType: AssigneeType | undefined,
+  assigneeAgentId: string | null | undefined,
+): Promise<string | null> => {
+  const nextType = assigneeType ?? locked.assigneeType;
+  const nextAgentId = assigneeAgentId === undefined ? locked.assigneeAgentId : assigneeAgentId;
+  if (nextType === locked.assigneeType && nextAgentId === locked.assigneeAgentId) return null;
+  const active = await tx.run.findFirst({
+    where: { taskId: locked.id, status: { in: ACTIVE_RUN_STATUSES } },
+    orderBy: [{ runNumber: "desc" }, { id: "desc" }],
+    select: { runNumber: true, status: true },
+  });
+  if (!active) return null;
+  return `Cannot change the assignee while run ${active.runNumber} is ${active.status}; stop or finish it first`;
+};
+
 export type TaskWriteRefusal =
   | { kind: "absent" }
-  | { kind: "assignment-blocked"; reason: string };
+  | { kind: "assignment-blocked"; reason: string }
+  /** §R5. The task is executing right now, so its assignment is frozen. A
+   *  conflict, not a bad request: the same write is accepted once the Run ends. */
+  | { kind: "assignment-active-run"; reason: string };
 
 /** The activity the write is accountable for. `taskId` is the module's to fill:
  *  it is the row the lock was taken on, not something a caller restates. */
@@ -209,6 +254,10 @@ export const writeTask = async <T>(
     const assigneeAgentId = plannedScalar<string | null>(plan.update.assigneeAgentId);
     // Task rows first, then the Agent row — the one global lock order.
     if (assigneeType !== undefined || assigneeAgentId !== undefined) {
+      const activeRunReason = await reassignmentBlocked(tx, locked, assigneeType, assigneeAgentId);
+      if (activeRunReason) {
+        return { ok: false, refusal: { kind: "assignment-active-run", reason: activeRunReason } };
+      }
       await assertCompoundImplementationAssignment(
         tx,
         locked,

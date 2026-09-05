@@ -7,7 +7,6 @@ import { after, before, beforeEach, test } from "node:test";
 import {
   activateChainSuccessor,
   applyInboxDecisionTx,
-  COMPOUND_IMPLEMENTATION_AGENT_NAME,
   DependencyProvisioning,
   enqueueTaskRun,
   INTEGRATOR_AGENT_NAME,
@@ -252,11 +251,15 @@ test("run completion dispatches a bound successor through the production runner 
   assert.equal(await db.run.count({ where: { taskId: fixture.successor.id } }), 1);
 });
 
+// The two bound invariants break in different ways. The merge-execution
+// sentinel is still an identity, so renaming its Agent breaks it; §R14 made
+// the compound implementation root a *capability*, so what breaks it is the
+// Agent losing its Codex `gpt-*` runtime configuration, and a rename does not.
 for (const invariant of [
   {
-    name: "merge-integrator",
-    canonicalAgentName: INTEGRATOR_AGENT_NAME,
-    renamedAgentName: "renamed-merge-integrator",
+    name: "merge-integrator rename",
+    bind: { name: INTEGRATOR_AGENT_NAME },
+    breakBinding: { name: "renamed-merge-integrator" },
     templateName: INTEGRATOR_TEMPLATE_NAME,
     stepIndex: INTEGRATOR_STEP_INDEX,
     outputKind: INTEGRATOR_OUTPUT_KIND,
@@ -264,22 +267,19 @@ for (const invariant of [
     expectedRefusal: "integrator-binding-invalid",
   },
   {
-    name: "compound implementation",
-    canonicalAgentName: COMPOUND_IMPLEMENTATION_AGENT_NAME,
-    renamedAgentName: "renamed-implementation-plan-executioner",
+    name: "compound implementation capability loss",
+    bind: { model: "gpt-6-astra:medium", runnerPreference: "CODEX" },
+    breakBinding: { model: "claude-opus-5:high", runnerPreference: "CLAUDE" },
     templateName: INTEGRATOR_TEMPLATE_NAME,
     stepIndex: 5,
     outputKind: "implementation",
-    expectedReason: /Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner/u,
+    expectedReason: /Compound implementation step requires an active in-project Agent on a Codex gpt-\* model/u,
     expectedRefusal: "compound-implementation-assignee",
   },
 ] as const) {
-  test(`runner completion preserves DONE and parks a post-instantiation ${invariant.name} rename`, async () => {
+  test(`runner completion preserves DONE and parks a post-instantiation ${invariant.name}`, async () => {
     const fixture = await seedBinding({ terminalStatus: TaskStatus.TODO });
-    await db.agent.update({
-      where: { id: fixture.agent.id },
-      data: { name: invariant.canonicalAgentName },
-    });
+    await db.agent.update({ where: { id: fixture.agent.id }, data: invariant.bind });
     const template = await db.taskTemplate.create({ data: {
       projectId: fixture.project.id,
       name: invariant.templateName,
@@ -300,10 +300,7 @@ for (const invariant of [
       where: { id: fixture.successor.id },
       data: { templateId: template.id, templateStepId: step.id },
     });
-    await db.agent.update({
-      where: { id: fixture.agent.id },
-      data: { name: invariant.renamedAgentName },
-    });
+    await db.agent.update({ where: { id: fixture.agent.id }, data: invariant.breakBinding });
     const running = await seedRunningPredecessor(fixture);
 
     const response = await createApp(db).request(`/runner/runs/${running.run.id}/complete`, {

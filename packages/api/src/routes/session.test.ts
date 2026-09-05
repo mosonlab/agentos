@@ -456,3 +456,126 @@ test("GET /runs/:runId/events pages by seq and reports hasMore without a second 
     assert.equal(clamped.where.seq, undefined);
   });
 });
+
+// §R11/§R5: the revalidation capability is keyed on the canonical Step, so a
+// staffing profile may bind any Agent to it and the bound implementation task
+// still resolves. Before this the route dispatched on `run.agent.name`.
+test("GET /session/runs/:runId/status binds the implementation task for any agent on the revalidation step", async () => {
+  await withTokens(async () => {
+    const revalidationStep = {
+      name: "Revalidate the brief",
+      stepIndex: 1,
+      outputKind: "revalidation",
+      priorOutputKinds: [],
+      taskTemplate: { name: "direct-engineer-workflow" },
+    };
+    const callerTask = {
+      id: "task-revalidate",
+      projectId: "project-1",
+      chainId: "chain-1",
+      chainIndex: 0,
+      chainLayer: 0,
+      dispatchAfterTaskId: "task-prior",
+      description: "brief",
+      name: "Revalidate",
+      status: "DOING",
+      approvalGate: false,
+      assigneeAgentId: "agent-anything",
+      templateId: "template-1",
+      templateStepId: "step-1",
+      templateStep: revalidationStep,
+      stepOutput: null,
+    };
+    const implementationTask = {
+      ...callerTask,
+      id: "task-implementation",
+      name: "Implement",
+      chainIndex: 1,
+      chainLayer: 1,
+      dispatchAfterTaskId: null,
+      templateStepId: "step-2",
+      templateStep: {
+        name: "Implement",
+        stepIndex: 2,
+        outputKind: "implementation",
+        priorOutputKinds: ["revalidation"],
+        taskTemplate: { name: "direct-engineer-workflow" },
+      },
+    };
+    const database = {
+      run: {
+        findFirst: async () => ({ id: "run-1", leaseGeneration: 1 }),
+        findUnique: async () => ({
+          id: "run-1",
+          runNumber: 1,
+          maxRunsPerTask: 5,
+          status: "RUNNING",
+          startedAt: new Date("2026-09-05T00:00:00.000Z"),
+          maxDurationMin: 240,
+          stallTimeoutMin: 10,
+          branch: "agentos/task-revalidate/run-1",
+          targetBranch: "main",
+          // Deliberately not the retired `spec-revalidator` identity.
+          agentId: "agent-anything",
+          task: callerTask,
+        }),
+      },
+      task: { findMany: async () => [callerTask, implementationTask] },
+    } as unknown as PrismaClient;
+
+    const response = await createApp(database).request("/session/runs/run-1/status", {
+      headers: { Authorization: "Bearer agos_session_current" },
+    });
+    assert.equal(response.status, 200);
+    const body = await response.json() as { task: { boundImplementationTask?: { id: string; name: string } } };
+    assert.deepEqual(body.task.boundImplementationTask?.id, "task-implementation");
+    assert.deepEqual(body.task.boundImplementationTask?.name, "Implement");
+  });
+});
+
+test("GET /session/runs/:runId/status omits the bound implementation task off the revalidation step", async () => {
+  await withTokens(async () => {
+    let chainReads = 0;
+    const database = {
+      run: {
+        findFirst: async () => ({ id: "run-1", leaseGeneration: 1 }),
+        findUnique: async () => ({
+          id: "run-1",
+          runNumber: 1,
+          maxRunsPerTask: 5,
+          status: "RUNNING",
+          startedAt: new Date("2026-09-05T00:00:00.000Z"),
+          maxDurationMin: 240,
+          stallTimeoutMin: 10,
+          branch: "agentos/task-1/run-1",
+          targetBranch: "main",
+          agentId: "agent-anything",
+          task: {
+            id: "task-1",
+            name: "Implement",
+            status: "DOING",
+            approvalGate: false,
+            chainIndex: 1,
+            templateStep: {
+              name: "Implement",
+              stepIndex: 2,
+              outputKind: "implementation",
+              priorOutputKinds: [],
+              taskTemplate: { name: "direct-engineer-workflow" },
+            },
+            stepOutput: null,
+          },
+        }),
+      },
+      task: { findMany: async () => { chainReads += 1; return []; } },
+    } as unknown as PrismaClient;
+
+    const response = await createApp(database).request("/session/runs/run-1/status", {
+      headers: { Authorization: "Bearer agos_session_current" },
+    });
+    assert.equal(response.status, 200);
+    const body = await response.json() as { task: Record<string, unknown> };
+    assert.equal("boundImplementationTask" in body.task, false);
+    assert.equal(chainReads, 0);
+  });
+});

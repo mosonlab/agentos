@@ -41,9 +41,9 @@ import { FAILURE_REASON_LIMIT, failureReasonText } from "../failure-reason.js";
 import { InboxRunFenceRefusal, suspendForInbox } from "../inbox.js";
 import {
   cancelBoundRevalidationRun,
+  isRevalidationStep,
   patchBoundImplementationDescription,
   readBoundImplementationTask,
-  SPEC_REVALIDATOR_AGENT_NAME,
 } from "../revalidation.js";
 import { cancelRun } from "../run-cancel.js";
 import {
@@ -275,7 +275,6 @@ export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => voi
     const run = await db.run.findUnique({
       where: { id: runId },
       include: {
-        agent: { select: { name: true } },
         task: {
           include: {
             stepOutput: true,
@@ -293,7 +292,10 @@ export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => voi
       },
     });
     if (!run) return context.json({ error: "Run not found" }, 404);
-    const boundImplementationTask = run.agent.name === SPEC_REVALIDATOR_AGENT_NAME && run.task
+    // Keyed on the Step, not on the Agent bound to it: a staffing profile may
+    // put any Agent on the revalidation step, and the capability belongs to the
+    // step. `deriveBoundImplementationTask` re-checks the same predicate.
+    const boundImplementationTask = run.task && isRevalidationStep(run.task.templateStep)
       ? await readBoundImplementationTask(db, run)
       : null;
     if (boundImplementationTask && "message" in boundImplementationTask) {

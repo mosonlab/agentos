@@ -17,7 +17,7 @@
  * takes only the Project row. No existing writer takes a step row and then
  * acquires its template row.
  */
-import { Prisma, type Agent } from "@prisma/client";
+import { Prisma, type Agent, type RunnerPreference } from "@prisma/client";
 
 type Tx = Prisma.TransactionClient;
 
@@ -129,15 +129,37 @@ export const lockAgentRow = async (
   return tx.agent.findUnique({ where: { id: agentId } });
 };
 
-/** Takes the same mutex for a whole step list in one statement. */
+/**
+ * Takes the same mutex for a whole step list in one statement.
+ *
+ * `model` and `runnerPreference` are projected because the capability
+ * invariants a batch caller re-checks — the compound implementation root's
+ * Codex `gpt-*` requirement — are properties of the runtime configuration, not
+ * of the Agent's name. Reading them from an unlocked preflight would let an
+ * Agent's model change between the check and the write the lock exists to
+ * order.
+ */
 export const lockAgentRows = async (
   tx: Tx,
   agentIds: string[],
-): Promise<Map<string, { name: string; projectId: string; archivedAt: Date | null }>> => {
+): Promise<Map<string, {
+  name: string;
+  projectId: string;
+  archivedAt: Date | null;
+  model: string;
+  runnerPreference: RunnerPreference;
+}>> => {
   const unique = [...new Set(agentIds)];
   if (unique.length === 0) return new Map();
-  const rows = await tx.$queryRaw<Array<{ id: string; name: string; projectId: string; archivedAt: Date | null }>>`
-    SELECT "id", "name", "projectId", "archivedAt" FROM "Agent"
+  const rows = await tx.$queryRaw<Array<{
+    id: string;
+    name: string;
+    projectId: string;
+    archivedAt: Date | null;
+    model: string;
+    runnerPreference: RunnerPreference;
+  }>>`
+    SELECT "id", "name", "projectId", "archivedAt", "model", "runnerPreference" FROM "Agent"
     WHERE "id" = ANY(${unique})
     ORDER BY "id" FOR UPDATE
   `;
@@ -145,6 +167,8 @@ export const lockAgentRows = async (
     name: row.name,
     projectId: row.projectId,
     archivedAt: row.archivedAt,
+    model: row.model,
+    runnerPreference: row.runnerPreference,
   }]));
 };
 

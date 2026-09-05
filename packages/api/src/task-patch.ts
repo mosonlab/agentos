@@ -1,8 +1,8 @@
 import {
   activateChainSuccessor,
   AssigneeType,
-  COMPOUND_IMPLEMENTATION_AGENT_NAME,
   COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
+  COMPOUND_IMPLEMENTATION_ASSIGNEE_MESSAGE,
   compoundImplementationAssigneeValid,
   gateSlotOf,
   gateToggleActivity,
@@ -161,13 +161,24 @@ type GatePatchPlan = {
   activity: TaskActivityInput | null;
 };
 
-/** A refusal from `writeTask` in this action's terms: the task is gone, or the
- *  assignee the request named may not be written onto it. */
-const taskWriteRefusal = (refusal: TaskWriteRefusal): Refusal => (
-  refusal.kind === "absent"
-    ? { reason: "not-found", message: "Task not found" }
-    : { reason: "invalid-request", message: refusal.reason }
-);
+/** A refusal from `writeTask` in this action's terms: the task is gone, the
+ *  assignee the request named may not be written onto it, or the task is busy.
+ *
+ *  The busy case is a `conflict` and not an `invalid-request`: nothing about
+ *  the request is malformed, and the identical body succeeds once the Run this
+ *  task is executing reaches a terminal status. All four PATCH branches route
+ *  their `writeTask` refusal through here, so the 409 covers the generic
+ *  `assigneeAgentId: null` path as well as the named-assignee ones. */
+const taskWriteRefusal = (refusal: TaskWriteRefusal): Refusal => {
+  switch (refusal.kind) {
+    case "absent":
+      return { reason: "not-found", message: "Task not found" };
+    case "assignment-active-run":
+      return { reason: "conflict", message: refusal.reason };
+    case "assignment-blocked":
+      return { reason: "invalid-request", message: refusal.reason };
+  }
+};
 
 const gatePatchPlan = (
   locked: {
@@ -242,7 +253,7 @@ export const patchTask = async (
     )) {
       return {
         reason: "compound-implementation-assignee",
-        message: `Compound implementation step must remain assigned to the active in-project Agent ${COMPOUND_IMPLEMENTATION_AGENT_NAME}`,
+        message: COMPOUND_IMPLEMENTATION_ASSIGNEE_MESSAGE,
         detail: { code: COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE },
       };
     }

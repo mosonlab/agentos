@@ -190,6 +190,9 @@ test("instantiating the canonical feature template copies every layer and writes
       ? [{ id: template.id, projectId: "project-1", name: template.name }]
       : [...agents.values()].map((agent) => ({
         id: agent.id, name: agent.name, projectId: "project-1", archivedAt: null,
+        // §R14 is a capability check, so the locked Agent projection carries
+        // the runtime configuration the compound root is validated against.
+        model: agent.model, runnerPreference: agent.runnerPreference,
         agentId: agent.id, repoId: "repo-1",
       })),
     taskTemplate: { findFirst: async () => template },

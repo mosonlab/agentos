@@ -242,7 +242,10 @@ const requestCompoundApproval = (
     body: JSON.stringify({ decision: "approve", requestId }),
   }));
 
-test("compound Implementation PATCH rejects every non-executioner assignee without changing the task", async () => {
+// §R14: the compound implementation root is bound by capability. A staffing
+// profile may put any Codex gpt-* Agent on it; an Agent whose Run would not
+// reach the Codex CLI is refused whatever it is called.
+test("compound Implementation PATCH rejects an assignee that cannot run Codex gpt-*", async () => {
   const { senior, successor } = await seedCompoundImplementationApproval(true);
   const before = await db.task.findUniqueOrThrow({
     where: { id: successor.id },
@@ -261,7 +264,7 @@ test("compound Implementation PATCH rejects every non-executioner assignee witho
   }));
   assert.equal(response.status, 409);
   assert.deepEqual(await response.json(), {
-    error: "Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner",
+    error: "Compound implementation step requires an active in-project Agent on a Codex gpt-* model",
     code: COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
   });
   assert.deepEqual(await db.task.findUniqueOrThrow({
@@ -274,6 +277,18 @@ test("compound Implementation PATCH rejects every non-executioner assignee witho
       updatedAt: true,
     },
   }), before);
+});
+
+test("compound Implementation PATCH accepts a differently named Codex gpt-* assignee", async () => {
+  const { senior, successor } = await seedCompoundImplementationApproval(true);
+  await db.agent.update({ where: { id: senior.id }, data: { runnerPreference: "CODEX" } });
+  const response = await withOperatorToken(() => createApp(db).request(`/tasks/${successor.id}`, {
+    method: "PATCH",
+    headers: { Authorization: "Bearer operator-db-token", "Content-Type": "application/json" },
+    body: JSON.stringify({ assigneeAgentId: senior.id }),
+  }));
+  assert.equal(response.status, 200, await response.text());
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: successor.id } })).assigneeAgentId, senior.id);
 });
 
 test("direct-engineer-workflow Implementation PATCH still accepts senior-dev-high", async () => {
@@ -326,7 +341,7 @@ for (const route of ["patch", "inbox"] as const) {
     assert.deepEqual(await response.json(), route === "patch"
       ? { error: "Chain task statuses are controlled by chain execution" }
       : {
-          error: "Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner",
+          error: "Compound implementation step requires an active in-project Agent on a Codex gpt-* model",
           code: COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
         });
     assert.deepEqual(await compoundApprovalState(predecessor.id, successor.id, gate.id), before);
@@ -351,7 +366,7 @@ for (const route of ["patch", "inbox"] as const) {
     assert.deepEqual(await response.json(), route === "patch"
       ? { error: "Chain task statuses are controlled by chain execution" }
       : {
-          error: "Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner",
+          error: "Compound implementation step requires an active in-project Agent on a Codex gpt-* model",
           code: COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
         });
     assert.deepEqual(await compoundApprovalState(predecessor.id, successor.id, gate.id), before);
@@ -729,7 +744,7 @@ test("runner completion durably parks a layer successor refused by the compound 
   assert.equal(parked.status, "REVIEW");
   assert.equal(
     parked.failureReason,
-    "Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner",
+    "Compound implementation step requires an active in-project Agent on a Codex gpt-* model",
   );
   const refusalActivity = await db.taskActivity.findFirstOrThrow({
     where: { taskId: successor.id, body: { contains: "Run birth was refused" } },

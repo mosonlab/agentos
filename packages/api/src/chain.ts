@@ -523,8 +523,36 @@ export const readStepAdmission = async (
   refusal: { reason: "not-found", message: "Task not found" },
 };
 
+/** The `ChainStep.agent` projection, in one place the contract's shape and the
+ *  query's select cannot drift apart. */
+export const chainStepAgent = (row: {
+  assigneeAgent: { id: string; title: string; name: string; model: string } | null;
+}): { id: string; title: string; name: string; model: string } | null => (
+  row.assigneeAgent === null
+    ? null
+    : {
+      id: row.assigneeAgent.id,
+      title: row.assigneeAgent.title,
+      name: row.assigneeAgent.name,
+      model: row.assigneeAgent.model,
+    }
+);
+
+/**
+ * §R5, read side: may this step's assignee be changed right now?
+ *
+ * The same fact the write guard in `task-write.ts` decides on — no Run of this
+ * task in `ACTIVE_RUN_STATUSES` — projected from the admission facts the chain
+ * route already reads, so the console never offers a reassignment the PATCH
+ * would answer with a 409. A step whose admission facts are missing fails
+ * closed: an unknown Run state must not read as "safe to reassign".
+ */
+export const chainStepReassignable = (admission: FoundStepAdmission | undefined): boolean => (
+  admission !== undefined && !admission.facts.active
+);
+
 const chainDetailInclude = {
-  assigneeAgent: { select: { id: true, title: true, archivedAt: true } },
+  assigneeAgent: { select: { id: true, title: true, name: true, model: true, archivedAt: true } },
   templateStep: {
     select: {
       name: true,

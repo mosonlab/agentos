@@ -1312,6 +1312,11 @@ curl "$BASE_URL/tasks/$TASK_ID/startability" -H "Authorization: Bearer $OPERATOR
   when the persisted barrier prevents that Step from starting, otherwise
   `null`. The UI uses this field with `startable` and `startAction`; it does not
   recompute the held-layer barrier.
+- Each Step's `agent` object carries `id`, `title`, the Agent's `name` (its
+  slug) and `model` (the stored `model:effort` string), or is `null` for a Step
+  with no Agent assignee. Each Step also carries `reassignable`: whether
+  `PATCH /tasks/:taskId` would accept an assignee change right now, which is
+  true exactly when the Step's task has no Run in an active status.
 
 ```sh
 curl "$BASE_URL/tasks/$TASK_ID/chain" -H "Authorization: Bearer $OPERATOR_TOKEN"
@@ -1598,6 +1603,18 @@ must follow [Continuing from a delivered branch](BRIEF-TEMPLATE.md#continuing-fr
 - A `maxSessionsPerTask` or `description` change is recorded as an operator
   TaskActivity naming the budget's previous and new value, or stating that the
   prompt was edited. The prompt text itself is not copied into the activity.
+- A change to `assigneeType` or `assigneeAgentId`, including clearing the
+  assignee to `null`, is refused with `409 Conflict` while the task has a Run in
+  an active status (`QUEUED`, `RUNNING`, or `WAITING_INBOX`); the message names
+  the run number and its status. The guard is per task, not per Chain, and a
+  request that restates the assignment the task already has is not a change. A
+  task whose Runs are all terminal accepts the reassignment, and the next retry
+  opens its Run with the new Agent's runner, model, and service tier.
+- The compound implementation step accepts any active, in-project Agent whose
+  Run would reach the Codex CLI on a `gpt-*` model. Any other assignee is
+  refused with `409 Conflict`, code
+  `COMPOUND_IMPLEMENTATION_ASSIGNEE_INVALID`. The Agent's name is not part of
+  this rule.
 
 ```sh
 curl -X PATCH "$BASE_URL/tasks/$TASK_ID" \

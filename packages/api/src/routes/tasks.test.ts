@@ -174,6 +174,7 @@ const retryRequest = async (
     rolePrompt: string;
     archivedAt?: Date | null;
     name?: string;
+    projectId?: string;
   } | null,
   templateStep: {
     runner: RunnerKind | null;
@@ -326,10 +327,14 @@ test("task PATCH names and rejects an invalid compound implementation assignee b
       chainId: "chain-1",
       approvalGate: false,
     };
+    // §R14: what disqualifies this assignee is its runtime configuration, not
+    // its name — a Claude agent cannot execute the compound implementation root.
     const senior = {
       id: "senior-1",
       projectId: before.projectId,
-      name: "senior-dev-high",
+      name: "senior-dev-opus-medium",
+      model: "claude-opus-5:medium",
+      runnerPreference: RunnerPreference.CLAUDE,
       archivedAt: null,
     };
     const database = {
@@ -351,7 +356,7 @@ test("task PATCH names and rejects an invalid compound implementation assignee b
     });
     assert.equal(response.status, 409);
     assert.deepEqual(await response.json(), {
-      error: "Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner",
+      error: "Compound implementation step requires an active in-project Agent on a Codex gpt-* model",
       code: COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
     });
     assert.equal(updates, 0);
@@ -720,15 +725,18 @@ test("operator retry honors a template-step runner override", async () => {
   });
 });
 
-test("operator retry refuses a compound implementation Step assigned to a non-executioner Agent", async () => {
+// §R14 replaced the name-based invariant with a capability predicate, so the
+// pair below is the whole rule: any Codex `gpt-*` Agent may hold the compound
+// implementation root, and no other Agent may, whatever it is called.
+test("operator retry refuses a compound implementation Step whose assignee cannot run Codex gpt-*", async () => {
   await withTokens(async () => {
     const { response, created } = await retryRequest({
       id: "agent-1",
-      model: "gpt-5.6-sol:high",
-      runnerPreference: RunnerPreference.CODEX,
+      model: "claude-opus-5:medium",
+      runnerPreference: RunnerPreference.CLAUDE,
       foundationalPrompt: "foundation",
       rolePrompt: "role",
-      name: "senior-dev",
+      name: "senior-dev-opus-medium",
     }, {
       runner: RunnerKind.CODEX,
       stepIndex: 5,
@@ -737,10 +745,32 @@ test("operator retry refuses a compound implementation Step assigned to a non-ex
     });
     assert.equal(response.status, 409);
     assert.deepEqual(await response.json(), {
-      error: "Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner",
+      error: "Compound implementation step requires an active in-project Agent on a Codex gpt-* model",
       code: "COMPOUND_IMPLEMENTATION_ASSIGNEE_INVALID",
     });
     assert.equal(created, undefined);
+  });
+});
+
+test("operator retry admits any Codex gpt-* Agent on a compound implementation Step", async () => {
+  await withTokens(async () => {
+    const { response, created } = await retryRequest({
+      id: "agent-1",
+      projectId: "project-1",
+      model: "gpt-5.6-sol:high",
+      runnerPreference: RunnerPreference.CODEX,
+      foundationalPrompt: "foundation",
+      rolePrompt: "role",
+      name: "senior-dev-sol-high",
+    }, {
+      runner: RunnerKind.CODEX,
+      stepIndex: 5,
+      outputKind: "implementation",
+      taskTemplate: { name: "compound-engineer-workflow" },
+    });
+    assert.equal(response.status, 201, JSON.stringify(await response.json()));
+    assert.equal(created?.model, "gpt-5.6-sol:high");
+    assert.equal(created?.runner, RunnerKind.CODEX);
   });
 });
 

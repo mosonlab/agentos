@@ -18,8 +18,22 @@ import {
 import { type Refusal } from "./refusal.js";
 import { legacyBriefMigration, readBrief, rewriteBrief } from "./task-brief.js";
 
-/** The only Agent identity allowed to use the revalidation capability. */
-export const SPEC_REVALIDATOR_AGENT_NAME = "spec-revalidator";
+/**
+ * The one canonical Step the revalidation capability belongs to.
+ *
+ * Keyed on the template step, never on the Agent bound to it: a staffing
+ * profile may bind any Agent to any step, so an Agent name is no longer an
+ * identity the platform can gate a capability on. What makes this capability
+ * safe is the step — its canonical template, its position and its output kind —
+ * and that is exactly what a profile cannot move.
+ */
+export const isRevalidationStep = (templateStep: {
+  stepIndex: number;
+  outputKind: string;
+  taskTemplate: { name: string };
+} | null | undefined): boolean => templateStep?.outputKind === "revalidation"
+  && templateStep.stepIndex === 1
+  && templateStep.taskTemplate.name === "direct-engineer-workflow";
 
 const revalidationTaskSelect = {
   id: true,
@@ -46,7 +60,7 @@ const revalidationTaskSelect = {
 
 export type RevalidationTask = Prisma.TaskGetPayload<{ select: typeof revalidationTaskSelect }>;
 
-type RevalidationCaller = RevalidationTask & { agentId: string; agentName: string };
+type RevalidationCaller = RevalidationTask & { agentId: string };
 
 export type BoundImplementationTask = Pick<
   RevalidationTask,
@@ -81,15 +95,10 @@ export const deriveBoundImplementationTask = (
   caller: RevalidationCaller,
   chainRows: readonly RevalidationTask[],
 ): BoundImplementationTask | Refusal => {
-  if (caller.agentName !== SPEC_REVALIDATOR_AGENT_NAME) {
-    return callerRefusal("Only the spec-revalidator Agent may use revalidation capability");
-  }
   if (caller.assigneeAgentId !== caller.agentId) {
-    return callerRefusal("Revalidation Run is not assigned to its spec-revalidator Agent");
+    return callerRefusal("Revalidation Run is not assigned to its own task's Agent");
   }
-  if (caller.templateStep?.outputKind !== "revalidation"
-    || caller.templateStep.stepIndex !== 1
-    || caller.templateStep.taskTemplate.name !== "direct-engineer-workflow") {
+  if (!isRevalidationStep(caller.templateStep)) {
     return callerRefusal("Revalidation capability belongs only to the canonical direct-engineer-workflow revalidation step");
   }
   if (caller.chainId === null || caller.chainIndex === null || caller.dispatchAfterTaskId === null) {
@@ -199,7 +208,6 @@ const callerSelect = {
   id: true,
   agentId: true,
   leaseGeneration: true,
-  agent: { select: { name: true } },
   task: { select: revalidationTaskSelect },
 } as const satisfies Prisma.RunSelect;
 
@@ -207,7 +215,7 @@ type RevalidationRun = Prisma.RunGetPayload<{ select: typeof callerSelect }>;
 
 const callerFromRun = (run: RevalidationRun): RevalidationCaller | Refusal => {
   if (!run.task) return { reason: "conflict", message: "Revalidation Run has no task" };
-  return { ...run.task, agentId: run.agentId, agentName: run.agent.name };
+  return { ...run.task, agentId: run.agentId };
 };
 
 const sessionGenerationRefusal = (
@@ -256,7 +264,7 @@ const lockedRevalidationTarget = async (
   if (!currentCaller) {
     return failureActivity(tx, caller, fence, { reason: "not-found", message: "Revalidation task not found" });
   }
-  const lockedCaller = { ...currentCaller, agentId: run.agentId, agentName: run.agent.name };
+  const lockedCaller = { ...currentCaller, agentId: run.agentId };
   const rows = await loadChainRows(tx, currentCaller);
   const target = deriveBoundImplementationTask(lockedCaller, rows);
   if ("message" in target) return failureActivity(tx, lockedCaller, fence, target);
