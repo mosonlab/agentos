@@ -114,6 +114,10 @@ const createProject = async (options: {
   agents?: readonly string[];
   template?: boolean;
   noncanonicalInventory?: boolean;
+  /** Install the agents with their `canonicalRole` recorded. Without it they
+   *  carry the role only in their name, which is the pre-column shape the
+   *  verifier still adopts. */
+  identified?: boolean;
 } = {}): Promise<ProjectFixture> => {
   const project = await prisma.project.create({
     data: {
@@ -131,6 +135,7 @@ const createProject = async (options: {
       data: {
         projectId: project.id,
         environmentId: environment.id,
+        ...(options.identified ? { canonicalRole: source.canonicalRole } : {}),
         name: source.name,
         title: source.title,
         model: source.model,
@@ -642,4 +647,59 @@ test("unknown --project id refuses with only the requested id", async () => {
   assert.notEqual(result.status, 0, result.output);
   assert.match(result.output, new RegExp(unknownId, "u"));
   assert.doesNotMatch(result.output, /Project [a-z0-9-]+:/u);
+});
+
+test("--project reads canonical identity from the role column, not the editable name", async () => {
+  await withProject({ agents: partialRoleNames, identified: true }, async (fixture) => {
+    const agent = fixture.agents.get("senior-dev-luna-max")!;
+    // R9: name and title are the operator's once `customizedFields` claims
+    // them, so a renamed and retitled Agent is still this role, verified.
+    await prisma.agent.update({
+      where: { id: agent.id },
+      data: { name: "house-implementer", title: "House implementer", customizedFields: ["name", "title"] },
+    });
+    const renamed = verify(fixture.id);
+    assert.equal(renamed.status, 0, renamed.output);
+    assert.match(renamed.output, /4 active agents/u);
+
+    // The freed slug may then be taken by an operator's own Agent. It is not
+    // this role, and the verifier must keep reading the row that is.
+    await prisma.agent.create({
+      data: {
+        projectId: fixture.id,
+        environmentId: fixture.environmentId,
+        name: "senior-dev-luna-max",
+        title: "Operator local implementer",
+        model: "custom-operator-model",
+        runnerPreference: RunnerPreference.AUTO,
+        inboxAccess: false,
+        foundationalPrompt: "operator foundational prompt",
+        rolePrompt: "operator role prompt",
+      },
+    });
+    const squatted = verify(fixture.id);
+    assert.equal(squatted.status, 0, squatted.output);
+    assert.match(squatted.output, /4 active agents/u);
+
+    // The customization mark is what makes it an override: withdraw it and the
+    // same two fields are drift again, reported against the renamed row.
+    await prisma.agent.update({ where: { id: agent.id }, data: { customizedFields: [] } });
+    const unmarked = verify(fixture.id);
+    assert.notEqual(unmarked.status, 0, unmarked.output);
+    assert.match(unmarked.output, new RegExp(`house-implementer \\(${agent.id}\\)`, "u"));
+    assert.match(unmarked.output, /name\/title differs from canonical defaults without an operator override/u);
+  });
+});
+
+test("--project accepts a marked title customization on a legacy, unidentified row", async () => {
+  await withProject({ agents: partialRoleNames }, async (fixture) => {
+    const agent = fixture.agents.get("code-reviewer-sol-high")!;
+    await prisma.agent.update({
+      where: { id: agent.id },
+      data: { title: "House reviewer", customizedFields: ["title"] },
+    });
+    const customized = verify(fixture.id);
+    assert.equal(customized.status, 0, customized.output);
+    assert.match(customized.output, /4 active agents/u);
+  });
 });

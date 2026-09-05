@@ -124,6 +124,7 @@ export * from "./provider-terminal.js";
 export * from "./agent-sources.js";
 export * from "./agent-contract.js";
 export * from "./template-sources.js";
+export * from "./canonical-agent-lookup.js";
 export * from "./canonical-template-transition.js";
 export * from "./canonical-template-installation.js";
 export * from "./canonical-output-schema.js";

@@ -1,5 +1,6 @@
 import { AssigneeType, Prisma, RunStatus, TaskStatus } from "@prisma/client";
 
+import { findCanonicalAgent } from "./canonical-agent-lookup.js";
 import { canonicalStepDrift } from "./canonical-step-adoption.js";
 import {
   legacyTemplateName,
@@ -156,14 +157,7 @@ const writeCanonicalTemplate = async (
     // carries its role in its name, which is the fallback.
     const assigneeAgentId = step.agentName === null
       ? null
-      : (await tx.agent.findFirst({
-        where: {
-          projectId,
-          archivedAt: null,
-          OR: [{ canonicalRole: step.agentName }, { canonicalRole: null, name: step.agentName }],
-        },
-        select: { id: true },
-      }))?.id ?? null;
+      : (await findCanonicalAgent(tx, { projectId, canonicalRole: step.agentName, activeOnly: true }))?.id ?? null;
     if (step.agentName !== null && assigneeAgentId === null) {
       throw scopedError(projectId, `Canonical template ${templateName} step ${step.stepIndex} cannot bind ${step.agentName}: active Agent was not found`);
     }

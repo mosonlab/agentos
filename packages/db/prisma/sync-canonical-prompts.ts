@@ -10,6 +10,7 @@ import { resolve } from "node:path";
 
 import { catalogRunnerForModel } from "../src/agent-contract.js";
 import { loadAgentSources, roleSourceStructureDifferences, type AgentSources, type RoleSource } from "../src/agent-sources.js";
+import { findCanonicalAgent } from "../src/canonical-agent-lookup.js";
 import {
   canonicalStepAdoptions,
   canonicalStepDrift,
@@ -79,8 +80,16 @@ const sortedProjectRows = (rows: readonly ProjectRow[]): ProjectRow[] => [...row
 
 const projectError = (project: ProjectRow, message: string): Error => new Error(`Project ${project.slug}: ${message}`);
 
+/**
+ * A persisted step's binding identity is `canonicalRole` when it has one, so
+ * the column is selected wherever that identity is compared. Reading only
+ * `name` reported every legitimately renamed canonical Agent as drift and made
+ * each sync re-adopt a binding that never changed.
+ */
+const stepAgentIdentitySelect = { name: true, canonicalRole: true } as const;
+
 const transitionStepInclude = {
-  assigneeAgent: { select: { name: true } },
+  assigneeAgent: { select: stepAgentIdentitySelect },
   _count: { select: { tasks: true } },
 } as const;
 
@@ -528,7 +537,7 @@ const syncCanonicalTemplates = async (
           prompt: true,
           layer: true,
           assigneeAgentId: true,
-          assigneeAgent: { select: { name: true } },
+          assigneeAgent: { select: stepAgentIdentitySelect },
           assigneeType: true,
           approvalGate: true,
           optional: true,
@@ -578,16 +587,10 @@ const syncCanonicalTemplates = async (
           if (adoption.write.kind === "bind-agent") {
             // `adoption.write.agentName` is the role file name, and `name` is
             // operator-editable, so the target is resolved by canonical role.
-            const assignee = await tx.agent.findFirst({
-              where: {
-                projectId: template.projectId,
-                archivedAt: null,
-                OR: [
-                  { canonicalRole: adoption.write.agentName },
-                  { canonicalRole: null, name: adoption.write.agentName },
-                ],
-              },
-              select: { id: true },
+            const assignee = await findCanonicalAgent(tx, {
+              projectId: template.projectId,
+              canonicalRole: adoption.write.agentName,
+              activeOnly: true,
             });
             if (!assignee) {
               throw projectError(

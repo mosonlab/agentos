@@ -17,6 +17,7 @@ import { after, before, test } from "node:test";
 import { Prisma, PrismaClient, RepoPermission, RunnerPreference, TaskStatus } from "@prisma/client";
 
 import { loadAgentSources } from "./agent-sources.js";
+import { parseCanonicalSyncSummary } from "./canonical-sync-report.js";
 import { isMergeReadinessStep } from "./merge-tail.js";
 import { isIntegratorStep } from "./merge-integrator.js";
 
@@ -1419,4 +1420,99 @@ test("canonical sync adopts the tolerated differences and refuses every other on
   } finally {
     await prisma.task.delete({ where: { id: reviewTask.id } });
   }
+});
+
+test("a renamed canonical Agent keeps its bindings and a same-named custom Agent is left alone", async (t) => {
+  const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  const role = "senior-dev-astra-medium";
+  const canonical = await prisma.agent.findUniqueOrThrow({
+    where: { projectId_canonicalRole: { projectId: project.id, canonicalRole: role } },
+    select: { id: true, name: true, customizedFields: true, environmentId: true },
+  });
+  const boundStepIds = (await prisma.taskTemplateStep.findMany({
+    where: { assigneeAgentId: canonical.id },
+    select: { id: true },
+    orderBy: { id: "asc" },
+  })).map(({ id }) => id);
+  assert.ok(boundStepIds.length > 0, "the fixture role must bind at least one canonical step");
+
+  // R9 in one picture: the operator renames the canonical Agent and then
+  // creates their own Agent under the freed slug. Both rows now answer to the
+  // role's name; only one of them is the role.
+  await prisma.agent.update({
+    where: { id: canonical.id },
+    data: { name: "house-implementer", customizedFields: ["name"] },
+  });
+  const custom = await prisma.agent.create({
+    data: {
+      projectId: project.id,
+      environmentId: canonical.environmentId,
+      name: role,
+      title: "Operator local implementer",
+      model: "custom-operator-model",
+      runnerPreference: RunnerPreference.AUTO,
+      inboxAccess: false,
+      foundationalPrompt: "operator foundational prompt",
+      rolePrompt: "operator role prompt",
+    },
+  });
+  t.after(async () => {
+    await prisma.agent.delete({ where: { id: custom.id } });
+    await prisma.agent.update({
+      where: { id: canonical.id },
+      data: { name: canonical.name, customizedFields: canonical.customizedFields },
+    });
+  });
+
+  const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(synced.status, 0, synced.output);
+  // Nothing was adopted: the binding never moved, and the custom row was never
+  // mistaken for a pre-column canonical row waiting to be claimed.
+  const counters = parseCanonicalSyncSummary(synced.output).projects["agentos-example"]!;
+  assert.equal(counters.adoptedAssignees, 0, synced.output);
+  assert.equal(counters.assignedCanonicalRoles, 0, synced.output);
+  assert.equal(counters.updated, 0, synced.output);
+
+  const untouched = async () => prisma.agent.findUniqueOrThrow({
+    where: { id: custom.id },
+    select: { name: true, title: true, canonicalRole: true, customizedFields: true, model: true, rolePrompt: true },
+  });
+  assert.deepEqual(await untouched(), {
+    name: role,
+    title: "Operator local implementer",
+    canonicalRole: null,
+    customizedFields: [],
+    model: "custom-operator-model",
+    rolePrompt: "operator role prompt",
+  });
+  assert.deepEqual(
+    (await prisma.taskTemplateStep.findMany({
+      where: { id: { in: boundStepIds } },
+      select: { assigneeAgentId: true },
+    })).map(({ assigneeAgentId }) => assigneeAgentId),
+    boundStepIds.map(() => canonical.id),
+  );
+
+  // A second sync converges: reading the binding identity by name reported the
+  // rename as drift forever and re-adopted a binding that never changed.
+  const again = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(again.status, 0, again.output);
+  assert.equal(parseCanonicalSyncSummary(again.output).projects["agentos-example"]!.updated, 0, again.output);
+
+  // The seed installs the same roles and must reach the same two conclusions.
+  const seeded = command(["tsx", "prisma/seed.ts"]);
+  assert.equal(seeded.status, 0, seeded.output);
+  assert.deepEqual(await untouched(), {
+    name: role,
+    title: "Operator local implementer",
+    canonicalRole: null,
+    customizedFields: [],
+    model: "custom-operator-model",
+    rolePrompt: "operator role prompt",
+  });
+  const afterSeed = await prisma.agent.findUniqueOrThrow({
+    where: { projectId_canonicalRole: { projectId: project.id, canonicalRole: role } },
+    select: { id: true, name: true },
+  });
+  assert.deepEqual(afterSeed, { id: canonical.id, name: "house-implementer" });
 });
