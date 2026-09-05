@@ -4,13 +4,13 @@ import { formatDateTime, formatT, titleCase, usageMoney } from "../lib/format";
 import { useLocalStorage, useMediaQuery, usePoll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { useProjectScope } from "../lib/project";
-import type { CostsReport } from "../lib/types";
+import type { Agent, CostsReport } from "../lib/types";
 import { Link } from "../lib/router";
 import { IconRefresh } from "../components/icons";
 import {
   HINT, PAGE_ACTIONS, PAGE_HEAD, PAGE_HEAD_H1, PAGE_HEAD_SUBTITLE, PAGE_HEAD_TITLES, ROW_WRAP,
   STACK, TABLE_NAME, TABLE_SUB, TABLE_TIGHT,
-  Card, EmptyState, ErrorNotice, GapNotice, MetricFigure, Page, Segmented,
+  AgentChip, Card, EmptyState, ErrorNotice, GapNotice, MetricFigure, Page, Segmented,
 } from "../components/ui";
 import { Button } from "../components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
@@ -517,6 +517,15 @@ export const CostsPage = (): ReactNode => {
   // 30-day aggregate is not free to compute. A minute is well inside the time an
   // operator would take to notice a run finished.
   const costs = usePoll<CostsPageReport>(path, 60_000);
+  /* The report names an Agent by the `Agent.name` its Runs carried, which is a
+   * slug and says nothing about what that Agent runs *now*. The roster supplies
+   * the current configuration for the chip; the Run's own model stays in the
+   * run-model card, where it is a fact about spend rather than about setup. */
+  const roster = usePoll<Agent[]>(projectId === "" ? null : `/projects/${encodeURIComponent(projectId)}/agents`, 300_000);
+  const agentsByName = useMemo(
+    () => new Map((roster.data ?? []).map((agent) => [agent.name, agent])),
+    [roster.data],
+  );
 
   const report = costs.data;
   /* Identity is assigned once, by total spend across the window, and every
@@ -617,7 +626,7 @@ export const CostsPage = (): ReactNode => {
                             <TableRow>
                               <TableHead>{t("costs.topRuns.task")}</TableHead>
                               <TableHead>{t("costs.topRuns.agent")}</TableHead>
-                              <TableHead>{t("costs.topRuns.model")}</TableHead>
+                              <TableHead>{t("agents.costs.runModel")}</TableHead>
                               <TableHead className={TABLE_TIGHT}>{t("costs.topRuns.started")}</TableHead>
                               <TableHead className={TABLE_TIGHT}>{t("costs.topRuns.cost")}</TableHead>
                             </TableRow>
@@ -675,10 +684,11 @@ export const CostsPage = (): ReactNode => {
                             {report.byAgent.map((entry) => (
                               <TableRow key={entry.agent}>
                                 <TableCell className={TABLE_NAME}>
-                                  <span className="inline-flex items-center gap-[7px]">
-                                    <span className="size-[9px] rounded-[2px]" style={{ background: colors(entry.agent) }} aria-hidden="true" />
-                                    {entry.agent}
+                                  <span className="inline-flex max-w-full items-center gap-[7px]">
+                                    <span className="size-[9px] flex-none rounded-[2px]" style={{ background: colors(entry.agent) }} aria-hidden="true" />
+                                    <AgentChip agent={agentsByName.get(entry.agent) ?? null} name={entry.agent} />
                                   </span>
+                                  <span className={TABLE_SUB}>{entry.agent}</span>
                                   {entry.costUnavailableRuns > 0
                                     ? <span className={TABLE_SUB}>{t("costs.byAgent.unavailable", { n: entry.costUnavailableRuns })}</span>
                                     : null}
@@ -718,11 +728,12 @@ export const CostsPage = (): ReactNode => {
                     ? <EmptyState>{t("costs.byModel.empty")}</EmptyState>
                     : (
                         <>
+                          <div className={`${HINT} mb-[10px]`}>{t("agents.costs.runModel.hint")}</div>
                           <ModelBar byModel={report.byModel} totalUsd={report.totalUsd} colors={modelColors} />
                           <Table>
                             <TableHeader>
                               <TableRow>
-                                <TableHead>{t("costs.byModel.model")}</TableHead>
+                                <TableHead>{t("agents.costs.runModel")}</TableHead>
                                 <TableHead className={TABLE_TIGHT}>{t("costs.byModel.spend")}</TableHead>
                                 <TableHead className={TABLE_TIGHT}>{t("costs.byModel.share")}</TableHead>
                               </TableRow>

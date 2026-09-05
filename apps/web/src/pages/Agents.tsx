@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { Fragment, type ReactNode, useEffect, useRef, useState } from "react";
 
 import { api } from "../lib/api";
 import { contentRevision, formatDate, formatDateTime, titleCase } from "../lib/format";
@@ -9,14 +9,17 @@ import { Link, navigate } from "../lib/router";
 import type { Agent, CodexServiceTier, Environment, FilesystemGrant, MCPConnection, RepoPermission, RunnerPreference, Skill, Repo } from "../lib/types";
 import { IconArrowLeft, IconPlus, IconRobot } from "../components/icons";
 import { ModelLabel, ModelPicker, modelForSave } from "../components/model-picker";
-import { runnerFor, runnerForModel, supportsCodexServiceTier, validateModelPair } from "../lib/models";
+import {
+  runnerFor, runnerForModel, slugForModel, SLUG_EXEMPT_AGENT_NAMES,
+  supportsCodexServiceTier, validateModelPair,
+} from "../lib/models";
 import { isEnforced, TOOL_KEYS, TOOL_LABEL_KEYS, type ToolKey } from "../lib/tools";
 import { cn } from "../lib/utils";
 import {
-  BACK_LINK, CODE_BLOCK, COUNT, DETAIL_HEAD, DETAIL_HEAD_H1, FIELD, FIELD_LABEL, FIELD_ROW,
-  PAGE_ACTIONS, PAGE_HEAD, PAGE_HEAD_H1, PAGE_HEAD_SUBTITLE, PAGE_HEAD_TITLES, ROW, STACK,
+  BACK_LINK, CODE_BLOCK, COUNT, DETAIL_HEAD, DETAIL_HEAD_H1, FIELD, FIELD_LABEL, FIELD_ROW, HINT,
+  PAGE_ACTIONS, PAGE_HEAD, PAGE_HEAD_H1, PAGE_HEAD_SUBTITLE, PAGE_HEAD_TITLES, ROW, ROW_WRAP, STACK,
   TABLE_NAME, TABLE_SUB, TABLE_TIGHT,
-  Card, Check, EmptyState, ErrorNotice, Field, FullPanel, KeyValue, Page, Pill,
+  AgentChip, Card, Check, EmptyState, ErrorNotice, Field, FullPanel, KeyValue, Page, Pill,
   RowMenu, Segmented, Tabs, Toggle,
 } from "../components/ui";
 import { Button } from "../components/ui/button";
@@ -117,6 +120,72 @@ export const NewAgent = ({ projectId, onClose, onCreated, initial }: {
   );
 };
 
+/* ------------------------------------------------------- roster and naming */
+
+export type AgentTitleGroup = { title: string; agents: Agent[] };
+
+/**
+ * The roster read as jobs rather than as slugs: one group per title, in the
+ * order the list already sorts, with each title's model variants under it.
+ *
+ * Four Agents titled "Senior Dev" differ only by model and effort, and a flat
+ * list of `senior-dev-*` slugs made that difference the first thing an operator
+ * had to decode. The group header carries the job; the rows carry the runtime.
+ */
+export const groupAgentsByTitle = (agents: readonly Agent[]): AgentTitleGroup[] => {
+  const groups = new Map<string, AgentTitleGroup>();
+  for (const agent of agents) {
+    const group = groups.get(agent.title);
+    if (group) group.agents.push(agent);
+    else groups.set(agent.title, { title: agent.title, agents: [agent] });
+  }
+  return [...groups.values()];
+};
+
+/** An Agent no operator may assign: the mechanical merge sentinel. It stays in
+ *  the roster — it is a real Agent that spends and runs — and out of pickers. */
+export const isMechanicalAgent = (agent: Pick<Agent, "assignable">): boolean => agent.assignable === false;
+
+/** The first name in `base`, `base-copy`, `base-copy-2`, … that the project has
+ *  not taken. Names are unique per project, so a duplicate offered under a taken
+ *  name would be refused with 409 before the operator saw the form. */
+export const availableAgentName = (base: string, taken: ReadonlySet<string>): string => {
+  if (!taken.has(base)) return base;
+  let candidate = `${base}-copy`;
+  for (let ordinal = 2; taken.has(candidate); ordinal += 1) candidate = `${base}-copy-${ordinal}`;
+  return candidate;
+};
+
+/** What the duplicate prompt starts from: the slug this Agent's own model and
+ *  effort imply (R10), made free of collisions. The source's name is always one
+ *  of them, so an unchanged runtime yields `<slug>-copy`. */
+export const duplicateNameSuggestion = (agent: Agent, siblings: readonly Agent[]): string =>
+  availableAgentName(
+    slugForModel(agent.name, agent.model) ?? agent.name,
+    new Set(siblings.map((sibling) => sibling.name)),
+  );
+
+/** Row menu and detail page share one duplicate action: same prompt, same body,
+ *  and the same jump to the copy, which is the only way to see what was made. */
+const useDuplicateAgent = (siblings: readonly Agent[]): {
+  error: string | null;
+  duplicate: (agent: Agent) => void;
+} => {
+  const { error, run } = useAction();
+  const t = useT();
+  const duplicate = (agent: Agent): void => {
+    const chosen = window.prompt(t("agents.duplicate.prompt", { name: agent.name }), duplicateNameSuggestion(agent, siblings));
+    if (chosen === null) return;
+    const name = chosen.trim();
+    if (name === "") return;
+    void run(async () => {
+      const copy = await api.post<Agent>(`/agents/${agent.id}/duplicate`, { name });
+      navigate(`/agents/${copy.id}`);
+    });
+  };
+  return { error, duplicate };
+};
+
 export type AgentsListTab = "active" | "archived";
 
 export const filterAgentsByTab = (agents: readonly Agent[], tab: AgentsListTab): Agent[] =>
@@ -139,8 +208,10 @@ export const AgentsPage = (): ReactNode => {
   const [creating, setCreating] = useState(false);
   const [listTab, setListTab] = useState<AgentsListTab>("active");
   const { error: actionError, run } = useAction();
+  const { error: duplicateError, duplicate } = useDuplicateAgent(data ?? []);
   const t = useT();
-  const agents = filterAgentsByTab(data ?? [], listTab);
+  const groups = groupAgentsByTitle(filterAgentsByTab(data ?? [], listTab));
+  const shown = groups.reduce((count, group) => count + group.agents.length, 0);
 
   const remove = (agent: Agent): void => {
     if (!window.confirm(t("agents.confirm.delete", { name: agent.name }))) return;
@@ -170,29 +241,44 @@ export const AgentsPage = (): ReactNode => {
       <div className={cn(STACK, "mt-4")}>
         {error === null ? null : <ErrorNotice message={`${error.status} ${error.message}`} onRetry={reload} />}
         {actionError === null ? null : <ErrorNotice message={actionError} />}
+        {duplicateError === null ? null : <ErrorNotice message={duplicateError} />}
         <Card flush>
           <Table>
-            <TableHeader><TableRow><TableHead>{t("agents.table.name")}</TableHead><TableHead>{t("agents.field.model")}</TableHead><TableHead>{t("agents.field.runner")}</TableHead><TableHead>{t("agents.table.inbox")}</TableHead><TableHead>{t("common.updated")}</TableHead><TableHead /></TableRow></TableHeader>
+            <TableHeader><TableRow><TableHead>{t("agents.table.agent")}</TableHead><TableHead>{t("agents.field.runner")}</TableHead><TableHead>{t("agents.table.inbox")}</TableHead><TableHead>{t("common.updated")}</TableHead><TableHead /></TableRow></TableHeader>
             <TableBody>
-              {agents.map((agent) => (
-                <TableRow key={agent.id} className="cursor-pointer" onClick={() => navigate(`/agents/${agent.id}`)}>
-                  <TableCell className={TABLE_NAME}>
-                    <span className={ROW}>{agent.title}{agent.archivedAt ? <Pill tone="grey">{t("tasks.tab.archived")}</Pill> : null}</span>
-                    <span className={TABLE_SUB}>{agent.name}</span>
-                  </TableCell>
-                  <TableCell><ModelLabel model={agent.model} /></TableCell>
-                  <TableCell>{t(`runner.preference.${agent.runnerPreference}`)}</TableCell>
-                  <TableCell>{agent.inboxAccess ? <Pill tone="green">{t("agents.inbox.on")}</Pill> : <Pill tone="grey">{t("agents.inbox.off")}</Pill>}</TableCell>
-                  <TableCell>{formatDate(agent.updatedAt)}</TableCell>
-                  <TableCell className={TABLE_TIGHT}><RowMenu items={[
-                    { label: t(agent.archivedAt ? "archived.menu.unarchive" : "tasks.menu.archive"), onSelect: () => toggleArchived(agent) },
-                    { label: t("common.delete"), danger: true, onSelect: () => remove(agent) },
-                  ]} /></TableCell>
-                </TableRow>
+              {groups.map((group) => (
+                <Fragment key={group.title}>
+                  {/* One header per title, spanning the row: the group is the job,
+                      and its variants below differ only in the chip's runtime. */}
+                  <TableRow data-agent-group={group.title}>
+                    <TableCell colSpan={5} className={cn(TABLE_NAME, "bg-secondary")}>
+                      <span className={ROW}>{group.title}<span className={COUNT}>{group.agents.length}</span></span>
+                    </TableCell>
+                  </TableRow>
+                  {group.agents.map((agent) => (
+                    <TableRow key={agent.id} className="cursor-pointer" onClick={() => navigate(`/agents/${agent.id}`)}>
+                      <TableCell className={TABLE_NAME}>
+                        <span className={ROW_WRAP}>
+                          <AgentChip agent={agent} />
+                          {agent.archivedAt ? <Pill tone="grey">{t("tasks.tab.archived")}</Pill> : null}
+                          {isMechanicalAgent(agent) ? <Pill tone="grey">{t("agents.pill.mechanical")}</Pill> : null}
+                        </span>
+                      </TableCell>
+                      <TableCell>{t(`runner.preference.${agent.runnerPreference}`)}</TableCell>
+                      <TableCell>{agent.inboxAccess ? <Pill tone="green">{t("agents.inbox.on")}</Pill> : <Pill tone="grey">{t("agents.inbox.off")}</Pill>}</TableCell>
+                      <TableCell>{formatDate(agent.updatedAt)}</TableCell>
+                      <TableCell className={TABLE_TIGHT}><RowMenu items={[
+                        ...(isMechanicalAgent(agent) ? [] : [{ label: t("agents.duplicate.action"), onSelect: () => duplicate(agent) }]),
+                        { label: t(agent.archivedAt ? "archived.menu.unarchive" : "tasks.menu.archive"), onSelect: () => toggleArchived(agent) },
+                        { label: t("common.delete"), danger: true, onSelect: () => remove(agent) },
+                      ]} /></TableCell>
+                    </TableRow>
+                  ))}
+                </Fragment>
               ))}
             </TableBody>
           </Table>
-          {agents.length === 0 ? <EmptyState>{t(loading ? "common.loading" : listTab === "archived" ? "archived.empty" : "agents.empty")}</EmptyState> : null}
+          {shown === 0 ? <EmptyState>{t(loading ? "common.loading" : listTab === "archived" ? "archived.empty" : "agents.empty")}</EmptyState> : null}
         </Card>
       </div>
 
@@ -512,6 +598,7 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
   const t = useT();
   const projectId = agent?.projectId ?? "";
   const { data: siblings } = usePoll<Agent[]>(projectId === "" ? null : `/projects/${projectId}/agents`, 15_000);
+  const { error: duplicateError, duplicate } = useDuplicateAgent(siblings ?? []);
 
   if (error !== null && agent === null) {
     return <Page><ErrorNotice message={`${error.status} ${error.message}`} onRetry={reload} /></Page>;
@@ -519,6 +606,17 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
   if (!agent) return <Page><EmptyState>{t("common.loading")}</EmptyState></Page>;
 
   const view = draft ?? agent;
+  /** The name the current model and effort imply (R10), offered rather than
+   *  applied: the slug is the operator's identifier, and a rename that happened
+   *  behind a model change would be a surprise. Null when there is nothing to
+   *  offer — the name already is the slug, the model names no short name, or the
+   *  role is one whose name never carries a model. */
+  const nameIsPinned = SLUG_EXEMPT_AGENT_NAMES.includes(agent.name) || agent.name === "plan-executor-astra-medium";
+  const suggestedSlug = ((): string | null => {
+    if (draft === null || nameIsPinned) return null;
+    const slug = slugForModel(view.name, view.model);
+    return slug === null || slug === view.name ? null : slug;
+  })();
   const patch = (changes: Partial<Agent>): void => {
     const next = { ...view, ...changes };
     setDraft({
@@ -547,7 +645,11 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
         {supportsCodexServiceTier(view.runnerPreference, view.model)
           ? <Pill tone={view.codexServiceTier === "FAST" ? "green" : "grey"}>{t(`serviceTier.${view.codexServiceTier}`)}</Pill>
           : null}
+        {isMechanicalAgent(view) ? <Pill tone="grey">{t("agents.pill.mechanical")}</Pill> : null}
         <span className="flex-1" />
+        {draft === null && !isMechanicalAgent(view)
+          ? <Button type="button" variant="legacy" size="legacy" onClick={() => duplicate(agent)}>{t("agents.duplicate.action")}</Button>
+          : null}
         {draft === null
           ? <Button type="button" variant="legacy" size="legacy" onClick={() => setDraft(agent)}>{t("common.edit")}</Button>
           : (
@@ -571,13 +673,28 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
 
       <div className={STACK}>
         {actionError === null ? null : <ErrorNotice message={actionError} />}
+        {duplicateError === null ? null : <ErrorNotice message={duplicateError} />}
 
         {tab === "setup" ? (
           <Card title={t("projects.details.title")}>
             {draft === null ? (
               <KeyValue items={[
-                { k: t("agents.field.name.label"), v: view.name },
+                { k: t("agents.field.name.label"), v: (
+                  /* The slug lives here rather than in the list: it is the name
+                     YAML and the CLI use, so it has to be copyable exactly. */
+                  <span className={ROW_WRAP}>
+                    <span className="[overflow-wrap:anywhere]">{view.name}</span>
+                    <Button type="button" variant="legacy" size="legacySmall" className="shadow-none"
+                      onClick={() => { void navigator.clipboard?.writeText(view.name); }}>{t("agents.name.copy")}</Button>
+                  </span>
+                ) },
                 { k: t("agents.field.title"), v: view.title },
+                ...(view.canonicalRole === null ? [] : [{
+                  k: t("agents.canonical.label"),
+                  v: view.customizedFields.length === 0
+                    ? view.canonicalRole
+                    : t("agents.canonical.customized", { role: view.canonicalRole, fields: view.customizedFields.join(", ") }),
+                }]),
                 { k: t("agents.field.model"), v: <ModelLabel model={view.model} /> },
                 { k: t("agents.field.runnerPreference"), v: t(`runner.preference.${view.runnerPreference}`) },
                 { k: t("agents.field.codexServiceTier"), v: supportsCodexServiceTier(view.runnerPreference, view.model)
@@ -597,6 +714,14 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
                   <Field label={t("agents.field.title")}><Input type="text" value={view.title} onChange={(event) => patch({ title: event.target.value })} /></Field>
                 </div>
                 <ModelPicker model={view.model} runnerPreference={view.runnerPreference} onChange={patch} />
+                {suggestedSlug === null ? null : (
+                  <div className={ROW_WRAP} data-agent-slug-suggestion={suggestedSlug}>
+                    <Button type="button" variant="legacy" size="legacySmall" className="shadow-none"
+                      onClick={() => patch({ name: suggestedSlug })}>{t("agents.slug.rename", { slug: suggestedSlug })}</Button>
+                    <span className={HINT}>{t("agents.slug.hint")}</span>
+                  </div>
+                )}
+                {view.canonicalRole === null ? null : <div className={HINT}>{t("agents.canonical.hint", { role: view.canonicalRole })}</div>}
                 <Field label={t("agents.field.codexServiceTier")} hint={t(supportsCodexServiceTier(view.runnerPreference, view.model)
                   ? "agents.serviceTier.hint"
                   : "agents.serviceTier.unavailable")}>
@@ -649,11 +774,13 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
           <Card title={t("agents.tab.collaborators")}>
             <div className="mb-3">{t("agents.collaborators.hint")}</div>
             <div className="mt-3">
-              {(siblings ?? []).filter((candidate) => candidate.id !== agent.id).map((candidate) => (
+              {/* A picker, so the mechanical sentinel is not in it: no Agent may
+                  spawn it, and `POST /projects/:id/tasks` refuses it anyway. */}
+              {(siblings ?? []).filter((candidate) => candidate.id !== agent.id && !isMechanicalAgent(candidate)).map((candidate) => (
                 <div key={candidate.id} className={cn(ROW, "border-t border-[var(--border-soft)] py-2.5")}>
                   <div className="flex-1">
-                    <div className="text-foreground">{candidate.title}</div>
-                    <div>{titleCase(candidate.name)} · {candidate.model}</div>
+                    <div className="text-foreground"><AgentChip agent={candidate} /></div>
+                    <div>{titleCase(candidate.name)}</div>
                   </div>
                   <BindingToggle on={(agent.collaborators ?? []).some((entry) => entry.allowedAgentId === candidate.id)} label={t("agents.collaborators.allow", { name: candidate.name })}
                     add={() => api.post(`/agents/${agent.id}/collaborators`, { allowedAgentId: candidate.id })}
