@@ -518,9 +518,9 @@ test("the Astra-low review-fix generation is kept on record and retired from mat
   for (const templateName of Object.keys(LEGACY_TEMPLATE_GENERATIONS) as CanonicalTemplateRegistryName[]) {
     const current = sources.get(templateName);
     assert.ok(current, `${templateName} must load from source`);
-    const generation = LEGACY_TEMPLATE_GENERATIONS[templateName].at(-1);
-    assert.ok(generation);
-    assert.equal(generation.marker, "pre-astra-low-review-fix");
+    const generation = LEGACY_TEMPLATE_GENERATIONS[templateName]
+      .find(({ marker }) => marker === "pre-astra-low-review-fix");
+    assert.ok(generation, templateName);
     assert.equal(generation.retiredByBinding, true, templateName);
     assert.equal(generation.promptDigest, undefined, templateName);
     assert.deepEqual(generation.successorStepOrdinals, canonicalStepOrdinals(templateName, null), templateName);
