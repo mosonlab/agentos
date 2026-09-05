@@ -90,6 +90,14 @@ baseFromStepIndex: null                # null or a step in a strictly earlier la
 spawnPolicy: null                      # null or an inline JSON object
 ```
 
+The implementation step's JSON output carries `baseSha`, and that field is
+informational only. The platform pins the range every review, fix, and
+regression step sees from its own records: the head is the commit the output is
+bound to, and the base is the earliest Run of the implementation Task that
+recorded a provisioning `baseSha`. A body `baseSha` that disagrees with that
+record is persisted and reported in the task activity log; it never moves the
+reviewed range, and it is never the reason a claim fails.
+
 `packages/db/src/template-sources.ts` is the live authority for each
 template's file count, contiguous indexes, layer vector, and accepted
 structural keys; equal layer values are parallel siblings and the following

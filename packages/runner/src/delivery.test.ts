@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 
 import { PR_TEMPLATE_NAME } from "@anneal/db";
 
@@ -19,7 +19,9 @@ import {
   deliveryDeadline, NETWORK_COMMAND_TIMEOUT_MS, WORKSPACE_HEAD_TIMEOUT_MS,
 } from "./network-retry.js";
 
-const config = { runAsPrefix: [], path: "/fake/bin", home: "/fake/home" } as unknown as RunnerConfig;
+const testHome = await mkdtemp(join(tmpdir(), "delivery-test-home-"));
+after(() => rm(testHome, { recursive: true, force: true }));
+const config = { runAsPrefix: [], path: "/fake/bin", home: testHome } as unknown as RunnerConfig;
 const claim = {
   task: { id: "task-1", name: "Feature", templateStep: null },
   repo: { remoteUrl: "https://github.com/acme/app.git", defaultBranch: "main" },
@@ -235,6 +237,50 @@ test("canonical PR final delivery publishes a clean head and the complete review
     canonicalClaim("fixed-implementation", "task-fixed", 4),
     { ...workspace, baseSha: canonicalImplementationSha },
     { command: fake, headSha: canonicalFixedSha, prWorkflowOutputs: canonicalFinalOutputs() },
+  );
+  assert.equal(result.pushStatus, "SUCCEEDED");
+  assert.equal(result.pullRequestNumber, 3);
+  assert.deepEqual(calls.filter(({ executable }) => executable === "git").map(({ args }) => args), [
+    ["ls-tree", "-r", "--name-only", "HEAD", "--", ".chain"],
+    ["push", "--set-upstream", "origin", "feature/test"],
+  ]);
+  const expectedBody = [
+    "## Goal",
+    "Ship PR",
+    "## Summary",
+    "Implemented the requested change.\n\nReview-driven fixes:\n- SOL-1: Added the run-bound evidence projection.",
+    "## Verification",
+    "Implementation:\n- npm test -- runner — exit 0: all focused tests passed\n\nFixed implementation:\n- npm test -- final — exit 0: final handover passed",
+    "## Review outcomes",
+    "### Sol findings\n- SOL-1 [P1] Close the handover gap\n  Disposition: ADOPTED\n  Reason: The runner now carries the persisted evidence.\n  Code evidence: Added the run-bound evidence projection.\n  Test evidence: Added route and delivery coverage.\n\n### Blind findings\nNo findings reported.\n\nResidual risks:\n- GitHub API availability remains external.",
+    "## Anneal",
+    "Task: task-fixed",
+    "Chain: chain-pr",
+  ].join("\n\n");
+  assert.equal(body, expectedBody);
+  const edit = calls.find(({ executable, args }) => executable === "gh" && args[1] === "edit");
+  assert.ok(edit);
+  assert.equal(edit.args.at(-1), expectedBody);
+});
+
+test("canonical PR final delivery ignores the informational implementation base during publication", async () => {
+  const calls: Array<{ executable: string; args: string[] }> = [];
+  let body = "";
+  const fake: CommandRunner = async (executable, args) => {
+    calls.push({ executable, args: [...args] });
+    if (executable === "git" && args[0] === "ls-tree") return "";
+    if (executable === "gh" && args[1] === "list") return JSON.stringify([{ url: "https://github.com/acme/app/pull/3", number: 3 }]);
+    if (executable === "gh" && args[1] === "edit") { body = args.at(-1)!; return ""; }
+    if (executable === "gh" && args[1] === "view") return body;
+    return "";
+  };
+  const outputs = canonicalFinalOutputs();
+  outputs[0] = canonicalImplementationOutput(canonicalImplementationSha, canonicalSha("d"));
+  const result = await deliverWorkspace(
+    config,
+    canonicalClaim("fixed-implementation", "task-fixed", 4),
+    { ...workspace, baseSha: canonicalImplementationSha },
+    { command: fake, headSha: canonicalFixedSha, prWorkflowOutputs: outputs },
   );
   assert.equal(result.pushStatus, "SUCCEEDED");
   assert.equal(result.pullRequestNumber, 3);
