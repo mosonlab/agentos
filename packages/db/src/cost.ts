@@ -84,28 +84,21 @@ export const sessionUsageCost = (
     return { costUsd: new Prisma.Decimal(session.costUsd), estimated: false, ...tokens };
   }
   if (!hasTokens(session)) return { costUsd: null, estimated: false, ...tokens };
-  // USAGE PROVENANCE, established from the Codex event stream (checked
-  // 2026-09-05): root and child token counts are NOT reported separately. The
-  // one usage-bearing Codex event is `turn.completed`, which carries a single
-  // flat `usage` object (`input_tokens`, `cached_input_tokens`,
-  // `cache_write_input_tokens`, `output_tokens`, `reasoning_output_tokens`)
-  // with no `modelUsage` and no per-thread breakdown — see
-  // `spikes/cli-capabilities/samples/codex-gpt-5.6-luna-max-20260828.stdout`,
-  // the `turn.completed` branch of `packages/runner/src/adapters/codex.ts`, and
-  // `recomputeSessionUsage`, which reads FINAL_OUTPUT events alone. Native
-  // children surface only as `collab_agent_tool_call` items carrying
-  // `receiver_thread_ids`, which report no usage at all. So a session with
-  // native children yields one aggregate that cannot be decomposed, and the
-  // aggregate cannot even be shown to exclude child tokens.
+  // USAGE PROVENANCE (checked 2026-09-05): the Codex adapter persists only
+  // flat `turn.completed` usage as FINAL_OUTPUT; `recomputeSessionUsage`
+  // reads those events into session token columns. No per-thread or per-model
+  // split reaches this pricing function. See the `turn.completed` branch of
+  // packages/runner/src/adapters/codex.ts and packages/db/src/usage.ts.
+  // The capture spikes/cli-capabilities/samples/codex-gpt-5.6-luna-max-20260828.stdout
+  // confirms flat usage for a session without native children only. Open
+  // question: a real native-child stream is needed to establish whether Codex
+  // reports separable child usage and whether its flat total includes children.
   //
-  // Therefore price the whole aggregate at the model that ran the root thread.
-  // Pricing it at the platform-pinned child model (Luna) understated a
-  // gpt-6-astra executioner roughly forty-fold; a session is never priced at a
-  // model that did not run its root. The result stays `estimated` because it
-  // is derived from the persisted token columns and, for a native-child
-  // session, prices child tokens at the root rate. A genuine per-model split
-  // is expressed as separate cost items that `sumUsageCosts` combines, each
-  // keeping its own model here.
+  // With no persisted split, price the available aggregate at the root model.
+  // A session is never priced at a model that did not run its root. The result
+  // stays `estimated`: child usage, if included, receives the root rate.
+  // A genuine per-model split is expressed as separate cost items that
+  // `sumUsageCosts` combines, each keeping its own model here.
   const prices = MODEL_TOKEN_PRICES[modelNameForPricing(model)];
   // Every component is required for a complete estimate. Persisted null means
   // the provider did not report that component, not that it was zero. Codex

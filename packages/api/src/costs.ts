@@ -531,9 +531,8 @@ export const aggregateCosts = (
           cachePricingKnown: agentTotal.cachePricingKnown && uncachedInputUsd(run, split) !== null,
         }
       : { ...agentTotal, cacheUnknownRuns: agentTotal.cacheUnknownRuns + 1 };
-    // `mixed` marks a Run whose aggregate includes native-child tokens the
-    // provider never split out; its dollars are the root model's rate.
-    const model = run.session?.nativeChildUsed === true ? "mixed" : run.model;
+    // Attribute native-child estimates to the root model used to price them.
+    const model = run.model;
     const modelTotal = perModel.get(model) ?? { model, usd: ZERO, runs: 0, costUnavailableRuns: 0 };
     const isWasted = run.status !== RunStatus.SUCCEEDED;
     const isOperatorCancelled = isWasted && run.cancelRequestId !== null && run.cancelRequestId !== undefined;
