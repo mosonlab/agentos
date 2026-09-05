@@ -57,6 +57,11 @@ import {
   retryDelayMs,
 } from "./execution.js";
 import {
+  completionActivityBody,
+  completionAdvancement,
+  type CompletionAdvancementFacts,
+} from "./completion-advancement.js";
+import {
   activeRepairRecoverySourceRun,
   handleRegressionCompletion,
   mergeTailRequeueContextForRun,
@@ -1074,43 +1079,76 @@ export const completeRun = async (
             succeeded,
           })
         : { handled: false, leaseOutcome: "continue" as const };
-      leaseOutcome = canonicalOutputFailure
-        && isRegressionVerificationOutputKind(run.task?.templateStep?.outputKind)
+      const regressionVerificationStep = isRegressionVerificationOutputKind(run.task?.templateStep?.outputKind);
+      leaseOutcome = canonicalOutputFailure && regressionVerificationStep
         ? "stop"
         : mergeTailCompletion.leaseOutcome;
-      if (durableNegativeRegressionVerdict && run.task?.templateId) {
-        await handleRegressionCompletion(tx, {
-          task: run.task,
-          run: {
-            id: run.id,
-            agentId: run.agentId,
-            branch: body.branch ?? run.branch,
-            headSha: body.headSha ?? null,
-            sessionId: run.session.id,
-          },
-          ...(failedRegressionVerdict?.status === "ok"
-            ? { qualifiedVerdict: failedRegressionVerdict.verdict }
-            : {}),
-          now,
-        });
-        leaseOutcome = "stop";
-      } else if (succeeded && mechanical) {
-        // Already branched above; the mechanical path owns its own advance.
-      } else if (succeeded && run.task?.templateId) {
-        if (canonicalOutputFailure) {
-          // The current Run succeeded as a process, but it did not publish a
-          // canonical deliverable bound to that Run and head. The REVIEW
-          // state written above is the terminal control-plane outcome.
-        } else if (isRegressionVerificationOutputKind(run.task.templateStep?.outputKind)) {
+      // The Task row is included with the fenced Run, so a Run that names a
+      // task always carries it. Every advancement below is about that Task.
+      const completionTask = run.task;
+      if (!completionTask) {
+        throw new Error(`Run ${run.id} names task ${run.taskId} but no task row was read with it`);
+      }
+      // What this completion means for the Task, decided from facts already
+      // read. The ladder this replaced fused the decision with its writes over
+      // succeeded x mechanical x templateId x chainId x mergeTailAuxiliary, so
+      // no arm could be read without a database; the writes below are now a
+      // sequence of the existing actions with no conditions of their own.
+      const advancementFacts: CompletionAdvancementFacts = {
+        runNumber: run.runNumber,
+        succeeded,
+        mechanical,
+        task: {
+          templateId: completionTask.templateId,
+          chainId: completionTask.chainId,
+          approvalGate: completionTask.approvalGate,
+          regressionVerificationStep,
+        },
+        durableNegativeRegressionVerdict,
+        outputRefusal: canonicalOutputFailure,
+        mergeTailAuxiliary,
+        mergeTailHandled: mergeTailCompletion.handled,
+        auxiliaryTargetTaskId,
+        mergeTailRequeue: mergeTailSuccessorRequeue,
+        mergeTailRecoverySourceRunId: mergeTailRequeueContext?.recoverySourceRunId ?? null,
+        retryCreated,
+        retryRefusalMessage: retryRefusal?.message ?? null,
+        budgetExhausted,
+        budgetCeiling,
+        missingOutputReason,
+        reportedFailureReason: reported.failureReason,
+      };
+      const advancement = completionAdvancement(advancementFacts);
+      const regressionRun = {
+        id: run.id,
+        agentId: run.agentId,
+        branch: body.branch ?? run.branch,
+        headSha: body.headSha ?? null,
+        sessionId: run.session.id,
+      };
+      switch (advancement.case) {
+        case "repair-after-negative-regression":
+          await handleRegressionCompletion(tx, {
+            task: completionTask,
+            run: regressionRun,
+            ...(failedRegressionVerdict?.status === "ok"
+              ? { qualifiedVerdict: failedRegressionVerdict.verdict }
+              : {}),
+            now,
+          });
+          leaseOutcome = "stop";
+          break;
+        // The mechanical branch above owns the step-12 advance and its stop;
+        // the output refusal has already parked the Task in REVIEW; and a
+        // settled merge tail has already written this Task's next state.
+        case "mechanical-merge-already-recorded":
+        case "stop-with-output-refusal":
+        case "merge-tail-settled":
+          break;
+        case "settle-regression-verdict": {
           const result = await handleRegressionCompletion(tx, {
-            task: run.task,
-            run: {
-              id: run.id,
-              agentId: run.agentId,
-              branch: body.branch ?? run.branch,
-              headSha: body.headSha ?? null,
-              sessionId: run.session.id,
-            },
+            task: completionTask,
+            run: regressionRun,
             now,
           });
           if (result === "advance") {
@@ -1118,7 +1156,9 @@ export const completeRun = async (
           } else {
             leaseOutcome = "stop";
           }
-        } else {
+          break;
+        }
+        case "advance-template-step":
           await advanceTemplateTask(
             tx,
             run.taskId,
@@ -1127,32 +1167,33 @@ export const completeRun = async (
             now,
             completionTaskStatus,
             {
-              mergeTailRequeue: mergeTailSuccessorRequeue,
-              ...(mergeTailRequeueContext?.recoverySourceRunId
-                ? { mergeTailRecoverySourceRunId: mergeTailRequeueContext.recoverySourceRunId }
+              mergeTailRequeue: advancement.mergeTailRequeue,
+              ...(advancement.mergeTailRecoverySourceRunId
+                ? { mergeTailRecoverySourceRunId: advancement.mergeTailRecoverySourceRunId }
                 : {}),
             },
           );
-        }
-      } else if (succeeded && run.task && (run.task.chainId || mergeTailAuxiliary)) {
-        if (!mergeTailCompletion.handled && run.task.approvalGate) {
+          break;
+        case "ask-approval-gate-question": {
           const claimed = await tx.task.updateMany({
             where: { id: run.taskId, status: completionTaskStatus! },
             data: { status: TaskStatus.REVIEW, failureReason: null },
           });
           if (claimed.count === 1) await gateQuestion(tx, run.taskId, run.id, process.env.FEISHU_DEFAULT_CHAT_ID ?? null);
-        } else if (!mergeTailCompletion.handled) {
+          break;
+        }
+        case "complete-and-activate-successors": {
           const completed = await tx.task.updateMany({
             where: { id: run.taskId, status: completionTaskStatus! }, data: { status: TaskStatus.DONE, failureReason: null },
           });
           if (completed.count === 1) {
-            if (run.task.chainId) {
-              await activateChainSuccessor(tx, run.task, {
+            if (advancement.activateChainSuccessor) {
+              await activateChainSuccessor(tx, completionTask, {
                 sourceRunId: run.id,
                 chatId: process.env.FEISHU_DEFAULT_CHAT_ID ?? null,
               }, now);
             }
-            if (auxiliaryTargetTaskId) {
+            if (advancement.auxiliaryTargetTaskId) {
               const repairSourceRunId = typeof repairMarker?.raw.sourceRunId === "string"
                 ? repairMarker.raw.sourceRunId
                 : null;
@@ -1162,40 +1203,37 @@ export const completeRun = async (
                     sourceRunId: repairSourceRunId,
                   })
                 : null;
-              await activateMergeTailTarget(tx, auxiliaryTargetTaskId, now, {
+              await activateMergeTailTarget(tx, advancement.auxiliaryTargetTaskId, now, {
                 ...(recoverySourceRunId === null ? {} : { recoverySourceRunId }),
               });
             }
           }
+          break;
         }
-      } else {
-        await tx.task.updateMany({
-          where: { id: run.taskId, ...(completionTaskStatus ? { status: completionTaskStatus } : {}) },
-          data: {
-            status: retryCreated ? TaskStatus.DOING : TaskStatus.REVIEW,
-            // The fail-loud park keeps naming the absent deliverable once the
-            // budget is spent; the budget itself is reported by the Inbox
-            // message below.
-            failureReason: succeeded ? null : missingOutputReason ?? (budgetExhausted
-              ? `Maximum ${budgetCeiling} runs reached`
-              : retryRefusal
-                ? `Automatic retry refused: ${retryRefusal.message}`
-                : reported.failureReason ?? "Execution failed"),
-          },
-        });
+        case "park-task":
+          await tx.task.updateMany({
+            where: { id: run.taskId, ...(completionTaskStatus ? { status: completionTaskStatus } : {}) },
+            data: {
+              status: advancement.status,
+              // The fail-loud park keeps naming the absent deliverable once the
+              // budget is spent; the budget itself is reported by the Inbox
+              // message below.
+              failureReason: advancement.failureReason,
+            },
+          });
+          break;
+        default: {
+          const unhandled: never = advancement;
+          throw new Error(`Run ${run.id} decided an unhandled completion advancement ${JSON.stringify(unhandled)}`);
+        }
       }
-      if (!(succeeded && mechanical)) await tx.taskActivity.create({
+      const activityBody = completionActivityBody(advancementFacts);
+      if (activityBody) await tx.taskActivity.create({
         data: {
           taskId: run.taskId,
           actorType: "runner",
           actorId: body.runnerId,
-          body: durableNegativeRegressionVerdict ? `Run ${run.runNumber} failed after publishing a negative Regression verdict; repair queued`
-            : canonicalOutputFailure ? `Run ${run.runNumber} succeeded but canonical task output was refused`
-            : succeeded && (run.task?.templateId || run.task?.chainId || mergeTailAuxiliary) ? `Run ${run.runNumber} succeeded; chain advanced or awaiting approval`
-            : succeeded ? `Run ${run.runNumber} succeeded; task moved to review`
-            : retryCreated ? `Run ${run.runNumber} failed; retry queued`
-              : retryRefusal ? `Run ${run.runNumber} failed; automatic retry refused: ${retryRefusal.message}`
-              : `Run ${run.runNumber} failed; task moved to review`,
+          body: activityBody,
           metadata: jsonValue({ exitCode: body.exitCode, outcome: body.outcome.case, failureClass, pushStatus: body.pushStatus, pullRequestUrl: body.pullRequestUrl }),
         },
       });

@@ -192,6 +192,37 @@ const createParallelReviewHarness = ({
     };
   };
 
+  /**
+   * Chain tasks are addressed by the output kind their template step produces.
+   * A chain that omitted an optional or conditional step renumbers every later
+   * ordinal, so a hardcoded chainIndex silently names a different node.
+   */
+  const chainTasks = async <ChainTask extends { id: string; templateStepId: string | null }>(
+    taskTemplateId: string,
+    tasks: ChainTask[],
+  ) => {
+    const steps = await getDb().taskTemplateStep.findMany({
+      where: { taskTemplateId },
+      select: { id: true, outputKind: true },
+    });
+    const outputKindOf = new Map(steps.map(({ id, outputKind }) => [id, outputKind]));
+    const byOutputKind = new Map<string, ChainTask>();
+    for (const task of tasks) {
+      const outputKind = task.templateStepId === null ? null : outputKindOf.get(task.templateStepId) ?? null;
+      assert.ok(outputKind, `chain task ${task.id} names no step of template ${taskTemplateId}`);
+      assert.ok(!byOutputKind.has(outputKind), `template ${taskTemplateId} declares ${outputKind} twice`);
+      byOutputKind.set(outputKind, task);
+    }
+    return {
+      taskFor: (outputKind: string): ChainTask => {
+        const task = byOutputKind.get(outputKind);
+        assert.ok(task, `chain has no ${outputKind} task`);
+        return task;
+      },
+      omits: (outputKind: string): boolean => !byOutputKind.has(outputKind),
+    };
+  };
+
   const instantiateDirect = async (brief = SPECIFICATION_BRIEF): Promise<DirectFixture> => {
     const installation = await canonicalInstallation();
     const branchName = `parallel/direct-${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
@@ -202,15 +233,15 @@ const createParallelReviewHarness = ({
       description: brief,
       autoStart: true,
     });
-    const byIndex = new Map(chain.tasks.map((task) => [task.chainIndex, task]));
+    const { taskFor } = await chainTasks(installation.directTemplateId, chain.tasks);
     return {
       ...installation,
       chainId: chain.chainId,
       branchName,
-      implementationTaskId: byIndex.get(1)!.id,
-      solTaskId: byIndex.get(2)!.id,
-      blindTaskId: byIndex.get(3)!.id,
-      fixTaskId: byIndex.get(4)!.id,
+      implementationTaskId: taskFor("implementation").id,
+      solTaskId: taskFor("sol-findings").id,
+      blindTaskId: taskFor("blind-findings").id,
+      fixTaskId: taskFor("fixed-implementation").id,
     };
   };
 
@@ -238,18 +269,18 @@ const createParallelReviewHarness = ({
       afterTaskId: predecessor.id,
     });
     assert.equal(chain.tasks.length, 8);
-    const byIndex = new Map(chain.tasks.map((task) => [task.chainIndex, task]));
+    const { taskFor } = await chainTasks(installation.directTemplateId, chain.tasks);
     const dispatched = await operatorRequest(`/tasks/${predecessor.id}`, "PATCH", { status: TaskStatus.DONE });
     assert.equal(dispatched.status, 200, JSON.stringify(dispatched.body));
     return {
       ...installation,
       chainId: chain.chainId,
       branchName,
-      revalidationTaskId: byIndex.get(1)!.id,
-      implementationTaskId: byIndex.get(2)!.id,
-      solTaskId: byIndex.get(3)!.id,
-      blindTaskId: byIndex.get(4)!.id,
-      fixTaskId: byIndex.get(5)!.id,
+      revalidationTaskId: taskFor("revalidation").id,
+      implementationTaskId: taskFor("implementation").id,
+      solTaskId: taskFor("sol-findings").id,
+      blindTaskId: taskFor("blind-findings").id,
+      fixTaskId: taskFor("fixed-implementation").id,
     };
   };
 
@@ -267,19 +298,9 @@ const createParallelReviewHarness = ({
       description: brief,
       autoStart: true,
     });
-    const byKind = new Map(chain.tasks.map((task) => [task.templateStepId, task]));
-    const steps = await getDb().taskTemplateStep.findMany({
-      where: { taskTemplateId: installation.directTemplateId },
-      select: { id: true, outputKind: true },
-    });
-    const taskFor = (kind: string) => {
-      const step = steps.find((candidate) => candidate.outputKind === kind)!;
-      return byKind.get(step.id)!;
-    };
+    const { taskFor, omits } = await chainTasks(installation.directTemplateId, chain.tasks);
     assert.equal(chain.tasks.length, 6);
-    assert.equal(chain.tasks.some((task) => (
-      steps.find((step) => step.id === task.templateStepId)?.outputKind === "blind-findings"
-    )), false);
+    assert.equal(omits("blind-findings"), true);
     return {
       ...installation,
       chainId: chain.chainId,
@@ -306,13 +327,16 @@ const createParallelReviewHarness = ({
       description: SPECIFICATION_BRIEF,
       autoStart: false,
     });
-    const byIndex = new Map(chain.tasks.map((task) => [task.chainIndex, task]));
-    const priorIds = chain.tasks.filter((task) => (task.chainIndex ?? 0) < 5).map((task) => task.id);
+    const { taskFor } = await chainTasks(installation.fullTemplateId, chain.tasks);
+    const implementation = taskFor("implementation");
+    const priorIds = chain.tasks
+      .filter((task) => (task.chainIndex ?? 0) < (implementation.chainIndex ?? 0))
+      .map((task) => task.id);
     await getDb().task.updateMany({
       where: { id: { in: priorIds } },
       data: { status: TaskStatus.DONE },
     });
-    const specificationTask = byIndex.get(1)!;
+    const specificationTask = taskFor("spec");
     await getDb().taskStepOutput.create({
       data: {
         taskId: specificationTask.id,
@@ -325,7 +349,7 @@ const createParallelReviewHarness = ({
         commitSha: IMPLEMENTATION_BASE,
       },
     });
-    const revisedPlanTask = byIndex.get(4)!;
+    const revisedPlanTask = taskFor("revised-plan");
     await getDb().taskStepOutput.create({
       data: {
         taskId: revisedPlanTask.id,
@@ -340,15 +364,14 @@ const createParallelReviewHarness = ({
         commitSha: IMPLEMENTATION_BASE,
       },
     });
-    const implementation = byIndex.get(5)!;
     await getDb().$transaction((tx) => enqueueTaskRun(tx, implementation.id));
     return {
       ...installation,
       chainId: chain.chainId,
       branchName,
       implementationTaskId: implementation.id,
-      solTaskId: byIndex.get(6)!.id,
-      blindTaskId: byIndex.get(7)!.id,
+      solTaskId: taskFor("sol-findings").id,
+      blindTaskId: taskFor("blind-findings").id,
     };
   };
 

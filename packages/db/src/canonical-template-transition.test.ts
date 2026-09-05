@@ -16,7 +16,12 @@ import {
   type CanonicalTemplateRegistryName,
   type PersistedTransitionStep,
 } from "./canonical-template-transition.js";
-import { loadAllTemplateStepSources, type TemplateStepSource } from "./template-sources.js";
+import { retiredStepShapeDifferences, type LegacyStepRecord } from "./template-step-fields.js";
+import {
+  LEGACY_ALL_PRIOR_OUTPUTS,
+  loadAllTemplateStepSources,
+  type TemplateStepSource,
+} from "./template-sources.js";
 
 test("parked and not-yet-started legacy chains may roll over intact", () => {
   assert.equal(templateRolloverBlockerCount([
@@ -79,12 +84,29 @@ const persistedGeneration = (
   attachmentsFromPrevious: step.attachmentsFromPrevious,
   priorOutputKinds: [],
   opensPullRequest: step.opensPullRequest,
-  requiresCommit: step.outputKind === "plan" || step.outputKind === "implementation",
+  requiresCommit: step.requiresCommit ?? false,
   provisionDependencies,
   baseFromStepIndex: step.baseFromStepIndex,
   spawnPolicy: step.spawnPolicy,
   prompt: "retired",
 })) as unknown as PersistedTransitionStep[];
+
+/** One source step as the registry would record it: every field stated as data. */
+const asLegacyRecord = (step: TemplateStepSource): LegacyStepRecord => ({
+  name: step.name,
+  agentName: step.agentName,
+  assigneeType: (step.agentName === null ? "HUMAN" : "AGENT") as LegacyStepRecord["assigneeType"],
+  layer: step.layer,
+  approvalGate: step.approvalGate,
+  optional: step.optional,
+  outputKind: step.outputKind,
+  attachmentsFromPrevious: step.attachmentsFromPrevious,
+  opensPullRequest: step.opensPullRequest,
+  requiresCommit: step.requiresCommit,
+  provisionDependencies: step.provisionDependencies,
+  baseFromStepIndex: step.baseFromStepIndex,
+  spawnPolicy: step.spawnPolicy as LegacyStepRecord["spawnPolicy"],
+});
 
 const PROMPT_ROLLOVER_TEMPLATES = ["direct-engineer-workflow", "compound-engineer-workflow"] as const;
 
@@ -190,6 +212,7 @@ test("a structure-identical generation is decided by its prompt digest alone", (
     outputKind: "implementation",
     attachmentsFromPrevious: false,
     opensPullRequest: true,
+    requiresCommit: true,
     baseFromStepIndex: null,
     layer: 1,
     spawnPolicy: null,
@@ -360,7 +383,7 @@ test("bound direct revalidation is a registered structural rollover", async () =
       outputKind: step.outputKind,
       attachmentsFromPrevious: step.attachmentsFromPrevious,
       opensPullRequest: step.opensPullRequest,
-      requiresCommit: step.outputKind === "plan" || step.outputKind === "implementation",
+      requiresCommit: step.requiresCommit ?? false,
       provisionDependencies: true,
       baseFromStepIndex: step.baseFromStepIndex,
       spawnPolicy: step.spawnPolicy,
@@ -379,20 +402,12 @@ test("the pull-request workflow has a registered prompt-only generation and curr
   const generation = generationOf(PR_TEMPLATE_NAME, "pre-pr-handover-quality");
   assert.equal(generation.promptDigest, "93a72d354876a6c26020e8638b6c365fb15e4ca4a400a2d6ca80084994f249d6");
   assert.equal(generation.shape.length, 4);
+  // The retired graph against the current one, field by field through the
+  // shared table: identical except that its review steps predate opting out of
+  // dependency provisioning, which is what tells the two shapes apart.
   assert.deepEqual(
-    generation.shape,
-    current.map(({ name, agentName, approvalGate, outputKind, attachmentsFromPrevious, opensPullRequest, baseFromStepIndex, layer, spawnPolicy }) => ({
-      name,
-      agentName,
-      assigneeType: agentName === null ? "HUMAN" : "AGENT",
-      approvalGate,
-      outputKind,
-      attachmentsFromPrevious,
-      opensPullRequest,
-      baseFromStepIndex,
-      layer,
-      spawnPolicy,
-    })),
+    asPersisted(current).map((step, index) => retiredStepShapeDifferences(step, generation.shape[index]!)),
+    [[], ["provisionDependencies"], ["provisionDependencies"], []],
   );
   assert.equal(templatePromptGenerationDigest(current), CANONICAL_SOURCE_PROMPT_GENERATIONS[PR_TEMPLATE_NAME]);
   assert.equal(matchedLegacyGeneration(PR_TEMPLATE_NAME, asPersisted(current)), null);
@@ -496,4 +511,45 @@ test("every registered generation, structural ones included, rolls straight to t
     assert.ok(current, `${templateName} must load from source`);
     assert.equal(sourcePromptGenerationDrift(templateName, current), null, templateName);
   }
+});
+
+test("the next prompt-only rollover of the optional-review graphs is registrable", async () => {
+  // The block the optional column left behind: the deployed direct and compound
+  // graphs carry an optional blind review, so a prompt-only successor could not
+  // be registered while the comparator asserted a fixed value for that field.
+  // Registered here in test data only; the real registry is untouched.
+  const sources = await loadAllTemplateStepSources();
+  for (const templateName of PROMPT_ROLLOVER_TEMPLATES) {
+    const current = sources.get(templateName);
+    assert.ok(current, `${templateName} must load from source`);
+    assert.ok(
+      current.some((step) => step.outputKind === "blind-findings" && step.optional),
+      `${templateName} must still carry an optional blind review`,
+    );
+    const rows = asPersisted(current);
+    const registered = {
+      marker: "synthetic-prompt-only-successor",
+      shape: current.map(asLegacyRecord),
+      promptDigest: templatePromptGenerationDigest(rows),
+    };
+
+    assert.equal(legacyGenerationMatches(registered, rows), true, templateName);
+    const successor = rows.map((step) => ({ ...step, prompt: `${step.prompt}\n\nthe replacement instruction` }));
+    assert.equal(legacyGenerationMatches(registered, successor), false, templateName);
+  }
+});
+
+test("a retired generation is identified without its prior-output whitelist", () => {
+  // The whitelist migration rewrites this column on rows of every generation,
+  // so reading it would refuse the rollover of any row it has not reached.
+  const generation = generationOf("direct-engineer-workflow", "pre-adjudication");
+  const rows = persistedGeneration(generation, true);
+  assert.equal(legacyGenerationMatches(generation, rows), true);
+  assert.equal(
+    legacyGenerationMatches(
+      generation,
+      rows.map((step) => ({ ...step, priorOutputKinds: [LEGACY_ALL_PRIOR_OUTPUTS] })),
+    ),
+    true,
+  );
 });

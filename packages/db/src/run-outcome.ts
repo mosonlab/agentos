@@ -82,20 +82,62 @@ export type AgentExitEvidence = {
 };
 
 /**
- * Did the agent process itself finish its work successfully?
+ * How the agent process itself ended, decided once from its own exit record.
  *
- * The one copy of what used to be `adapterExecutionSucceeded` in the runner and
- * `completionSucceeded` in the API. Only the runner asks it now — the control
- * plane reads the outcome instead — but it lives here because it is the
- * predicate whose duplication the outcome exists to end, and a second copy
- * appearing anywhere is the regression to catch.
+ * This is the extension of the outcome above to the record the outcome is
+ * derived from. It replaces `agentExecutionSucceeded` — itself the one copy of
+ * what used to be `adapterExecutionSucceeded` in the runner and
+ * `completionSucceeded` in the API — because that predicate was only the first
+ * of four readings of the same five fields. The others were written
+ * independently, in three modules: the Codex adapter's in-Run resume
+ * qualification, the runner's post-delivery disconnect tolerance, and the
+ * runner's "did the provider explicitly reject this session" test. One repair
+ * to the shared question reached one of them at a time — a regex tightened in
+ * the adapter, a field typed in the runner, clauses reordered at a call site —
+ * for one question about one record.
+ *
+ * The cases partition the record, so each reading is one case and no reader
+ * restates a field. Only the runner asks; the control plane reads the outcome
+ * instead. It lives here because it is the predicate whose duplication the
+ * outcome exists to end, and a second copy appearing anywhere is the
+ * regression to catch.
  */
-export const agentExecutionSucceeded = (evidence: AgentExitEvidence): boolean =>
-  evidence.exitCode === 0
-  && !evidence.signal
-  && !evidence.terminationReason
-  && evidence.terminalEventSeen
-  && evidence.terminalSuccess;
+export type AgentExitVerdict =
+  /**
+   * The agent emitted a terminal event reporting failure. That rejection is
+   * the agent's own and stands whatever the process then did.
+   */
+  | { case: "refused" }
+  /** The agent reported success, nothing stopped the child, and it exited 0. */
+  | { case: "succeeded" }
+  /**
+   * The agent reported success and its process disagreed: a signal, a
+   * runner-ordered termination, or a non-zero exit. No caller reads this case;
+   * it exists so that `succeeded` needs no further qualification from the
+   * readers, which is the duplication this verdict ends.
+   */
+  | { case: "contradicted" }
+  /** The runner or the OS ended the child before the agent said anything. */
+  | { case: "stopped" }
+  /**
+   * The child ended without a terminal event and without being stopped: the
+   * provider stream is simply gone. `cleanExit` is the process having exited
+   * 0 — the shape a dropped connection takes when the CLI still shut itself
+   * down in order. Whether such a drop can be continued is a judgement about
+   * the provider, not about this record, and stays with the adapter that owns
+   * the provider.
+   */
+  | { case: "dropped"; cleanExit: boolean };
+
+export const agentExitVerdict = (evidence: AgentExitEvidence): AgentExitVerdict => {
+  const stopped = Boolean(evidence.signal) || Boolean(evidence.terminationReason);
+  if (evidence.terminalEventSeen) {
+    if (!evidence.terminalSuccess) return { case: "refused" };
+    return stopped || evidence.exitCode !== 0 ? { case: "contradicted" } : { case: "succeeded" };
+  }
+  if (stopped) return { case: "stopped" };
+  return { case: "dropped", cleanExit: evidence.exitCode === 0 };
+};
 
 export type RunOutcomeVerdict = {
   succeeded: boolean;

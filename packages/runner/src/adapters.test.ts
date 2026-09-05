@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
 
-import { agentExecutionSucceeded, isCodexReconnectStatus } from "@anneal/db";
+import { agentExitVerdict, isCodexReconnectStatus } from "@anneal/db";
 
 import {
   adapters, argsForRunner, buildChildEnvironment, buildPrompt, createAdapterState, failureReasonFromEvidence,
@@ -18,7 +18,7 @@ import { parseClaudeTranscript } from "./adapters/claude.js";
 import {
   CODEX_STARTER_MODEL,
   initialCodexState,
-  isCodexInRunResumeCandidate,
+  isCodexProviderDisconnect,
   parseCodexEvent,
   parseCodexTranscript,
   type CodexProviderState,
@@ -1545,8 +1545,8 @@ test("exit code zero without a provider terminal event is failure", () => {
     stdout: "",
     stderr: "",
   };
-  assert.equal(agentExecutionSucceeded(evidence), false);
-  assert.equal(agentExecutionSucceeded({ ...evidence, terminalEventSeen: true, terminalSuccess: true }), true);
+  assert.deepEqual(agentExitVerdict(evidence), { case: "dropped", cleanExit: true });
+  assert.equal(agentExitVerdict({ ...evidence, terminalEventSeen: true, terminalSuccess: true }).case, "succeeded");
 });
 
 const codexStateOf = (state: AdapterState): CodexProviderState => state.providerState as CodexProviderState;
@@ -1582,7 +1582,7 @@ test("Codex treats recovered reconnect evidence as provisional after terminal co
   assert.equal(evidence.terminalEventSeen, true);
   assert.equal(evidence.terminalSuccess, true);
   assert.equal(evidence.providerError, "Reconnecting... 2/5");
-  assert.equal(agentExecutionSucceeded(evidence), true);
+  assert.equal(agentExitVerdict(evidence).case, "succeeded");
 });
 
 test("Codex emits an observed-child signal only after a spawn returns a child thread", () => {
@@ -1641,7 +1641,7 @@ test("Codex reconnect progress stays provisional when the counter carries its ca
   const evidence = evidenceFromState(state);
 
   assert.equal(evidence.terminalSuccess, true);
-  assert.equal(agentExecutionSucceeded(evidence), true);
+  assert.equal(agentExitVerdict(evidence).case, "succeeded");
 });
 
 test("Codex latches a real provider error that only resembles reconnect progress", () => {
@@ -1655,7 +1655,7 @@ test("Codex latches a real provider error that only resembles reconnect progress
   for (const message of cases) {
     const state = parseCodexTranscript([{ type: "error", message }, { type: "turn.completed" }]);
     assert.equal(state.terminalSuccess, false, message);
-    assert.equal(agentExecutionSucceeded(evidenceFromState(state)), false, message);
+    assert.equal(agentExitVerdict(evidenceFromState(state)).case, "refused", message);
   }
 });
 
@@ -1666,11 +1666,11 @@ test("Codex preserves reconnect evidence when the stream ends before completion"
 
   assert.equal(evidence.terminalEventSeen, false);
   assert.equal(evidence.terminalSuccess, false);
-  assert.equal(agentExecutionSucceeded(evidence), false);
+  assert.deepEqual(agentExitVerdict(evidence), { case: "dropped", cleanExit: false });
   assert.equal(failureReasonFromEvidence(evidence), reconnectMessage);
 });
 
-test("Codex in-Run resume predicate covers reconnect, network, and disqualifying exits", () => {
+test("Codex provider-disconnect predicate covers reconnect, network, and disqualifying exits", () => {
   const reconnectMessage = "Reconnecting... 3/5 (stream disconnected before completion: tls handshake eof)";
   const bareDisconnectMessage = "stream disconnected before completion: tls handshake eof";
   const base: ExitEvidence = {
@@ -1689,36 +1689,26 @@ test("Codex in-Run resume predicate covers reconnect, network, and disqualifying
   // network retry pattern list; the Codex-owned status predicate recognizes it.
   assert.equal(isTransientNetworkError(reconnectMessage), false);
   const fresh = initialCodexState();
-  assert.equal(isCodexInRunResumeCandidate({ ...base, providerError: reconnectMessage }, "thread-1", fresh), true);
+  assert.equal(isCodexProviderDisconnect({ ...base, providerError: reconnectMessage }, fresh), true);
   assert.equal(isCodexReconnectStatus(bareDisconnectMessage), false);
   assert.equal(isTransientNetworkError(bareDisconnectMessage), false);
-  assert.equal(isCodexInRunResumeCandidate({
-    ...base,
-    providerError: bareDisconnectMessage,
-  }, "thread-1", fresh), true);
-  assert.equal(isCodexInRunResumeCandidate({ ...base, stderr: "fetch failed" }, "thread-1", fresh), true);
+  assert.equal(isCodexProviderDisconnect({ ...base, providerError: bareDisconnectMessage }, fresh), true);
+  assert.equal(isCodexProviderDisconnect({ ...base, stderr: "fetch failed" }, fresh), true);
 
-  const disqualified: Array<[string, Partial<ExitEvidence>, string | null, CodexProviderState]> = [
-    ["terminal event", { terminalEventSeen: true, providerError: reconnectMessage }, "thread-1", fresh],
-    ["signal", { signal: "SIGTERM", providerError: reconnectMessage }, "thread-1", fresh],
-    ["termination", { terminationReason: "cancelled", providerError: reconnectMessage }, "thread-1", fresh],
-    ["missing conversation", { providerError: reconnectMessage }, null, fresh],
-    ["binary missing", { exitCode: 127, providerError: "connection reset" }, "thread-1", fresh],
-    ["authentication", { providerError: "authentication_failed: connection reset" }, "thread-1", fresh],
-    ["rate limit", { providerError: "rate limit: connection reset" }, "thread-1", fresh],
+  // The exit record's own shape — a terminal event, a signal, a stamped
+  // termination — is `agentExitVerdict`'s question, and a missing conversation
+  // id is the relaunch gate's. What is left here is Codex-shaped.
+  const disqualified: Array<[string, Partial<ExitEvidence>, CodexProviderState]> = [
+    ["binary missing", { exitCode: 127, providerError: "connection reset" }, fresh],
+    ["authentication", { providerError: "authentication_failed: connection reset" }, fresh],
+    ["rate limit", { providerError: "rate limit: connection reset" }, fresh],
     ["tool failure", {
       providerError: '"isError":true stream disconnected before completion: tls handshake eof',
-    }, "thread-1", fresh],
-    ["prior provider error", { providerError: reconnectMessage }, "thread-1", {
-      sawNonReconnectProviderError: true,
-    }],
+    }, fresh],
+    ["prior provider error", { providerError: reconnectMessage }, { sawNonReconnectProviderError: true }],
   ];
-  for (const [name, overrides, conversationId, providerState] of disqualified) {
-    assert.equal(
-      isCodexInRunResumeCandidate({ ...base, ...overrides }, conversationId, providerState),
-      false,
-      name,
-    );
+  for (const [name, overrides, providerState] of disqualified) {
+    assert.equal(isCodexProviderDisconnect({ ...base, ...overrides }, providerState), false, name);
   }
 });
 
@@ -1732,7 +1722,7 @@ test("Codex preserves disqualifying provider-error history after reconnect statu
 
   assert.equal(evidence.providerError, reconnectMessage);
   assert.equal(codexStateOf(state).sawNonReconnectProviderError, true);
-  assert.equal(isCodexInRunResumeCandidate(evidence, "thread-1", state.providerState), false);
+  assert.equal(isCodexProviderDisconnect(evidence, state.providerState), false);
 });
 
 test("Codex bare disconnect evidence remains resumable provider history", () => {
@@ -1743,7 +1733,7 @@ test("Codex bare disconnect evidence remains resumable provider history", () => 
   const evidence = evidenceFromState(state);
 
   assert.equal(codexStateOf(state).sawNonReconnectProviderError, false);
-  assert.equal(isCodexInRunResumeCandidate(evidence, "thread-1", state.providerState), true);
+  assert.equal(isCodexProviderDisconnect(evidence, state.providerState), true);
 });
 
 test("Codex does not let augmented disconnect wording hide a provider error", () => {
@@ -1754,13 +1744,13 @@ test("Codex does not let augmented disconnect wording hide a provider error", ()
   const evidence = evidenceFromState(state);
 
   assert.equal(codexStateOf(state).sawNonReconnectProviderError, true);
-  assert.equal(isCodexInRunResumeCandidate(evidence, "thread-1", state.providerState), false);
+  assert.equal(isCodexProviderDisconnect(evidence, state.providerState), false);
 });
 
-test("only Codex declares the optional in-Run resume capability", () => {
-  assert.equal(typeof adapters.CODEX.isInRunResumeCandidate, "function");
-  assert.equal(adapters.CLAUDE.isInRunResumeCandidate, undefined);
-  assert.equal(adapters.PI.isInRunResumeCandidate, undefined);
+test("only Codex declares the optional provider-disconnect reading", () => {
+  assert.equal(typeof adapters.CODEX.isProviderDisconnect, "function");
+  assert.equal(adapters.CLAUDE.isProviderDisconnect, undefined);
+  assert.equal(adapters.PI.isProviderDisconnect, undefined);
 });
 
 test("PI terminal success follows the final provider attempt after an internal retry", () => {
@@ -1775,7 +1765,7 @@ test("PI terminal success follows the final provider attempt after an internal r
   assert.equal(evidence.terminalSuccess, true);
   assert.equal(evidence.providerError, null);
   assert.equal(evidence.finalOutput, "final PASS");
-  assert.equal(agentExecutionSucceeded(evidence), true);
+  assert.equal(agentExitVerdict(evidence).case, "succeeded");
 });
 
 test("PI exposes the exhausted provider error instead of a generic protocol failure", () => {

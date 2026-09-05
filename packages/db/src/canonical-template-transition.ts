@@ -1,33 +1,11 @@
 import { createHash } from "node:crypto";
-import { isDeepStrictEqual } from "node:util";
 
-import { AssigneeType, Prisma, RunStatus } from "@prisma/client";
+import { AssigneeType, RunStatus } from "@prisma/client";
 
 import { PR_TEMPLATE_NAME } from "./agent-contract.js";
 import { stepRole, type StepRole } from "./step-role.js";
-
-export type LegacyStepRecord = Readonly<{
-  name: string;
-  agentName: string | null;
-  assigneeType: AssigneeType;
-  approvalGate: boolean;
-  /**
-   * Defaults to false: generations registered before optional steps existed
-   * have no optional step, and their deployed rows are all optional = false.
-   */
-  optional?: boolean;
-  outputKind: string;
-  attachmentsFromPrevious: boolean;
-  opensPullRequest: boolean;
-  baseFromStepIndex: number | null;
-  layer: number;
-  spawnPolicy: Prisma.JsonValue;
-  /**
-   * Defaults to true: generations registered before this field existed
-   * predate steps that opt out of dependency provisioning.
-   */
-  provisionDependencies?: boolean;
-}>;
+import { retiredStepShapeDifferences, type LegacyStepRecord } from "./template-step-fields.js";
+import type { PersistedTemplateStepStructure } from "./template-sources.js";
 
 /**
  * Every retired canonical graph, keyed by the marker its renamed rows carry.
@@ -104,7 +82,7 @@ const legacyTemplateGenerations = {
     {
       marker: "pre-narrow-regression-lease",
       shape: [
-        { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
         { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
         { name: "Apply review fixes", agentName: "senior-dev", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
@@ -116,7 +94,7 @@ const legacyTemplateGenerations = {
     {
       marker: "pre-adjudication",
       shape: [
-        { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
         { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
         { name: "Opus adjudication", agentName: "review-adjudicator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "must-fix", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 3, spawnPolicy: null },
@@ -132,7 +110,7 @@ const legacyTemplateGenerations = {
       // changed prompts only. `promptDigest` is what tells the two apart.
       promptDigest: "1b2447559a77e28added3509a6f6b17bce8a8cd7db9113bdaaa17d581d874165",
       shape: [
-        { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
         { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
         { name: "Apply review fixes", agentName: "senior-dev", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
@@ -145,7 +123,7 @@ const legacyTemplateGenerations = {
       marker: "pre-platform-spec-materialization",
       promptDigest: "c1a9ec1f8e783c3c814c0d0f5f4a9b91d5759b9dc39473dc200447aeb96677c5",
       shape: [
-        { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
         { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
         { name: "Apply review fixes", agentName: "senior-dev", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
@@ -160,7 +138,7 @@ const legacyTemplateGenerations = {
       marker: "pre-regression-step-split",
       promptDigest: "a760a6ca04bc047b47831fc4a4064cf2157487142f32a480223d6b5d8187c4a1",
       shape: [
-        { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
         { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
         { name: "Apply review fixes", agentName: "senior-dev", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
@@ -173,7 +151,7 @@ const legacyTemplateGenerations = {
       marker: "pre-internal-npm-scope-rename",
       promptDigest: "3b50afcdd5aef2d0f06b00b7644cc67fac3ffbd29414e44564dc6aeb9757580d",
       shape: [
-        { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
         { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
         { name: "Apply review fixes", agentName: "senior-dev", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
@@ -199,7 +177,7 @@ const legacyTemplateGenerations = {
         integrator: 8,
       },
       shape: [
-        { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
         { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
         { name: "Apply review fixes", agentName: "senior-dev", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
@@ -217,7 +195,7 @@ const legacyTemplateGenerations = {
       promptDigest: "0aa379a51d722ec9b8b5d91bc6158d9dd9a1f5d380b50695613d5aece9afda46",
       shape: [
         { name: "Revalidate specification", agentName: "spec-revalidator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revalidation", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
-        { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
+        { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
         { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 2, layer: 3, spawnPolicy: null },
         { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 2, layer: 3, spawnPolicy: null },
         { name: "Apply review fixes", agentName: "senior-dev", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 4, spawnPolicy: null },
@@ -231,7 +209,7 @@ const legacyTemplateGenerations = {
       promptDigest: "c0ec5acb70b82b85bc3f3aff5840029a303d31e6098b7171a2bef35f105f3371",
       shape: [
         { name: "Revalidate specification", agentName: "spec-revalidator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revalidation", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
-        { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
+        { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
         { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 2, layer: 3, spawnPolicy: null },
         { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 2, layer: 3, spawnPolicy: null },
         { name: "Apply review fixes", agentName: "senior-dev", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 4, spawnPolicy: null },
@@ -245,7 +223,7 @@ const legacyTemplateGenerations = {
       promptDigest: "e8fdf5533275e85e33b0cf812db9474b00214de2401e4c97bb6eb0732f864df8",
       shape: [
         { name: "Revalidate specification", agentName: "spec-revalidator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revalidation", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
-        { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
+        { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
         { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 2, layer: 3, spawnPolicy: null, provisionDependencies: false },
         { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 2, layer: 3, spawnPolicy: null, provisionDependencies: false },
         { name: "Apply review fixes", agentName: "senior-dev", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 4, spawnPolicy: null },
@@ -260,10 +238,10 @@ const legacyTemplateGenerations = {
       marker: "pre-narrow-regression-lease",
       shape: [
         { name: "Write a spec", agentName: "spec", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "spec", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
-        { name: "Plan", agentName: "plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
+        { name: "Plan", agentName: "plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, requiresCommit: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
         { name: "Plan review", agentName: "review-coordinator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan-review", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
         { name: "Revise plan", agentName: "plan-reviser", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revised-plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 4, spawnPolicy: null },
-        { name: "Implementation", agentName: "implementation-plan-executioner", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: true, opensPullRequest: true, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
+        { name: "Implementation", agentName: "implementation-plan-executioner", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: true, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
         { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null },
         { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null },
         { name: "Apply review fixes", agentName: "senior-dev", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 7, spawnPolicy: null },
@@ -277,10 +255,10 @@ const legacyTemplateGenerations = {
       marker: "pre-adjudication",
       shape: [
         { name: "Write a spec", agentName: "spec", assigneeType: AssigneeType.AGENT, approvalGate: true, outputKind: "spec", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
-        { name: "Plan", agentName: "plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
+        { name: "Plan", agentName: "plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, requiresCommit: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
         { name: "Plan review", agentName: "review-coordinator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan-review", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
         { name: "Revise plan", agentName: "plan-reviser", assigneeType: AssigneeType.AGENT, approvalGate: true, outputKind: "revised-plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 4, spawnPolicy: null },
-        { name: "Implementation", agentName: "implementation-plan-executioner", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: true, opensPullRequest: true, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
+        { name: "Implementation", agentName: "implementation-plan-executioner", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: true, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
         { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null },
         { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null },
         { name: "Opus adjudication", agentName: "review-adjudicator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "must-fix", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 5, layer: 7, spawnPolicy: null },
@@ -295,10 +273,10 @@ const legacyTemplateGenerations = {
       marker: "pre-zero-gate",
       shape: [
         { name: "Write a spec", agentName: "spec", assigneeType: AssigneeType.AGENT, approvalGate: true, outputKind: "spec", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
-        { name: "Plan", agentName: "plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
+        { name: "Plan", agentName: "plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, requiresCommit: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
         { name: "Plan review", agentName: "review-coordinator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan-review", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
         { name: "Revise plan", agentName: "plan-reviser", assigneeType: AssigneeType.AGENT, approvalGate: true, outputKind: "revised-plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 4, spawnPolicy: null },
-        { name: "Implementation", agentName: "implementation-plan-executioner", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: true, opensPullRequest: true, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
+        { name: "Implementation", agentName: "implementation-plan-executioner", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: true, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
         { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null },
         { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null },
         { name: "Apply review fixes", agentName: "senior-dev", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 7, spawnPolicy: null },
@@ -315,10 +293,10 @@ const legacyTemplateGenerations = {
       promptDigest: "a9994d131d1cf2667c6d61cc7161f5653cf9903a6aae77ed55c18b1db6fb3cf2",
       shape: [
         { name: "Write a spec", agentName: "spec", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "spec", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
-        { name: "Plan", agentName: "plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
+        { name: "Plan", agentName: "plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, requiresCommit: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
         { name: "Plan review", agentName: "review-coordinator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan-review", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
         { name: "Revise plan", agentName: "plan-reviser", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revised-plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 4, spawnPolicy: null },
-        { name: "Implementation", agentName: "implementation-plan-executioner", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: true, opensPullRequest: true, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
+        { name: "Implementation", agentName: "implementation-plan-executioner", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: true, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
         { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null },
         { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null },
         { name: "Apply review fixes", agentName: "senior-dev", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 7, spawnPolicy: null },
@@ -335,10 +313,10 @@ const legacyTemplateGenerations = {
       promptDigest: "74fe9add0789494efce82d477ea472ce2a16132fe105e6f12c87223c18dbabf8",
       shape: [
         { name: "Write a spec", agentName: "spec", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "spec", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
-        { name: "Plan", agentName: "plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
+        { name: "Plan", agentName: "plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, requiresCommit: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
         { name: "Plan review", agentName: "review-coordinator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan-review", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
         { name: "Revise plan", agentName: "plan-reviser", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revised-plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 4, spawnPolicy: null },
-        { name: "Implementation", agentName: "implementation-plan-executioner", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: true, opensPullRequest: true, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
+        { name: "Implementation", agentName: "implementation-plan-executioner", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: true, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
         { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null },
         { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null },
         { name: "Apply review fixes", agentName: "senior-dev", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 7, spawnPolicy: null },
@@ -353,10 +331,10 @@ const legacyTemplateGenerations = {
       promptDigest: "79845a3badc75200d30ac22cb4fb10c6efa38308c31156e7b15f4c8475e9f7ff",
       shape: [
         { name: "Write a spec", agentName: "spec", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "spec", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
-        { name: "Plan", agentName: "plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
+        { name: "Plan", agentName: "plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, requiresCommit: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
         { name: "Plan review", agentName: "review-coordinator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan-review", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
         { name: "Revise plan", agentName: "plan-reviser", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revised-plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 4, spawnPolicy: null },
-        { name: "Implementation", agentName: "implementation-plan-executioner", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: true, opensPullRequest: true, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
+        { name: "Implementation", agentName: "implementation-plan-executioner", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: true, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
         { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null },
         { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null },
         { name: "Apply review fixes", agentName: "senior-dev", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 7, spawnPolicy: null },
@@ -371,10 +349,10 @@ const legacyTemplateGenerations = {
       promptDigest: "606f9b5a667781cde3400d114cc7f2ebf00bada6995eee07a7019b63e7dd8424",
       shape: [
         { name: "Write a spec", agentName: "spec", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "spec", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
-        { name: "Plan", agentName: "plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
+        { name: "Plan", agentName: "plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, requiresCommit: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
         { name: "Plan review", agentName: "review-coordinator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan-review", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
         { name: "Revise plan", agentName: "plan-reviser", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revised-plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 4, spawnPolicy: null },
-        { name: "Implementation", agentName: "implementation-plan-executioner", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: true, opensPullRequest: true, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
+        { name: "Implementation", agentName: "implementation-plan-executioner", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: true, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
         { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null },
         { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null },
         { name: "Apply review fixes", agentName: "senior-dev", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 7, spawnPolicy: null },
@@ -389,10 +367,10 @@ const legacyTemplateGenerations = {
       promptDigest: "27d552a220439bc091956173bc5ee12e5e7158b160fb015443a68f2e744e85d8",
       shape: [
         { name: "Write a spec", agentName: "spec", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "spec", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
-        { name: "Plan", agentName: "plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
+        { name: "Plan", agentName: "plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, requiresCommit: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
         { name: "Plan review", agentName: "review-coordinator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan-review", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
         { name: "Revise plan", agentName: "plan-reviser", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revised-plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 4, spawnPolicy: null },
-        { name: "Implementation", agentName: "implementation-plan-executioner", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: true, opensPullRequest: true, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
+        { name: "Implementation", agentName: "implementation-plan-executioner", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: true, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
         { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null },
         { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null },
         { name: "Apply review fixes", agentName: "senior-dev", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 7, spawnPolicy: null },
@@ -407,10 +385,10 @@ const legacyTemplateGenerations = {
       promptDigest: "c3b3bb4692bda266e5afd81bb6ad258f58bd1eed14240f272338e0f44fa5e97e",
       shape: [
         { name: "Write a spec", agentName: "spec", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "spec", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
-        { name: "Plan", agentName: "plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
+        { name: "Plan", agentName: "plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, requiresCommit: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
         { name: "Plan review", agentName: "review-coordinator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan-review", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
         { name: "Revise plan", agentName: "plan-reviser", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revised-plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 4, spawnPolicy: null },
-        { name: "Implementation", agentName: "implementation-plan-executioner", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: true, opensPullRequest: true, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
+        { name: "Implementation", agentName: "implementation-plan-executioner", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: true, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
         { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null, provisionDependencies: false },
         { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null, provisionDependencies: false },
         { name: "Apply review fixes", agentName: "senior-dev", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 7, spawnPolicy: null },
@@ -430,7 +408,7 @@ const legacyTemplateGenerations = {
       marker: "pre-pr-handover-quality",
       promptDigest: "93a72d354876a6c26020e8638b6c365fb15e4ca4a400a2d6ca80084994f249d6",
       shape: [
-        { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
         { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
         { name: "Apply review fixes", agentName: "senior-dev", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
@@ -442,7 +420,7 @@ const legacyTemplateGenerations = {
       marker: "pre-pr-head-tree-check",
       promptDigest: "805b9e911be94c84e451cdbf4d1cdb93ab10031c031c6854947f56d306fb1906",
       shape: [
-        { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
         { name: "Code review (Opus blind)", agentName: "review-coordinator-opus", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
         { name: "Apply review fixes", agentName: "senior-dev", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
@@ -623,28 +601,26 @@ export const templateRolloverBlockerCount = (
 export const legacyAdjudicationTemplateName = (templateName: string, templateId: string): string =>
   legacyTemplateName(templateName, "pre-adjudication", templateId);
 
-export type PersistedTransitionStep = {
+/**
+ * A persisted step as a transition reads it: the structural columns every
+ * row-vs-spec comparison uses, plus the identity, prompt and task count a
+ * rollover decision needs. `optional` is required here because every row a
+ * transition sees carries the column.
+ */
+export type PersistedTransitionStep = PersistedTemplateStepStructure & {
   id: string;
   taskTemplateId: string;
   stepIndex: number;
-  name: string;
-  assigneeAgent: { name: string } | null;
-  assigneeType: string;
-  layer?: number | null;
-  approvalGate: boolean;
   optional: boolean;
-  outputKind: string;
-  attachmentsFromPrevious: boolean;
-  priorOutputKinds: string[];
-  opensPullRequest: boolean;
-  requiresCommit: boolean;
-  provisionDependencies: boolean;
-  baseFromStepIndex: number | null;
-  spawnPolicy: Prisma.JsonValue;
   prompt: string;
   _count?: { tasks: number };
 };
 
+/**
+ * Whether a persisted graph is exactly the graph a generation registered:
+ * contiguous step indexes from 1, and every structural field of every step
+ * equal to what the record states.
+ */
 const shapeMatches = (
   steps: readonly PersistedTransitionStep[],
   expected: readonly LegacyStepRecord[],
@@ -652,25 +628,7 @@ const shapeMatches = (
   if (steps.length !== expected.length) return false;
   const ordered = [...steps].sort((left, right) => left.stepIndex - right.stepIndex);
   if (ordered.some((step, index) => step.stepIndex !== index + 1)) return false;
-  for (const [index, step] of ordered.entries()) {
-    const expectedStep = expected[index]!;
-    if (step.name !== expectedStep.name
-      || (step.assigneeAgent?.name ?? null) !== expectedStep.agentName
-      || step.assigneeType !== expectedStep.assigneeType
-      || step.approvalGate !== expectedStep.approvalGate
-      || step.optional !== (expectedStep.optional ?? false)
-      || step.outputKind !== expectedStep.outputKind
-      || step.attachmentsFromPrevious !== expectedStep.attachmentsFromPrevious
-      || step.opensPullRequest !== expectedStep.opensPullRequest
-      || step.requiresCommit !== (expectedStep.outputKind === "plan" || expectedStep.outputKind === "implementation")
-      || step.provisionDependencies !== (expectedStep.provisionDependencies ?? true)
-      || step.baseFromStepIndex !== expectedStep.baseFromStepIndex
-      || step.layer !== expectedStep.layer
-      || !isDeepStrictEqual(step.spawnPolicy, expectedStep.spawnPolicy)) {
-      return false;
-    }
-  }
-  return true;
+  return ordered.every((step, index) => retiredStepShapeDifferences(step, expected[index]!).length === 0);
 };
 
 /**
