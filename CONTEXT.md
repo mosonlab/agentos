@@ -31,8 +31,9 @@ the frontier.
 
 **Merge gate**:
 The chain-tail verification that must pass before a chain's branch may merge:
-lint, types, and tests run by a gate worker in a clean environment. Gate
-evidence belongs to the chain tail only; review steps never run the gate.
+lint, types, and tests run by the merge gate on the exact head, locally or on a
+remote gate worker. Gate evidence belongs to the chain tail only; review steps
+never run the gate.
 
 **Merge readiness**:
 The mechanical chain step that validates durable **Merge gate** evidence
@@ -41,29 +42,33 @@ the exact merge. It performs no semantic review.
 
 **Lease**:
 The time-bounded claim a runner holds on a run, kept alive by heartbeats. An
-expired lease returns the run to the queue. The merge Lease is a separate
+expired lease marks the run lost; a retry run opens while the task's run budget
+remains, otherwise the task moves to review. The merge Lease is a separate
 global claim: **Merge readiness** obtains it and hands it to merge execution so
 only one chain integrates at a time.
 
 **Specification of record**:
 The single authoritative statement of what to build, which every later step
 obeys: the approved spec for a compound chain, the task brief for a direct
-chain. Materialized into the **Chain workspace** by the chain's first working
-step.
+chain. Materialized into the **Chain workspace** before implementation starts:
+by the plan step in a compound chain, by the platform when it hands a direct or
+PR chain branch to the runner.
 
 **Chain workspace**:
 The `.chain/<branchName>/` directory on the chain branch holding the
 materialized spec, slices, and decisions. Stripped from the mainline at merge;
-the chain branch is archived with it intact.
+the chain branch keeps it.
 
 **Blind review**:
 The two independent review passes (separate models, one fully isolated from
-prior step attachments) pinned to the same implementation range. Their
-findings go to a single **Disposition** step.
+prior step attachments) pinned to the same implementation range. The isolated
+pass is optional and a project may omit it. Their findings go to a single
+**Disposition**.
 
 **Disposition**:
-The per-finding ruling step after review: each finding is fixed, rejected
-with a reason, or accepted as follow-up. No finding is dropped silently.
+The per-finding ruling made by the review-fix step, with no adjudication step
+between the reviews and it: each finding is adopted and fixed, rejected with a
+reason, or merged into another finding. No finding is dropped silently.
 
 **Approval gate**:
 A chain step that halts until the operator approves its persisted output

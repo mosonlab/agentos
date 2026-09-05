@@ -114,8 +114,9 @@ interface, persisted data, a component boundary, or a foundational dependency.
 Seeded templates under `agents/templates/` are the execution canon: their
 Markdown owns step prompts, layer structure, blind-review isolation, and the
 mechanical merge tail. `agents/README.md` owns the structural rules that bind
-them. Model and runner defaults live in `agents/roles/` frontmatter and
-`packages/db/src/agent-contract.ts`.
+them. Model and runner defaults live in `agents/roles/` frontmatter;
+`packages/db/src/agent-contract.ts` validates them against the model catalog in
+`packages/db/src/model-routing.ts`.
 
 Chains instantiated before a template change retain stored prompts,
 assignments, and behavior. Canonical sync preserves superseded templates under
