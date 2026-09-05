@@ -1133,7 +1133,7 @@ test("aggregate Hold and Resume post fresh chain-control request ids", async () 
     "*": [],
   });
   try {
-    await page.press(en("tasks.aggregate.stopAfter"));
+    await page.press(en("tasks.aggregate.hold"));
     await page.press(en("tasks.aggregate.resume"));
     const controlRequests = page.requests.filter(({ method, path }) => method === "POST" && /chain\/(?:hold|resume)$/u.test(path));
     assert.deepEqual(controlRequests.map(({ path }) => path), [

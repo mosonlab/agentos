@@ -981,7 +981,6 @@ export const en = {
   "tasks.aggregate.state.settled": "Settled",
   "tasks.aggregate.state.stopsAfter": "Stops after step",
   "tasks.aggregate.state.waiting-on-predecessor": "Waiting",
-  "tasks.aggregate.stopAfter": "Stop after current step",
   "tasks.aggregate.waitingOn": "Locked by: {name}",
   "tasks.announcement.moved": "Moved {name} to {status}",
   "tasks.archiveAll": "Archive All",
