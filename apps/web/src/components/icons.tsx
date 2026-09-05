@@ -12,6 +12,9 @@ const Svg = ({ children, size = 16 }: { children: ReactNode; size?: number }): R
 export const IconInbox = (): ReactNode => (
   <Svg><path d="M1.8 8.6V3.4a1 1 0 0 1 1-1h10.4a1 1 0 0 1 1 1v5.2" /><path d="M1.8 8.6h3.4l1 1.8h3.6l1-1.8h3.4v3.8a1 1 0 0 1-1 1H2.8a1 1 0 0 1-1-1z" /></Svg>
 );
+export const IconMore = (): ReactNode => (
+  <Svg><circle cx="3.2" cy="8" r="1.1" fill="currentColor" stroke="none" /><circle cx="8" cy="8" r="1.1" fill="currentColor" stroke="none" /><circle cx="12.8" cy="8" r="1.1" fill="currentColor" stroke="none" /></Svg>
+);
 export const IconTasks = (): ReactNode => (
   <Svg><path d="M1.9 4h2M1.9 8h2M1.9 12h2M6.4 4h7.7M6.4 8h7.7M6.4 12h7.7" /></Svg>
 );

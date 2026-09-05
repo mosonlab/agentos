@@ -5,7 +5,8 @@ import { useT } from "../lib/i18n";
 import { timeAgo } from "../lib/format";
 import type { Health, RunnersResponse } from "../lib/types";
 import { cn } from "../lib/utils";
-import { DOT, DOT_TONE, RUNNER_ROW, RUNNER_STATE } from "./ui";
+import { Link } from "../lib/router";
+import { DOT, DOT_TONE, RUNNER_ROW, RUNNER_ROW_COMPACT, RUNNER_STATE } from "./ui";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "./ui/hover-card";
 
 type RunnersContextValue = { runners: Poll<RunnersResponse>; health: Poll<Health>; freshnessNow: number };
@@ -243,19 +244,34 @@ export const CodexReadinessNotice = ({ readiness }: { readiness: CodexReadiness 
   );
 };
 
-export const RunnerRow = (): ReactNode => {
+/**
+ * The sidebar's runner row is a link to Settings with a hover preview, not a
+ * hover-only button: hover is the one gesture a phone does not have, and a
+ * button that opened nothing on click gave a touch operator a row they could
+ * see and never act on. Settings carries the full daemon report, so the link is
+ * the same information at a slower pace. `compact` is the phone top-bar form —
+ * dot and state word only; `className` restyles the row for the phone sheet.
+ */
+export const RunnerRow = ({ compact = false, className, onNavigate }: {
+  compact?: boolean;
+  className?: string;
+  onNavigate?: () => void;
+}): ReactNode => {
   const { runners, health, freshnessNow } = useRunners();
   const t = useT();
   const summary = runners.error ? { state: "unknown", tone: "grey" } as const : runnerSummary(runners.data, new Date(freshnessNow));
+  const state = t(`runner.state.${summary.state}`);
+  const link = (
+    <Link to="/settings" className={cn(compact ? RUNNER_ROW_COMPACT : RUNNER_ROW, className)} {...(compact ? { title: `${t("runner.row")}: ${state}` } : {})} {...(onNavigate === undefined ? {} : { onClick: onNavigate })}>
+      <span className={cn(DOT, runnerDot(summary.tone))} />
+      {compact ? null : t("runner.row")}
+      <span className={cn(RUNNER_STATE, compact && "ml-0")}>{state}</span>
+    </Link>
+  );
+  if (compact || className !== undefined) return link;
   return (
     <HoverCard openDelay={120} closeDelay={80}>
-      <HoverCardTrigger asChild>
-        <button type="button" className={cn(RUNNER_ROW, "w-full border-0 bg-transparent text-left") }>
-          <span className={cn(DOT, runnerDot(summary.tone))} />
-          {t("runner.row")}
-          <span className={RUNNER_STATE}>{t(`runner.state.${summary.state}`)}</span>
-        </button>
-      </HoverCardTrigger>
+      <HoverCardTrigger asChild>{link}</HoverCardTrigger>
       <HoverCardContent side="right" align="end" sideOffset={8} className="w-[290px] rounded-lg p-[14px] font-mono">
         <RunnerStatusDetails
           payload={runners.data}

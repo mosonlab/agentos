@@ -59,16 +59,19 @@ export const matchRoute = (pattern: string, path: string): Record<string, string
   return params;
 };
 
-export const Link = ({ to, className, children, title }: {
+export const Link = ({ to, className, children, title, onClick: before }: {
   to: string;
   className?: string;
   children: ReactNode;
   title?: string;
+  /** Runs before navigation; a sheet or menu that hosts the link closes here. */
+  onClick?: () => void;
 }): ReactNode => {
   const onClick = useCallback((event: MouseEvent<HTMLAnchorElement>) => {
     event.preventDefault();
+    before?.();
     navigate(to);
-  }, [to]);
+  }, [before, to]);
   return (
     <a href={`#${to}`} className={className} onClick={onClick} {...(title === undefined ? {} : { title })}>
       {children}

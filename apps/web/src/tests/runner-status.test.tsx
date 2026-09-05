@@ -204,7 +204,8 @@ test("a mounted runner row ages to Unknown while hidden and stays Unknown when v
     if (path.endsWith("/runners") && count > 1) return { ok: false, body: { error: "unreachable" } };
     return { ok: true, body: path.endsWith("/runners") ? payload() : { status: "ok", database: "connected", checkedAt: now.toISOString() } };
   }, async ({ dom, advance }) => {
-    const rowState = (): string => dom.window.document.querySelector("button")?.textContent ?? "";
+    // The row is a link to Settings (hover-only buttons are unreachable by touch).
+    const rowState = (): string => dom.window.document.querySelector('a[href="#/settings"]')?.textContent ?? "";
     assert.match(rowState(), /Busy/);
     Object.defineProperty(dom.window.document, "hidden", { configurable: true, value: true });
     await advance(60_001);

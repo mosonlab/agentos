@@ -35,18 +35,28 @@ export { DOT, DOT_TONE, RunPill } from "./run-line";
  * `--radius-md` (6px), `--radius-lg` (8px) and `--radius-xl` (10px) directly.
  */
 
-export const PAGE = "max-w-[1240px] px-[34px] pt-[26px] pb-[80px] [@media(max-width:900px)]:px-[16px] [@media(max-width:900px)]:pt-[20px] [@media(max-width:900px)]:pb-[60px]";
+/** The phone bottom padding clears the fixed tab bar (`MOBILE_TABBAR`, 56px plus
+ *  the home-indicator inset) with room to spare, so the last card is never
+ *  parked under it. */
+export const PAGE = "max-w-[1240px] px-[34px] pt-[26px] pb-[80px] [@media(max-width:900px)]:px-[16px] [@media(max-width:900px)]:pt-[18px] [@media(max-width:900px)]:pb-[calc(84px+env(safe-area-inset-bottom))]";
 export const STACK = "grid grid-cols-[minmax(0,1fr)] gap-[16px]";
 export const ROW = "flex items-center gap-[10px]";
 export const ROW_WRAP = "flex flex-wrap items-center gap-[8px]";
 
-export const PAGE_HEAD = "mb-[18px] flex items-start gap-[20px]";
-export const PAGE_HEAD_TITLES = "min-w-0 flex-1";
+/** The head wraps: on a phone the titles keep at least 58% of the row, so a
+ *  single button stays beside the title while a toolbar of filters drops to its
+ *  own line instead of squeezing the subtitle to one word per line. */
+export const PAGE_HEAD = "mb-[18px] flex flex-wrap items-start gap-x-[20px] gap-y-[12px] [@media(max-width:900px)]:gap-x-[12px]";
+export const PAGE_HEAD_TITLES = "min-w-0 flex-1 [@media(max-width:900px)]:min-w-[55%]";
 export const PAGE_HEAD_H1 = "text-[22px] tracking-[-.01em]";
 export const PAGE_HEAD_SUBTITLE = "mt-[5px] text-[12.5px] text-muted-foreground";
-export const PAGE_ACTIONS = "flex items-center gap-[9px]";
-export const DETAIL_HEAD = "mb-[18px] flex items-center gap-[12px]";
-export const DETAIL_HEAD_H1 = "text-[20px]";
+export const PAGE_ACTIONS = "flex flex-wrap items-center justify-end gap-[9px] [@media(max-width:900px)]:justify-start";
+/** On a phone the title claims the rest of its line after the back arrow and
+ *  wraps as prose; the pills and buttons fall to a second line instead of
+ *  squeezing a task name to one word per row and pushing the page wider than
+ *  the viewport. */
+export const DETAIL_HEAD = "mb-[18px] flex flex-wrap items-center gap-[12px]";
+export const DETAIL_HEAD_H1 = "text-[20px] [overflow-wrap:anywhere] [@media(max-width:900px)]:flex-[1_0_60%] [@media(max-width:900px)]:text-[18px]";
 export const BACK_LINK = "inline-flex items-center gap-[8px] text-[12.5px] text-muted-foreground hover:text-foreground";
 export const TOOLBAR = "mb-[16px] flex items-center gap-[10px]";
 
@@ -84,15 +94,39 @@ export const BADGE_COUNT = "inline-grid h-[18px] min-w-[20px] place-items-center
  * `@media (max-width: 900px)` block, which collapsed the sidebar into a wrapping
  * row across the top and hid its footer. `flex-flow: wrap` is a shorthand, so it
  * also reset `flex-direction` to `row` — hence `flex-row` alongside `flex-wrap`. */
-export const SHELL = "grid min-h-screen grid-cols-[214px_minmax(0,1fr)] [@media(max-width:900px)]:grid-cols-[1fr]";
-export const SIDEBAR = "sticky top-0 flex h-screen flex-col gap-[2px] overflow-y-auto border-r border-[color:var(--border-soft)] bg-sidebar px-[10px] pt-[10px] pb-[12px] [@media(max-width:900px)]:static [@media(max-width:900px)]:h-auto [@media(max-width:900px)]:flex-row [@media(max-width:900px)]:flex-wrap";
-export const SIDEBAR_FOOT = "mt-auto grid gap-[2px] pt-[10px] [@media(max-width:900px)]:hidden";
+/** The phone rows are pinned to `auto 1fr`: implicit grid rows share the
+ *  `min-h-screen` slack equally, which parked a blank band the height of the
+ *  spare space between the top bar and a short page. */
+export const SHELL = "grid min-h-screen grid-cols-[214px_minmax(0,1fr)] [@media(max-width:900px)]:grid-cols-[1fr] [@media(max-width:900px)]:grid-rows-[auto_minmax(0,1fr)]";
+/** Desktop only: `Shell` swaps the sidebar for `MOBILE_TOPBAR` + `MOBILE_TABBAR`
+ *  at or below 900px, so there is no phone variant of this string. */
+export const SIDEBAR = "sticky top-0 flex h-screen flex-col gap-[2px] overflow-y-auto border-r border-[color:var(--border-soft)] bg-sidebar px-[10px] pt-[10px] pb-[12px]";
+export const SIDEBAR_FOOT = "mt-auto grid gap-[2px] pt-[10px]";
+
+/* The phone shell. A top bar that carries the project and the runner's one dot,
+ * a fixed five-slot tab bar for the four places an operator goes many times a
+ * day, and a sheet behind the fifth slot for everything else. Sticky and fixed
+ * geometry is stated here once: `MobileTaskList` pins its status strip under
+ * the top bar, and `PAGE` / `BOARD_PAGE` clear the tab bar. */
+export const MOBILE_TOPBAR_HEIGHT = 52;
+export const MOBILE_TOPBAR = "sticky top-0 z-[5] flex h-[52px] items-center gap-[4px] border-b border-[color:var(--border-soft)] bg-sidebar px-[8px]";
+export const MOBILE_TABBAR = "fixed inset-x-0 bottom-0 z-[5] grid grid-cols-5 border-t border-[color:var(--border-soft)] bg-sidebar pb-[env(safe-area-inset-bottom)]";
+export const MOBILE_TAB = "relative flex h-[56px] flex-col items-center justify-center gap-[5px] border-0 bg-transparent text-[10.5px] leading-none text-muted-foreground [&_svg]:size-[20px] [&_svg]:opacity-85";
+export const MOBILE_TAB_ACTIVE = "text-foreground [&_svg]:opacity-100 after:absolute after:top-0 after:h-[2px] after:w-[28px] after:rounded-full after:bg-primary";
+export const MOBILE_TAB_BADGE = "absolute top-[7px] left-[calc(50%+6px)]";
+export const SHEET = "inset-x-0 top-auto bottom-0 left-0 max-h-[85dvh] w-full translate-x-0 translate-y-0 overflow-y-auto rounded-t-[16px] rounded-b-none border-[color:var(--border-soft)] bg-popover px-[10px] pt-[14px] pb-[calc(10px+env(safe-area-inset-bottom))] font-mono";
+export const SHEET_TITLE = "mb-[8px] px-[12px] text-[11.5px] font-normal tracking-[.04em] text-[color:var(--faint)] uppercase";
+export const SHEET_ITEM = "flex w-full items-center gap-[12px] rounded-lg border-0 bg-transparent px-[12px] py-[12px] text-left text-[14px] text-secondary-foreground [&_svg]:flex-none [&_svg]:opacity-85";
+export const SHEET_ITEM_ACTIVE = "bg-accent text-foreground";
+export const SHEET_RULE = "my-[8px] border-t border-[color:var(--border-soft)]";
 export const PROJECT_SWITCHER = "flex w-full items-center gap-[9px] rounded-lg border border-transparent bg-transparent p-[8px] mb-[10px] text-left hover:bg-secondary";
 export const PROJECT_MARK = "grid flex-none place-items-center size-[26px] rounded-[7px] bg-primary text-[12px] font-bold text-primary-foreground";
 export const PROJECT_NAME = "min-w-0 flex-1 overflow-hidden text-[13px] text-ellipsis whitespace-nowrap";
 export const CHEVRON = "flex-none text-[color:var(--faint)]";
 export const RUNNER_ROW = "flex items-center gap-[10px] px-[10px] py-[8px] text-[12.5px] text-secondary-foreground whitespace-nowrap";
-export const RUNNER_STATE = "ml-auto text-[11.5px] text-[color:var(--faint)]";
+export const RUNNER_STATE = "ml-auto text-[11.5px] text-muted-foreground";
+/** The top-bar form of the runner row: the dot and the state word, no label. */
+export const RUNNER_ROW_COMPACT = "flex flex-none items-center gap-[7px] rounded-lg px-[10px] py-[8px] text-[11.5px] text-muted-foreground";
 export const CONTENT = "min-w-0 bg-popover";
 
 export const Page = ({ className, children }: { className?: string; children: ReactNode }): ReactNode => (
@@ -184,7 +218,7 @@ export const KeyValue = ({ items, columns }: {
 }): ReactNode => (
   <div className={cn(
     "grid gap-x-[40px] gap-y-[16px] [&>div]:min-w-0",
-    columns === 3 ? "grid-cols-[repeat(3,minmax(0,1fr))]" : "grid-cols-[repeat(2,minmax(0,1fr))]",
+    columns === 3 ? "grid-cols-[repeat(3,minmax(0,1fr))] [@media(max-width:900px)]:grid-cols-[repeat(2,minmax(0,1fr))]" : "grid-cols-[repeat(2,minmax(0,1fr))]",
   )}>
     {items.map((item) => (
       <div key={item.k}>

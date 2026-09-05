@@ -24,8 +24,8 @@ import { Button } from "./ui/button";
  * scrolls, which is the only scroll a phone reliably has, and every card in the
  * selected status is reachable by scrolling to it.
  */
-const TABS = "sticky top-0 z-[3] -mx-[16px] flex gap-[6px] overflow-x-auto border-b border-[color:var(--border-soft)] bg-popover px-[16px] py-[10px]";
-const TAB = "flex flex-none items-center gap-[6px] rounded-lg border border-transparent px-[11px] py-[6px] text-[12.5px] whitespace-nowrap text-muted-foreground";
+const TABS = "sticky top-[52px] z-[3] -mx-[16px] flex gap-[6px] overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden border-b border-[color:var(--border-soft)] bg-popover px-[16px] py-[10px]";
+const TAB = "flex flex-none items-center gap-[6px] rounded-lg border border-transparent px-[12px] py-[8px] text-[12.5px] whitespace-nowrap text-muted-foreground";
 const TAB_ON = "border-border bg-accent text-foreground";
 const LIST = "mt-[14px] grid grid-cols-[minmax(0,1fr)] gap-[10px]";
 const LIST_EMPTY = "px-0 py-[40px] text-center text-[12.5px] text-[color:var(--faint)]";

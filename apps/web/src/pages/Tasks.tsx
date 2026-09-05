@@ -32,7 +32,7 @@ import { Button } from "../components/ui/button";
  * (K1). Five 250px columns plus their gaps need 1,306px, so under the shared cap
  * the fifth column could never be on screen at once, at any viewport size.
  */
-export const BOARD_PAGE = "flex h-[100dvh] max-w-none flex-col overflow-hidden pb-[16px] [@media(max-width:900px)]:h-auto [@media(max-width:900px)]:overflow-visible [@media(max-width:900px)]:pb-[60px]";
+export const BOARD_PAGE = "flex h-[100dvh] max-w-none flex-col overflow-hidden pb-[16px] [@media(max-width:900px)]:h-auto [@media(max-width:900px)]:overflow-visible [@media(max-width:900px)]:pb-[calc(84px+env(safe-area-inset-bottom))]";
 const BOARD_STACK = "flex min-h-0 flex-1 flex-col gap-[16px]";
 
 /** The two shapes of the Archive All result, as one string. Exported so the
