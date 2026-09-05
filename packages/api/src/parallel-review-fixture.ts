@@ -206,10 +206,13 @@ const createParallelReviewHarness = ({
       select: { id: true, outputKind: true },
     });
     const outputKindOf = new Map(steps.map(({ id, outputKind }) => [id, outputKind]));
-    const byOutputKind = new Map(tasks.map((task) => [
-      task.templateStepId === null ? null : outputKindOf.get(task.templateStepId) ?? null,
-      task,
-    ]));
+    const byOutputKind = new Map<string, ChainTask>();
+    for (const task of tasks) {
+      const outputKind = task.templateStepId === null ? null : outputKindOf.get(task.templateStepId) ?? null;
+      assert.ok(outputKind, `chain task ${task.id} names no step of template ${taskTemplateId}`);
+      assert.ok(!byOutputKind.has(outputKind), `template ${taskTemplateId} declares ${outputKind} twice`);
+      byOutputKind.set(outputKind, task);
+    }
     return {
       taskFor: (outputKind: string): ChainTask => {
         const task = byOutputKind.get(outputKind);

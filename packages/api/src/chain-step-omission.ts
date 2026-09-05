@@ -84,15 +84,18 @@ export const templateStepInstantiation = <Step extends { outputKind: string; opt
   steps: readonly Step[],
   rules: TemplateStepOmissionRules,
 ): TemplateStepInstantiation<Step> => {
-  const omittedConditionalRevalidation = rules.routesImplementation
-    && !rules.boundToPredecessor
-    && steps.some((step) => stepRole(step) === "revalidation");
+  // Exactly one step is conditional, so exactly one ordinal can be dropped:
+  // the offset the caller applies to every retained ordinal is one, and a
+  // template that declared a second revalidation step would need its own rule.
+  const conditionalRevalidation = rules.routesImplementation && !rules.boundToPredecessor
+    ? steps.find((step) => stepRole(step) === "revalidation") ?? null
+    : null;
   return {
     instantiated: steps.filter((step) => {
-      if (omittedConditionalRevalidation && stepRole(step) === "revalidation") return false;
+      if (step === conditionalRevalidation) return false;
       if (rules.skipOptionalSteps && step.optional) return false;
       return true;
     }),
-    omittedConditionalRevalidation,
+    omittedConditionalRevalidation: conditionalRevalidation !== null,
   };
 };

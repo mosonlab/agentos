@@ -254,7 +254,7 @@ const fixedImplementationPersistenceRefusal = async (
     if (matches.length === 0) {
       // Absence of the sibling excuses the fix only when the producing step is
       // absent from the whole chain. A step this chain did instantiate is
-      // owed at the review boundary.
+      // owed in the fix step's predecessor layer.
       presence ??= await chainStepPresence(tx, {
         projectId: task.projectId,
         chainId: task.chainId,

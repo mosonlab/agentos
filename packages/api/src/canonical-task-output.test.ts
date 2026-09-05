@@ -385,7 +385,7 @@ test("a present blind review sibling without output keeps its exact refusal", as
   );
 });
 
-test("a review step this chain instantiated is owed at the review boundary", async () => {
+test("a review step this chain instantiated is owed in the predecessor layer", async () => {
   const result = await persistFixedOutput({
     reviewTasks: [reviewTask("sol-task", "sol-findings")],
     chainReviewSteps: [

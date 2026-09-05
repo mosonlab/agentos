@@ -50,6 +50,23 @@ test("instantiation omits the conditional revalidation step only when the chain 
   assert.deepEqual(kinds(otherFamily.instantiated), kinds(directSteps));
 });
 
+test("the conditional rule drops exactly one ordinal", () => {
+  // The caller shifts every retained ordinal down by one, so a template that
+  // declared a second revalidation-role step must not lose two steps here.
+  const twoRevalidations = [
+    { outputKind: "revalidation", optional: false },
+    { outputKind: "revalidation-v2", optional: false },
+    { outputKind: "implementation", optional: false },
+  ];
+  const instantiation = templateStepInstantiation(twoRevalidations, {
+    routesImplementation: true,
+    boundToPredecessor: false,
+    skipOptionalSteps: false,
+  });
+  assert.equal(instantiation.omittedConditionalRevalidation, true);
+  assert.deepEqual(kinds(instantiation.instantiated), ["revalidation-v2", "implementation"]);
+});
+
 test("instantiation omits optional steps independently of the conditional rule", () => {
   const both = templateStepInstantiation(directSteps, {
     routesImplementation: true,
