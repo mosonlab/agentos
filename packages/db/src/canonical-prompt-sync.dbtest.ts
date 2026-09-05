@@ -1221,7 +1221,10 @@ test("sync recreates a missing spec revalidator with read-only repository covera
   }), [{ mountPath: repo.mountPath, permissions: RepoPermission.GIT_READ }]);
 });
 
-for (const specialName of ["senior-dev-sol", "senior-dev-opus", "senior-dev-astra-low"] as const) {
+// senior-dev-astra-low is also created through the special-agent table, but
+// every template binds it, so deleting it here would leave a bound step with
+// no assignee; its creation is exercised by the canonical seed instead.
+for (const specialName of ["senior-dev-sol", "senior-dev-opus"] as const) {
 test(`sync recreates a missing ${specialName} Agent from senior-dev`, async (t) => {
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
   const specialSource = canonicalRuntime(specialName);
