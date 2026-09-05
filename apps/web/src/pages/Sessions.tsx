@@ -27,7 +27,7 @@ import {
   BACK_LINK, CODE_BLOCK, COUNT, DETAIL_HEAD, DETAIL_HEAD_H1, DOT, DOT_TONE, HINT, MSG_CARD, MSG_HEAD, MSG_TIME,
   PAGE_ACTIONS, PAGE_HEAD, PAGE_HEAD_H1, PAGE_HEAD_SUBTITLE, PAGE_HEAD_TITLES, ROW, STACK,
   STAT_PILL, STAT_PILLS,
-  Card, EmptyState, ErrorNotice, GapNotice, KeyValue, MarkdownClamp, Page, Pill, Segmented,
+  AgentChip, Card, EmptyState, ErrorNotice, GapNotice, KeyValue, MarkdownClamp, Page, Pill, Segmented,
   type PillTone,
 } from "../components/ui";
 import { Button } from "../components/ui/button";
@@ -146,8 +146,8 @@ const SessionHoverCard = ({ session, unseen }: { session: Session; unseen: boole
                 ? <Link to={`/goals/${session.goal.id}`}>{session.goal.title}</Link>
                 : session.id}
           </div>
-          <div className="mt-[3px] overflow-hidden text-ellipsis whitespace-nowrap text-[11.5px] text-muted-foreground">
-            {session.agent?.title || session.agentId}
+          <div className="mt-[3px] flex text-[11.5px] text-muted-foreground">
+            <AgentChip agent={session.agent ?? null} name={session.agentId} />
           </div>
         </div>
       </HoverCardTrigger>

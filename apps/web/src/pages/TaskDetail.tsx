@@ -17,7 +17,7 @@ import { RunLine } from "../components/run-line";
 import {
   BACK_LINK, COUNT, DETAIL_HEAD, DETAIL_HEAD_H1, MSG_CARD, MSG_HEAD, MSG_TIME, ROW, STACK,
   STAT_PILL, STAT_PILLS, TABLE_NAME, TABLE_SUB, TABLE_TIGHT,
-  Card, EmptyState, ErrorNotice, KeyValue, Markdown, MarkdownClamp, Page, Pill, RunPill, TaskPill, Toggle,
+  AgentChip, Card, EmptyState, ErrorNotice, KeyValue, Markdown, MarkdownClamp, Page, Pill, RunPill, TaskPill, Toggle,
 } from "../components/ui";
 import { retryShape, runLiveness } from "../lib/board";
 import { Button } from "../components/ui/button";
@@ -545,7 +545,9 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
   const chainStep = chain.data?.steps.find((step) => step.taskId === taskId) ?? null;
   const reassignable = chainStep?.reassignable ?? !runs.some((item) => runLiveness(item).live);
   const executionOwner = task.executionOwner === "agent"
-    ? task.assigneeAgent ? <Link to={`/agents/${task.assigneeAgent.id}`}>{task.assigneeAgent.title}</Link> : t("executionOwner.unassigned")
+    ? task.assigneeAgent
+      ? <Link to={`/agents/${task.assigneeAgent.id}`}><AgentChip agent={task.assigneeAgent} /></Link>
+      : t("executionOwner.unassigned")
     : t(`executionOwner.${task.executionOwner}`);
 
   return (

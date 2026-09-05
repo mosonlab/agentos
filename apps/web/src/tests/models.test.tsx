@@ -7,6 +7,9 @@ import { fileURLToPath } from "node:url";
 import {
   ENFORCED_BY, findModel, joinModel, MODELS, runnerForModel, splitModel, TOOL_KEYS, validateModelPair,
 } from "@anneal/db/model-routing";
+import {
+  agentRoleFromName, modelChipLabel, modelShortName, slugForModel, SLUG_EXEMPT_AGENT_NAMES,
+} from "../lib/models";
 
 /** The `mechanical/` provider is not a model provider. `merge-integrator` is a
  *  sentinel role whose "model" names a program, and the picker must *not* offer
@@ -63,4 +66,50 @@ test("validateModelPair names mismatches and permits the Custom escape hatch", (
   assert.equal(validateModelPair("my-own-model", "INHERIT"), null);
   assert.deepEqual(validateModelPair("", "CLAUDE"), { kind: "empty-model" });
   assert.equal(validateModelPair("claude-opus-5:high", "CLAUDE"), null);
+});
+
+/* ------------------------------------------------------------ slug naming */
+
+test("every catalog model names the short name its slugs carry", () => {
+  assert.deepEqual(
+    ["gpt-6-astra", "gpt-5.6-luna", "gpt-5.6-sol", "claude-opus-5", "claude-fable-5"].map(modelShortName),
+    ["astra", "luna", "sol", "opus", "fable"],
+  );
+  // The pi-hosted entries name the same model as their codex twins.
+  assert.equal(modelShortName("openai-codex/gpt-5.6-luna:max"), "luna");
+  // The mechanical sentinel names no model, which is why it has no slug.
+  assert.equal(modelShortName("mechanical/merge-executor-v1"), null);
+  for (const entry of MODELS) assert.ok(modelShortName(entry.id), entry.id);
+});
+
+test("the role half of a slug survives a runtime that changed under it", () => {
+  assert.equal(agentRoleFromName("senior-dev-astra-medium"), "senior-dev");
+  assert.equal(agentRoleFromName("code-reviewer-sol-high"), "code-reviewer");
+  assert.equal(agentRoleFromName("planner-opus-xhigh"), "planner");
+  // Not a short-name/effort pair, so nothing is stripped.
+  assert.equal(agentRoleFromName("nightly-triage"), "nightly-triage");
+  assert.equal(agentRoleFromName("senior-dev-astra-turbo"), "senior-dev-astra-turbo");
+  assert.equal(agentRoleFromName("merge-integrator"), "merge-integrator");
+  assert.equal(agentRoleFromName("default"), "default");
+});
+
+test("a slug is role-model-effort, and the model-free roles have none to regenerate", () => {
+  assert.equal(slugForModel("senior-dev-luna-max", "gpt-6-astra:medium"), "senior-dev-astra-medium");
+  assert.equal(slugForModel("senior-dev-astra-medium", "gpt-5.6-luna:max"), "senior-dev-luna-max");
+  assert.equal(slugForModel("code-reviewer-sol-high", "claude-opus-5:high"), "code-reviewer-opus-high");
+  assert.equal(slugForModel("librarian-opus-medium", "claude-fable-5:low"), "librarian-fable-low");
+  // An operator's own role name is the whole role.
+  assert.equal(slugForModel("nightly-triage", "gpt-5.6-sol:high"), "nightly-triage-sol-high");
+  // A Custom model is outside the rule, and a model with no effort pins nothing.
+  assert.equal(slugForModel("nightly-triage", "private/model:turbo"), null);
+  assert.equal(slugForModel("senior-dev-astra-medium", "gpt-6-astra"), null);
+  assert.equal(slugForModel("merge-integrator", "mechanical/merge-executor-v1"), null);
+  assert.deepEqual([...SLUG_EXEMPT_AGENT_NAMES], ["default", "merge-integrator"]);
+});
+
+test("the chip label states the catalog model and the effort, and nothing else", () => {
+  assert.equal(modelChipLabel("gpt-6-astra:medium"), "GPT-6 Astra (codex) · medium");
+  assert.equal(modelChipLabel("openai-codex/gpt-5.6-luna:max"), "GPT-5.6 Luna (pi) · max");
+  assert.equal(modelChipLabel("claude-opus-5"), "Claude Opus 5");
+  assert.equal(modelChipLabel("private/model:turbo"), "private/model · turbo");
 });

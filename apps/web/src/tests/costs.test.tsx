@@ -479,3 +479,41 @@ test("a window with no priced spend draws no bar rather than an empty one", () =
   const byModel: CostsReport["byModel"] = [{ model: "claude-opus-5", usd: "0", runs: 2, costUnavailableRuns: 2 }];
   assert.equal(renderToStaticMarkup(<ModelBar byModel={byModel} totalUsd="0" colors={colorsFor([])} />), "");
 });
+
+/* -------------------------------------- current configuration vs run model */
+
+test("the agent column names the agent's current configuration, and the model breakdown stays the run's", async () => {
+  const [{ CostsPage }, { ProjectProvider }] = await Promise.all([import("../pages/Costs"), import("../lib/project")]);
+  /* The report keys an agent by the `Agent.name` its runs carried. The roster
+   * says what that agent runs today, which is a different fact from the model
+   * any one of those runs actually executed with. */
+  const roster = [{
+    id: "a1", projectId: "p1", environmentId: "e1", name: "Senior Developer", canonicalRole: null,
+    customizedFields: [], title: "Senior Dev", model: "gpt-6-astra:medium", codexServiceTier: "DEFAULT",
+    runnerPreference: "CODEX", inboxAccess: false, disabledTools: [], foundationalPrompt: "f", rolePrompt: "r",
+    createdAt: "2026-09-01T00:00:00.000Z", updatedAt: "2026-09-01T00:00:00.000Z", archivedAt: null,
+  }];
+  const page = await mountPage(<ProjectProvider><CostsPage /></ProjectProvider>, { "*": ({ input }) => {
+    const url = String(input).replace(/^.*\/api/, "");
+    if (url === "/projects") return [{ id: "p1", name: "Anneal Example", slug: "agentos" }];
+    if (url.startsWith("/projects/p1/costs")) return report();
+    if (url === "/projects/p1/agents") return roster;
+    return [];
+  } }, "http://127.0.0.1:5173/costs");
+  try {
+    const text = page.container.textContent ?? "";
+    // The chip is the agent as it is configured now.
+    assert.match(text, /Senior Dev/u);
+    assert.match(text, /GPT-6 Astra \(codex\) · medium/u);
+    // The name the report keyed on stays on the row: it is what the legend uses.
+    assert.match(text, /Senior Developer/u);
+    // The spend breakdown is by the model each run executed with, and says so.
+    assert.match(text, /Run model/u);
+    assert.match(text, /openai-codex\/gpt-5.6-luna:max/u);
+    assert.match(text, /What each run actually executed with/u);
+    // An agent the roster no longer holds still names itself.
+    assert.match(text, /Planner/u);
+  } finally {
+    await page.dispose();
+  }
+});

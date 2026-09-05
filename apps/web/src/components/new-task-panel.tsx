@@ -180,7 +180,9 @@ export const NewTask = ({ projectId, project, agents, repos, onClose, onCreated 
   onCreated: () => void;
 }): ReactNode => {
   const templates = usePoll<TaskTemplate[]>(`/projects/${projectId}/task-templates`, 30_000);
-  const activeAgents = agents.filter((agent) => !agent.archivedAt);
+  // `assignable` is false only for the mechanical merge-integrator sentinel, and
+  // POST /projects/:id/tasks refuses it, so no picker in this panel offers it.
+  const activeAgents = agents.filter((agent) => !agent.archivedAt && agent.assignable !== false);
   const [mode, setMode] = useState<"blank" | "template">("blank");
   const [form, setForm] = useState({
     name: "", description: "",
@@ -249,7 +251,6 @@ export const NewTask = ({ projectId, project, agents, repos, onClose, onCreated 
   const activeStaffing = staffingSelection.contextKey === staffingContextKey
     ? staffingSelection
     : staffingSelectionFor(staffingContextKey, template, profiles);
-  const assignableAgents = activeAgents.filter((agent) => agent.assignable !== false);
   const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
 
   useEffect(() => {
@@ -467,7 +468,7 @@ export const NewTask = ({ projectId, project, agents, repos, onClose, onCreated 
                     {template.steps.map((step) => {
                       const chosen = activeStaffing.steps[String(step.stepIndex)];
                       const chosenId = chosen?.assigneeAgentId ?? "";
-                      const listed = assignableAgents.some((agent) => agent.id === chosenId);
+                      const listed = activeAgents.some((agent) => agent.id === chosenId);
                       return (
                         <div className="grid gap-[6px]" key={step.id}>
                           <Field label={t("newTask.staffing.step.agent", { name: step.name })}>
@@ -483,7 +484,7 @@ export const NewTask = ({ projectId, project, agents, repos, onClose, onCreated 
                                   {chosenId === "" || listed ? null : (
                                     <option value={chosenId}>{agentsById.get(chosenId)?.title ?? chosenId}</option>
                                   )}
-                                  {assignableAgents.map((agent) => (
+                                  {activeAgents.map((agent) => (
                                     <option key={agent.id} value={agent.id}>{agentOptionLabel(agent)}</option>
                                   ))}
                                 </Select>

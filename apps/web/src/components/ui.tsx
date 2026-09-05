@@ -12,8 +12,9 @@ import {
 import { Switch } from "./ui/switch";
 import { titleCase } from "../lib/format";
 import { useT, useTNodes } from "../lib/i18n";
+import { modelChipLabel } from "../lib/models";
 import { cn } from "../lib/utils";
-import type { Agent, GoalStatus, InboxStatus, TaskStatus } from "../lib/types";
+import type { GoalStatus, InboxStatus, TaskStatus } from "../lib/types";
 import { IconChevron, IconDots, IconRobot, IconUser } from "./icons";
 
 export { DOT, DOT_TONE, RunPill } from "./run-line";
@@ -184,22 +185,35 @@ export const InboxPill = ({ status }: { status: InboxStatus }): ReactNode => {
 
 const CHIP = "inline-flex items-center gap-[6px] rounded-full border px-[9px] py-[2px] text-[11.5px] leading-[19px]";
 
-/** What the chip reads off an Agent. A `ChainStep` carries its assignee as a
- *  four-column projection rather than a whole Agent row, and the chip has to
- *  accept that shape so a chain row can hand the object over instead of
- *  flattening it to a title string. */
-export type AgentChipSubject = Pick<Agent, "id" | "title" | "name" | "model">;
+/**
+ * What an Agent chip needs to name one: its title, and — when the caller has it
+ * — the runtime that title alone no longer distinguishes. Four Agents share the
+ * title "Senior Dev" and differ only by model and effort, so every list that
+ * shows an assignee shows the same two facts in the same shape.
+ *
+ * Structural rather than the full `Agent`: a Session, a chain step and a Task
+ * each carry their own narrow projection of the row, and all of them fit here.
+ */
+export type AgentChipAgent = {
+  id?: string;
+  title: string;
+  name?: string;
+  model?: string;
+};
 
 /** Agents are first-class everywhere: same violet chip + robot glyph (ui-notes §"要点提炼" 3). */
-export const AgentChip = ({ agent, name }: { agent?: AgentChipSubject | null; name?: string }): ReactNode => {
+export const AgentChip = ({ agent, name }: { agent?: AgentChipAgent | null; name?: string }): ReactNode => {
   const t = useT();
   const label = agent?.title ?? agent?.name ?? name;
   if (!label) {
     return <span className={cn(CHIP, "border-border bg-secondary text-secondary-foreground")}><IconUser />{t("ui.chip.unassigned")}</span>;
   }
   return (
-    <span className={cn(CHIP, "border-[color:var(--status-violet-line)] bg-[color:var(--status-violet-bg)] text-[color:var(--status-violet-fg)]")}>
-      <IconRobot />{label}
+    <span className={cn(CHIP, "max-w-full [&>svg]:flex-none border-[color:var(--status-violet-line)] bg-[color:var(--status-violet-bg)] text-[color:var(--status-violet-fg)]")}>
+      <IconRobot /><span className="min-w-0 truncate">{label}</span>
+      {agent?.model === undefined || agent.model === ""
+        ? null
+        : <span data-agent-chip-model className="min-w-0 truncate text-[11px] text-[color:var(--faint)]">{modelChipLabel(agent.model)}</span>}
     </span>
   );
 };

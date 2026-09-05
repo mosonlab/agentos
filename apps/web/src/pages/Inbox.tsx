@@ -13,7 +13,7 @@ import { IconArrowLeft, IconQuestion, IconRobot, IconUser } from "../components/
 import {
   BACK_LINK, DETAIL_HEAD, LONG_TEXT, MSG_CARD, MSG_HEAD, MSG_TIME, PAGE_HEAD, PAGE_HEAD_H1,
   PAGE_HEAD_SUBTITLE, PAGE_HEAD_TITLES, ROW, ROW_WRAP, STACK, STAT_PILL, TOOLBAR,
-  Card, EmptyState, ErrorNotice, InboxPill, Markdown, Page, Pill, Segmented,
+  AgentChip, Card, EmptyState, ErrorNotice, InboxPill, Markdown, Page, Pill, Segmented,
 } from "../components/ui";
 import { Button } from "../components/ui/button";
 import { Textarea } from "../components/ui/textarea";
@@ -41,20 +41,35 @@ const DEPLOY_STRIP = "flex items-center gap-[8px] rounded-xl border px-[16px] py
  *  every child of the container is a card, so the sibling combinator is exact. */
 const MSG_LIST = "[&>*+*]:mt-[12px]";
 
-const useAgentNames = (): Map<string, string> => {
+/** The roster by id, so a sender is named by the same chip the rest of the
+ *  console names an Agent with — title plus the model it currently runs. */
+const useAgentsById = (): Map<string, Agent> => {
   const { projectId } = useProjectScope();
   const { data } = usePoll<Agent[]>(projectId === "" ? null : `/projects/${projectId}/agents`, 30_000);
-  return new Map((data ?? []).map((agent) => [agent.id, agent.title]));
+  return new Map((data ?? []).map((agent) => [agent.id, agent]));
 };
 
 /* Pure and called from two components, so it reads the locale through `formatT`
  * — the WI-4 seam — rather than taking a `Translate` parameter (same rule as
  * WI-6's helpers). The agent's own title is API data and stays untranslated. */
-const senderName = (message: InboxMessage, names: Map<string, string>): string =>
+const senderName = (message: InboxMessage, agents: Map<string, Agent>): string =>
   // Unmatched inbound Feishu text lands here as a HUMAN message with no agent.
   message.from === "HUMAN" ? formatT("inbox.sender.you")
     : message.agentId === null ? formatT("inbox.sender.system")
-      : names.get(message.agentId) ?? formatT("inbox.sender.agent");
+      : agents.get(message.agentId)?.title ?? formatT("inbox.sender.agent");
+
+/** An agent-authored message whose Agent is still in the roster gets the chip;
+ *  a human, a system notice, or an Agent since deleted keeps the plain line. */
+const Sender = ({ message, agents }: { message: InboxMessage; agents: Map<string, Agent> }): ReactNode => {
+  const agent = message.from === "HUMAN" || message.agentId === null ? undefined : agents.get(message.agentId);
+  if (agent !== undefined) return <AgentChip agent={agent} />;
+  return (
+    <>
+      {message.from === "HUMAN" || message.agentId === null ? <IconUser /> : <IconRobot />}
+      <span className="text-foreground">{senderName(message, agents)}</span>
+    </>
+  );
+};
 
 const DEPLOY_TONE: Record<DeployNotice["outcome"], string> = {
   success: "border-border bg-card text-muted-foreground",
@@ -90,7 +105,7 @@ export const InboxPage = (): ReactNode => {
   const { projectId } = useProjectScope();
   const messagesPath = projectScopedPath("/inbox/messages", projectId);
   const { data, loading, error, reload } = usePoll<InboxMessage[]>(messagesPath);
-  const names = useAgentNames();
+  const agents = useAgentsById();
   const [filter, setFilter] = useState<InboxFilter>("active");
   const { pending, error: actionError, run } = useAction();
   const t = useT();
@@ -141,8 +156,7 @@ export const InboxPage = (): ReactNode => {
               <button type="button" className={INBOX_ITEM_HIT} onClick={() => navigate(`/inbox/${message.id}`)}>
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-[8px] text-[12.5px] font-bold text-foreground">
-                    {message.from === "HUMAN" || message.agentId === null ? <IconUser /> : <IconRobot />}
-                    {senderName(message, names)}
+                    <Sender message={message} agents={agents} />
                     {message.status === "OPEN" ? <InboxPill status={message.status} /> : null}
                     {message.gateTaskId === null ? null : <Pill tone="violet">{t("inbox.approvalGate")}</Pill>}
                   </div>
@@ -173,7 +187,7 @@ export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode
   const { projectId } = useProjectScope();
   const messagesPath = projectScopedPath("/inbox/messages", projectId);
   const { data, error, reload } = usePoll<InboxMessage[]>(messagesPath);
-  const names = useAgentNames();
+  const agents = useAgentsById();
   const [reply, setReply] = useState("");
   const { pending, error: actionError, run } = useAction();
   const t = useT();
@@ -284,8 +298,7 @@ export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode
         <div className={MSG_LIST}>
           <div className={MSG_CARD}>
             <div className={MSG_HEAD}>
-              {message.agentId === null ? <IconUser /> : <IconRobot />}
-              <span className="text-foreground">{senderName(message, names)}</span>
+              <Sender message={message} agents={agents} />
               <span className={MSG_TIME}>{formatDateTime(message.createdAt)}</span>
             </div>
             <Markdown text={message.body} />
