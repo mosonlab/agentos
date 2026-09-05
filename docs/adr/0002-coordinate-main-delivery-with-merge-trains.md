@@ -203,9 +203,16 @@ worktrees. It proves:
 - `.chain` is absent from the prefix tree;
 - a failed middle prefix cuts publication even when the final prefix passes;
 - a mechanical conflict ends the batch without an invented resolution;
-- main drift after gates causes zero publication; and
+- main drift after gates causes zero publication;
 - rerunning after a partial publication reads live `main`, skips the delivered
-  head, and rebuilds the remaining candidates.
+  head, and rebuilds the remaining candidates;
+- the post-gate acquire forwards the bounded `--timeout-minutes`, including an
+  explicit zero;
+- a wait resolved with unchanged `main` publishes the already-gated prefixes
+  without rerunning a gate;
+- a wait resolved with moved `main` returns `stale-base` and publishes nothing;
+  and
+- an expired wait returns `lease-contended` carrying `leaseWaitedMs`.
 
 The full merge gate remains the acceptance authority for the exact commit that
 introduces this machinery. That first delivery uses the old single-candidate

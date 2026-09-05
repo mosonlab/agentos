@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
 
@@ -170,7 +171,7 @@ for (const scenario of ["unchanged", "moved", "expired", "unreachable"]) {
                 assert.equal(args.at(-1), "2");
                 assert.equal(count, 2);
                 assert.equal(gated.length, 2, "all gates finish before acquisition starts");
-                events.push("contended");
+                events.push("acquire-attempted");
                 // Model polling inside the lease script: the caller awaits one execution.
                 await new Promise((resolve) => setImmediate(resolve));
                 assert.equal(await fixture.remoteMain(), fixture.baseSha);
@@ -195,7 +196,7 @@ for (const scenario of ["unchanged", "moved", "expired", "unreachable"]) {
       };
       if (scenario === "unreachable") {
         await assert.rejects(coordinateMergeTrain(options), /acquisition was unreachable: transport failed/u);
-        assert.deepEqual(events, ["contended"]);
+        assert.deepEqual(events, ["acquire-attempted"]);
         assert.equal(await fixture.remoteMain(), fixture.baseSha);
       } else {
         const result = await coordinateMergeTrain(options);
@@ -211,9 +212,9 @@ for (const scenario of ["unchanged", "moved", "expired", "unreachable"]) {
         }
         if (scenario === "expired") {
           assert.equal(result.leaseWaitedMs, 120_000);
-          assert.deepEqual(events, ["contended"]);
+          assert.deepEqual(events, ["acquire-attempted"]);
         } else {
-          assert.deepEqual(events, ["contended", "acquired", "released"]);
+          assert.deepEqual(events, ["acquire-attempted", "acquired", "released"]);
         }
       }
     } finally {
@@ -223,7 +224,7 @@ for (const scenario of ["unchanged", "moved", "expired", "unreachable"]) {
 }
 
 test("CLI documents lease wait and rejects invalid minute values before gating", async () => {
-  const script = new URL("./merge-train.mjs", import.meta.url).pathname;
+  const script = fileURLToPath(new URL("./merge-train.mjs", import.meta.url));
   const help = await command(process.execPath, [script, "--help"]);
   assert.match(help, /--lease-wait-minutes <n>/u);
   assert.match(help, /default: 10/u);
@@ -258,7 +259,7 @@ console.log(JSON.stringify({state: "OPEN", headRefOid: ${JSON.stringify(candidat
 `);
     await chmod(fakeBash, 0o755);
     await chmod(fakeGh, 0o755);
-    const script = new URL("./merge-train.mjs", import.meta.url).pathname;
+    const script = fileURLToPath(new URL("./merge-train.mjs", import.meta.url));
     await assert.rejects(execFileAsync(process.execPath, [
       script, "--task", "cli-wait", "--candidate", `283:${candidate.headSha}`, "--lease-wait-minutes", "2",
     ], {
