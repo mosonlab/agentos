@@ -180,7 +180,6 @@ test("a transient mirror fetch failure escapes provisioning as a transient error
     evidence: {
       exitCode: 1, signal: null, terminalEventSeen: false, terminalSuccess: false,
       finalOutput: null, providerError: null, terminationReason: null, stdout: "", stderr: escaped.message,
-      sawNonReconnectProviderError: false, firstNonReconnectProviderError: null,
     },
     runnerClass: "TRANSIENT_PROVIDER",
     error: escaped,

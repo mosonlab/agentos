@@ -17,9 +17,11 @@ import {
 import { parseClaudeTranscript } from "./adapters/claude.js";
 import {
   CODEX_STARTER_MODEL,
+  initialCodexState,
   isCodexInRunResumeCandidate,
   parseCodexEvent,
   parseCodexTranscript,
+  type CodexProviderState,
 } from "./adapters/codex.js";
 import { parsePiTranscript, piDeclaration } from "./adapters/pi.js";
 import type { ClaimedTask } from "./api.js";
@@ -1538,8 +1540,6 @@ test("exit code zero without a provider terminal event is failure", () => {
     terminalEventSeen: false,
     finalOutput: null,
     providerError: null,
-    sawNonReconnectProviderError: false,
-    firstNonReconnectProviderError: null,
     terminalSuccess: false,
     terminationReason: null,
     stdout: "",
@@ -1549,6 +1549,8 @@ test("exit code zero without a provider terminal event is failure", () => {
   assert.equal(agentExecutionSucceeded({ ...evidence, terminalEventSeen: true, terminalSuccess: true }), true);
 });
 
+const codexStateOf = (state: AdapterState): CodexProviderState => state.providerState as CodexProviderState;
+
 const evidenceFromState = (state: AdapterState, exitCode = 0): ExitEvidence => ({
   exitCode,
   signal: null,
@@ -1557,8 +1559,6 @@ const evidenceFromState = (state: AdapterState, exitCode = 0): ExitEvidence => (
   terminationReason: state.terminationReason,
   finalOutput: state.finalOutput,
   providerError: state.providerError,
-  sawNonReconnectProviderError: state.sawNonReconnectProviderError,
-  firstNonReconnectProviderError: state.firstNonReconnectProviderError,
   stdout: state.stdout,
   stderr: state.stderr,
 });
@@ -1587,7 +1587,7 @@ test("Codex treats recovered reconnect evidence as provisional after terminal co
 
 test("Codex emits an observed-child signal only after a spawn returns a child thread", () => {
   const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
-  const state = createAdapterState("CODEX", "transcript");
+  const state = createAdapterState("CODEX", "transcript", initialCodexState());
   const sink = (event: { type: string; payload: Record<string, unknown> }): void => { events.push(event); };
 
   parseCodexEvent(state, {
@@ -1681,8 +1681,6 @@ test("Codex in-Run resume predicate covers reconnect, network, and disqualifying
     terminationReason: null,
     finalOutput: null,
     providerError: null,
-    sawNonReconnectProviderError: false,
-    firstNonReconnectProviderError: null,
     stdout: "",
     stderr: "",
   };
@@ -1690,34 +1688,37 @@ test("Codex in-Run resume predicate covers reconnect, network, and disqualifying
   // The Codex reconnect wording is intentionally not part of the shared
   // network retry pattern list; the Codex-owned status predicate recognizes it.
   assert.equal(isTransientNetworkError(reconnectMessage), false);
-  assert.equal(isCodexInRunResumeCandidate({ ...base, providerError: reconnectMessage }, "thread-1"), true);
+  const fresh = initialCodexState();
+  assert.equal(isCodexInRunResumeCandidate({ ...base, providerError: reconnectMessage }, "thread-1", fresh), true);
   assert.equal(isCodexReconnectStatus(bareDisconnectMessage), false);
   assert.equal(isTransientNetworkError(bareDisconnectMessage), false);
   assert.equal(isCodexInRunResumeCandidate({
     ...base,
     providerError: bareDisconnectMessage,
-  }, "thread-1"), true);
-  assert.equal(isCodexInRunResumeCandidate({ ...base, stderr: "fetch failed" }, "thread-1"), true);
+  }, "thread-1", fresh), true);
+  assert.equal(isCodexInRunResumeCandidate({ ...base, stderr: "fetch failed" }, "thread-1", fresh), true);
 
-  const disqualified: Array<[string, Partial<ExitEvidence>, string | null]> = [
-    ["terminal event", { terminalEventSeen: true, providerError: reconnectMessage }, "thread-1"],
-    ["signal", { signal: "SIGTERM", providerError: reconnectMessage }, "thread-1"],
-    ["termination", { terminationReason: "cancelled", providerError: reconnectMessage }, "thread-1"],
-    ["missing conversation", { providerError: reconnectMessage }, null],
-    ["binary missing", { exitCode: 127, providerError: "connection reset" }, "thread-1"],
-    ["authentication", { providerError: "authentication_failed: connection reset" }, "thread-1"],
-    ["rate limit", { providerError: "rate limit: connection reset" }, "thread-1"],
+  const disqualified: Array<[string, Partial<ExitEvidence>, string | null, CodexProviderState]> = [
+    ["terminal event", { terminalEventSeen: true, providerError: reconnectMessage }, "thread-1", fresh],
+    ["signal", { signal: "SIGTERM", providerError: reconnectMessage }, "thread-1", fresh],
+    ["termination", { terminationReason: "cancelled", providerError: reconnectMessage }, "thread-1", fresh],
+    ["missing conversation", { providerError: reconnectMessage }, null, fresh],
+    ["binary missing", { exitCode: 127, providerError: "connection reset" }, "thread-1", fresh],
+    ["authentication", { providerError: "authentication_failed: connection reset" }, "thread-1", fresh],
+    ["rate limit", { providerError: "rate limit: connection reset" }, "thread-1", fresh],
     ["tool failure", {
       providerError: '"isError":true stream disconnected before completion: tls handshake eof',
-    }, "thread-1"],
-    ["prior provider error", {
-      providerError: reconnectMessage,
+    }, "thread-1", fresh],
+    ["prior provider error", { providerError: reconnectMessage }, "thread-1", {
       sawNonReconnectProviderError: true,
-      firstNonReconnectProviderError: "policy denied",
-    }, "thread-1"],
+    }],
   ];
-  for (const [name, overrides, conversationId] of disqualified) {
-    assert.equal(isCodexInRunResumeCandidate({ ...base, ...overrides }, conversationId), false, name);
+  for (const [name, overrides, conversationId, providerState] of disqualified) {
+    assert.equal(
+      isCodexInRunResumeCandidate({ ...base, ...overrides }, conversationId, providerState),
+      false,
+      name,
+    );
   }
 });
 
@@ -1730,9 +1731,8 @@ test("Codex preserves disqualifying provider-error history after reconnect statu
   const evidence = evidenceFromState(state);
 
   assert.equal(evidence.providerError, reconnectMessage);
-  assert.equal(evidence.sawNonReconnectProviderError, true);
-  assert.equal(evidence.firstNonReconnectProviderError, "policy denied");
-  assert.equal(isCodexInRunResumeCandidate(evidence, "thread-1"), false);
+  assert.equal(codexStateOf(state).sawNonReconnectProviderError, true);
+  assert.equal(isCodexInRunResumeCandidate(evidence, "thread-1", state.providerState), false);
 });
 
 test("Codex bare disconnect evidence remains resumable provider history", () => {
@@ -1742,9 +1742,8 @@ test("Codex bare disconnect evidence remains resumable provider history", () => 
   }]);
   const evidence = evidenceFromState(state);
 
-  assert.equal(evidence.sawNonReconnectProviderError, false);
-  assert.equal(evidence.firstNonReconnectProviderError, null);
-  assert.equal(isCodexInRunResumeCandidate(evidence, "thread-1"), true);
+  assert.equal(codexStateOf(state).sawNonReconnectProviderError, false);
+  assert.equal(isCodexInRunResumeCandidate(evidence, "thread-1", state.providerState), true);
 });
 
 test("Codex does not let augmented disconnect wording hide a provider error", () => {
@@ -1754,9 +1753,8 @@ test("Codex does not let augmented disconnect wording hide a provider error", ()
   }]);
   const evidence = evidenceFromState(state);
 
-  assert.equal(evidence.sawNonReconnectProviderError, true);
-  assert.equal(evidence.firstNonReconnectProviderError, evidence.providerError);
-  assert.equal(isCodexInRunResumeCandidate(evidence, "thread-1"), false);
+  assert.equal(codexStateOf(state).sawNonReconnectProviderError, true);
+  assert.equal(isCodexInRunResumeCandidate(evidence, "thread-1", state.providerState), false);
 });
 
 test("only Codex declares the optional in-Run resume capability", () => {
@@ -1794,7 +1792,7 @@ test("PI exposes the exhausted provider error instead of a generic protocol fail
 });
 
 test("Codex agent progress renews an open command deadline while stderr does not", async () => {
-  const state = createAdapterState("CODEX", "transcript");
+  const state = createAdapterState("CODEX", "transcript", initialCodexState());
   parseCodexEvent(state, { type: "item.started", item: { id: "command-1", type: "command_execution", status: "in_progress" } }, () => undefined);
   const initialProgress = state.inFlightTool?.lastProgressAt;
   assert.ok(initialProgress);
@@ -1827,8 +1825,6 @@ test("source text cannot misclassify a provider failure as a missing binary", ()
     terminationReason: null,
     finalOutput: null,
     providerError: "request rejected by provider policy",
-    sawNonReconnectProviderError: true,
-    firstNonReconnectProviderError: "request rejected by provider policy",
     stdout: "throw new Error('No such file or directory')",
     stderr: "models cache warning",
   };
@@ -1845,8 +1841,6 @@ test("workspace TLS failures remain retryable after command retries are exhauste
     terminationReason: null,
     finalOutput: null,
     providerError: null,
-    sawNonReconnectProviderError: false,
-    firstNonReconnectProviderError: null,
     stdout: "",
     stderr: "git failed (128): LibreSSL SSL_connect: SSL_ERROR_SYSCALL in connection to github.com:443",
   };
@@ -1869,8 +1863,6 @@ test("a mid-response connection loss classifies TRANSIENT_PROVIDER, not AUTH_REQ
     terminationReason: null,
     finalOutput: "API Error: Connection lost mid-response. The response above may be incomplete.",
     providerError: "API Error: Connection lost mid-response. The response above may be incomplete.",
-    sawNonReconnectProviderError: false,
-    firstNonReconnectProviderError: null,
     stdout: "",
     stderr: "",
   };
@@ -1891,8 +1883,6 @@ test("a literal 401 in agent stdout does not classify as AUTH_REQUIRED", () => {
     terminationReason: null,
     finalOutput: null,
     providerError: null,
-    sawNonReconnectProviderError: false,
-    firstNonReconnectProviderError: null,
     stdout: 'return context.json({ error: "Stale fencing token" }, 401);',
     stderr: "",
   };
@@ -1908,8 +1898,6 @@ test("an auth failure that also mentions a dropped connection is AUTH_REQUIRED, 
     terminationReason: null,
     finalOutput: null,
     providerError: "authentication_failed: connection lost while refreshing credentials",
-    sawNonReconnectProviderError: false,
-    firstNonReconnectProviderError: null,
     stdout: "",
     stderr: "",
   };
@@ -1925,8 +1913,6 @@ test("a genuine auth failure on stderr still classifies AUTH_REQUIRED", () => {
     terminationReason: null,
     finalOutput: null,
     providerError: null,
-    sawNonReconnectProviderError: false,
-    firstNonReconnectProviderError: null,
     stdout: "",
     stderr: "authentication_failed: not logged in",
   };
@@ -1956,8 +1942,6 @@ test("a local CLI preflight timeout stays a deterministic failure, not a provide
     terminationReason: null,
     finalOutput: null,
     providerError: null,
-    sawNonReconnectProviderError: false,
-    firstNonReconnectProviderError: null,
     stderr: "\npreflight timed out after 30 seconds",
     stdout: "",
   };

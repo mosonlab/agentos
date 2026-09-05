@@ -22,12 +22,12 @@ export type RunLeaseClock = {
   clearInterval: (timer: unknown) => void;
 };
 
-/** The authority and lease time observed by an explicit renewal. */
+/** The decision-ready facts an explicit renewal settles. */
 export type RunLeaseRenewal = {
+  /** The authority after this renewal and every transition it started settled. */
   authority: Authority;
-  remainingLeaseMs: number;
-  /** Clock value at which remainingLeaseMs was measured. */
-  observedAt: number;
+  /** Lease time left as of this result, with no arithmetic left to the caller. */
+  leaseHeadroomMs: number;
   /** False when no control-plane response was received for this call. */
   accepted: boolean;
 };
@@ -57,7 +57,7 @@ export type RunLease<ProviderHandle extends object> = {
   abandonProviderLaunch: () => void;
   stopProvider: (handle: ProviderHandle, reason: string) => Promise<void>;
   checkpoint: () => Promise<Authority>;
-  /** Perform one immediate renewal and report the authority and live lease time. */
+  /** Renew once now and report the settled authority and the live lease headroom. */
   renewNow: () => Promise<RunLeaseRenewal>;
   close: () => Promise<void>;
 };
@@ -217,7 +217,7 @@ export const createRunLease = <ProviderHandle extends object>(
     return authority;
   };
 
-  const remainingLeaseMs = (): number => leaseRenewedAt + options.leaseSeconds * 1_000 - clock.now();
+  const leaseHeadroomMs = (): number => leaseRenewedAt + options.leaseSeconds * 1_000 - clock.now();
 
   const renewNow = async (): Promise<RunLeaseRenewal> => {
     // An interval round that was already in flight may have captured evidence
@@ -225,8 +225,11 @@ export const createRunLease = <ProviderHandle extends object>(
     // round so this result is fresh for the decision immediately ahead.
     if (renewalTask) await renewalTask;
     const accepted = await renew();
-    const observedAt = clock.now();
-    return { authority, remainingLeaseMs: remainingLeaseMs(), observedAt, accepted };
+    // Settle every transition this Lease has started, including ones an event
+    // flush adopted concurrently, so the reported authority is final and the
+    // headroom is measured after the wait rather than before it.
+    const settled = await checkpoint();
+    return { authority: settled, leaseHeadroomMs: leaseHeadroomMs(), accepted };
   };
 
   const enterPhase = async (next: RunLeasePhase): Promise<void> => {
