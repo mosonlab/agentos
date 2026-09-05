@@ -1007,9 +1007,9 @@ five sections, in order; no provider-generated or activity-log prose is added:
   output.`; a section not reached yet says exactly `Not available at this step.`.
   Delivery never invents `PASS`.
 - `Review outcomes` initially says `Not available at this step.`. The final
-  body reports every Sol and blind finding with its existing id, severity, and
-  title, then its final disposition and reason, closed evidence when present,
-  and the fixed output's `residualRisks`.
+  body reports every code review and blind code review finding with its
+  existing id, severity, and title, then its final disposition and reason,
+  closed evidence when present, and the fixed output's `residualRisks`.
 - `Anneal` contains the current Task id and non-null Chain id.
 
 Step 1 uses this body when it creates a pull request, and edits an already-open

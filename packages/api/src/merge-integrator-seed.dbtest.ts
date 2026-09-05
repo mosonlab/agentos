@@ -200,6 +200,20 @@ const rebindFixStepToRetiredSeniorDev = async (projectId: string, templateId: st
   });
 };
 
+/** Rebuild the pre-model-neutral shape that the retired registry identifies. */
+const restoreRetiredReviewStepNames = async (templateId: string): Promise<void> => {
+  await Promise.all([
+    db.taskTemplateStep.updateMany({
+      where: { taskTemplateId: templateId, outputKind: "sol-findings" },
+      data: { name: "Code review (Sol)" },
+    }),
+    db.taskTemplateStep.updateMany({
+      where: { taskTemplateId: templateId, outputKind: "blind-findings" },
+      data: { name: "Code review (Opus blind)" },
+    }),
+  ]);
+};
+
 test("a fresh seed writes the twelve-step, eight-step, and four-step canonical templates", async () => {
   const seeded = await seed();
   assert.equal(seeded.code, 0, seeded.output);
@@ -267,7 +281,7 @@ test("a fresh seed writes the twelve-step, eight-step, and four-step canonical t
   });
   assert.equal(pullRequest.steps.length, 4);
   assert.deepEqual(pullRequest.steps.map(({ name }) => name), [
-    "Implementation", "Code review (Sol)", "Code review (Opus blind)", "Apply review fixes",
+    "Implementation", "Code review", "Blind code review", "Apply review fixes",
   ]);
   assert.deepEqual(pullRequest.steps.map(({ assigneeAgent }) => assigneeAgent?.name), [
     "senior-dev-luna-max", "code-reviewer-sol-high", "code-reviewer-opus-high", "senior-dev-astra-low",
@@ -353,6 +367,7 @@ test("canonical sync installs the reviewed PR prompt generation while instantiat
   });
   await db.taskTemplateStep.update({ where: { id: fixed.id }, data: { prompt: reviewedPrompt } });
   await rebindFixStepToRetiredSeniorDev(project.id, template.id);
+  await restoreRetiredReviewStepNames(template.id);
   const reviewedSteps = await db.taskTemplateStep.findMany({
     where: { taskTemplateId: template.id },
     include: { assigneeAgent: true },
@@ -456,14 +471,20 @@ test("canonical sync rolls quiescent adjudication-era graphs only after active R
 
   // Rebuild each canonical row as the graph production actually carries: an
   // adjudication node between the review layer and the fix, with every later
-  // node one index and one layer further out.
+  // node one index and one layer further out. The review labels are restored
+  // below because this fixture represents rows from before their rename.
   const oldTasks: Task[] = [];
   for (const template of [direct, compound]) {
     await db.taskTemplateStep.updateMany({
       where: { taskTemplateId: template.id },
       data: { provisionDependencies: true },
     });
-    let historicalSteps = template.steps;
+    await restoreRetiredReviewStepNames(template.id);
+    let historicalSteps = await db.taskTemplateStep.findMany({
+      where: { taskTemplateId: template.id },
+      include: { assigneeAgent: true },
+      orderBy: { stepIndex: "asc" },
+    });
     await db.taskTemplateStep.updateMany({
       where: { taskTemplateId: template.id },
       data: { optional: false },
