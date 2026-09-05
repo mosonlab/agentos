@@ -74,7 +74,7 @@ it can.
 
 ## Routing
 
-Implementation has four routes:
+Implementation has five routes:
 
 - **senior-dev-luna** (template default): a brief with mechanical Acceptance
   is work that tier finishes under the chain's review and regression tail.
@@ -85,6 +85,10 @@ Implementation has four routes:
   brief defect.
 - **senior-dev-sol**, with the reason on the same line, only when the
   senior-dev model is unavailable for that work. It is never a default.
+- **senior-dev-opus**, with the reason on the same line, when the operator
+  chooses to spend Claude capacity on that work instead of Codex capacity.
+  It is the same senior-developer prompt on Claude Opus 5 medium; it is
+  never a default, and the chain keeps its Sol and blind reviews unchanged.
 - **frontend-dev** for frontend implementation work (UI components, pages,
   client-side behavior).
 

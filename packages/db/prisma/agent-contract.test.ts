@@ -125,6 +125,7 @@ test("named canonical roles use their model catalog runner and retired role name
     "librarian",
     "senior-dev",
     "senior-dev-sol",
+    "senior-dev-opus",
     "spec-revalidator",
     "implementation-plan-executioner",
   ]) {
