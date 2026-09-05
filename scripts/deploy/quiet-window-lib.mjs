@@ -5,69 +5,6 @@ export { DEFAULT_DEPLOY_ROLE, DEPLOY_ROLES, resolveDeployRole };
 
 export const BLOCKING_RUN_STATUSES = Object.freeze(["claimed", "provisioning", "running"]);
 
-export const DEFAULT_RUNNER_COUNT = 10;
-export const MAX_RUNNER_COUNT = 64;
-
-export const resolveRunnerIdPrefix = (environment = process.env) => {
-  const prefix = environment?.AGENTOS_RUNNER_ID_PREFIX ?? "";
-  if (typeof prefix !== "string" || !/^[A-Za-z0-9_.-]*$/u.test(prefix)) {
-    throw new Error(`runner-id-prefix-invalid:${String(prefix)}`);
-  }
-  return prefix;
-};
-
-const validatedRunnerCount = (value) => {
-  const count = typeof value === "number"
-    ? value
-    : typeof value === "string" && /^[0-9]+$/u.test(value)
-      ? Number(value)
-      : NaN;
-  if (!Number.isSafeInteger(count) || count < 1 || count > MAX_RUNNER_COUNT) {
-    throw new Error(`runner-count-invalid:${String(value)}`);
-  }
-  return count;
-};
-
-/** Resolve the configured number of service runners. Keep this implementation
- * in lockstep with launchd-service-wrapper.mjs, which is copied as a
- * standalone artifact and therefore cannot import this module. */
-export const resolveRunnerCount = (environment = process.env) => {
-  const configured = environment?.AGENTOS_RUNNER_COUNT;
-  return validatedRunnerCount(configured === undefined ? DEFAULT_RUNNER_COUNT : configured);
-};
-
-const runnerLabelForIndex = (index) => index === 1
-  ? "com.agentos.runner"
-  : `com.agentos.runner-${index}`;
-
-/** Generate the ordered service inventory consumed by deploy control paths. */
-export const generateServiceInventory = (
-  runnerCount = resolveRunnerCount(),
-  runnerIdPrefix = resolveRunnerIdPrefix(),
-  deployRole = resolveDeployRole(),
-) => {
-  const count = validatedRunnerCount(runnerCount);
-  const prefix = resolveRunnerIdPrefix({ AGENTOS_RUNNER_ID_PREFIX: runnerIdPrefix });
-  if (!DEPLOY_ROLES.includes(deployRole)) throw new Error(`deploy-role-invalid:${String(deployRole)}`);
-  const entries = [
-    ...(deployRole === DEFAULT_DEPLOY_ROLE
-      ? [{ label: "com.agentos.api", runnerId: null }, { label: "com.agentos.inbox", runnerId: null }]
-      : []),
-    ...Array.from({ length: count }, (_unused, offset) => {
-      const index = offset + 1;
-      return { label: runnerLabelForIndex(index), runnerId: `${prefix}runner-${index}` };
-    }),
-    ...(deployRole === DEFAULT_DEPLOY_ROLE ? [{ label: "com.agentos.web", runnerId: null }] : []),
-  ];
-  return Object.freeze(entries.map((entry) => Object.freeze({
-    ...entry,
-    unitName: `${entry.label}.service`,
-  })));
-};
-
-export const SERVICE_INVENTORY_ENTRIES = generateServiceInventory();
-export const SERVICE_LABELS = Object.freeze(SERVICE_INVENTORY_ENTRIES.map(({ label }) => label));
-
 export class DeployFailure extends Error {
   constructor(reason, detail = "") {
     super(detail === "" ? reason : `${reason}: ${detail}`);

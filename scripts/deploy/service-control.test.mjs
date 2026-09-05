@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { DeployFailure, SERVICE_LABELS } from "./quiet-window-lib.mjs";
+import { DeployFailure } from "./quiet-window-lib.mjs";
+import { generateServiceInventory, resolveServiceInventory } from "./service-inventory.mjs";
 import {
   createServiceControl,
   describesStableWrapper,
   serviceUnitName,
 } from "./service-control.mjs";
+
+const DEFAULT_INVENTORY = resolveServiceInventory({});
+const SERVICE_LABELS = DEFAULT_INVENTORY.labels;
 
 const runRecorder = (responses = {}) => {
   const calls = [];
@@ -19,10 +23,18 @@ const runRecorder = (responses = {}) => {
   return { calls, run };
 };
 
-test("service unit names are derived from labels", () => {
-  assert.equal(serviceUnitName("com.agentos.api"), "com.agentos.api.service");
+test("service unit names are read out of the inventory the caller resolved", () => {
+  assert.equal(serviceUnitName("com.agentos.api", DEFAULT_INVENTORY), "com.agentos.api.service");
   assert.throws(
-    () => serviceUnitName("com.agentos/api"),
+    () => serviceUnitName("com.agentos.api", generateServiceInventory({
+      runnerCount: 2,
+      runnerIdPrefix: "",
+      deployRole: "runner",
+    })),
+    (error) => error instanceof DeployFailure && error.reason === "service-control-label-invalid",
+  );
+  assert.throws(
+    () => serviceUnitName("com.agentos/api", DEFAULT_INVENTORY),
     (error) => error instanceof DeployFailure
       && error.reason === "service-control-label-invalid"
       && error.detail === "com.agentos/api",
@@ -35,11 +47,11 @@ test("runner role service control accepts only the local runner inventory", asyn
     platform: "linux",
     euid: 0,
     run: recorder.run,
-    environment: {
-      AGENTOS_DEPLOY_ROLE: "runner",
-      AGENTOS_RUNNER_COUNT: "2",
-      AGENTOS_RUNNER_ID_PREFIX: "mac-",
-    },
+    inventory: generateServiceInventory({
+      runnerCount: 2,
+      runnerIdPrefix: "mac-",
+      deployRole: "runner",
+    }),
   });
   await control.restart("com.agentos.runner-2");
   assert.deepEqual(recorder.calls.map(({ program, args }) => [program, args]), [
@@ -57,7 +69,7 @@ test("Linux root control uses bare systemctl verbs and the stable ExecStart quer
       stderr: "",
     },
   });
-  const control = createServiceControl({ platform: "linux", euid: 0, run: recorder.run });
+  const control = createServiceControl({ inventory: DEFAULT_INVENTORY, platform: "linux", euid: 0, run: recorder.run });
 
   await control.restart("com.agentos.api");
   assert.equal(await control.isRunning("com.agentos.api"), true);
@@ -72,7 +84,7 @@ test("Linux non-root control prefixes sudo -n and an inactive unit is not runnin
   const recorder = runRecorder({
     "sudo -n systemctl is-active com.agentos.web.service": { code: 3, stdout: "inactive\n", stderr: "" },
   });
-  const control = createServiceControl({ platform: "linux", euid: 1000, run: recorder.run });
+  const control = createServiceControl({ inventory: DEFAULT_INVENTORY, platform: "linux", euid: 1000, run: recorder.run });
 
   assert.equal(await control.isRunning("com.agentos.web"), false);
   assert.deepEqual(recorder.calls.map(({ program, args }) => [program, args]), [
@@ -88,7 +100,7 @@ test("a denied Linux control command fails with the unit named", async () => {
       stderr: "sudo: a password is required\n",
     },
   });
-  const control = createServiceControl({ platform: "linux", euid: 1000, run: recorder.run });
+  const control = createServiceControl({ inventory: DEFAULT_INVENTORY, platform: "linux", euid: 1000, run: recorder.run });
 
   await assert.rejects(
     control.restart("com.agentos.api"),
@@ -107,7 +119,7 @@ test("a systemctl failure is distinct from sudo denial and retains diagnostics",
       stderr: "Job for com.agentos.api.service failed; inspect the journal\n",
     },
   });
-  const control = createServiceControl({ platform: "linux", euid: 1000, run: recorder.run });
+  const control = createServiceControl({ inventory: DEFAULT_INVENTORY, platform: "linux", euid: 1000, run: recorder.run });
   await assert.rejects(
     control.restart("com.agentos.api"),
     (error) => error instanceof DeployFailure
@@ -124,7 +136,7 @@ test("Darwin control preserves launchctl argv and GUI domain", async () => {
       stderr: "",
     },
   });
-  const control = createServiceControl({ platform: "darwin", uid: 501, run: recorder.run });
+  const control = createServiceControl({ inventory: DEFAULT_INVENTORY, platform: "darwin", uid: 501, run: recorder.run });
 
   await control.restart("com.agentos.api");
   assert.equal(await control.isRunning("com.agentos.api"), true);
@@ -149,7 +161,7 @@ test("every Linux inventory label uses the restart, liveness, and boundary argv"
     };
     return { code: 0, stdout: "", stderr: "" };
   };
-  const control = createServiceControl({ platform: "linux", euid: 0, run });
+  const control = createServiceControl({ inventory: DEFAULT_INVENTORY, platform: "linux", euid: 0, run });
 
   for (const label of SERVICE_LABELS) {
     await control.restart(label);
@@ -178,7 +190,7 @@ test("every Darwin inventory label keeps the launchctl command sequence", async 
     }
     return { code: 0, stdout: "", stderr: "" };
   };
-  const control = createServiceControl({ platform: "darwin", uid: 501, run });
+  const control = createServiceControl({ inventory: DEFAULT_INVENTORY, platform: "darwin", uid: 501, run });
 
   for (const label of SERVICE_LABELS) {
     await control.restart(label);

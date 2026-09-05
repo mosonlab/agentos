@@ -23,15 +23,14 @@ import { deployPhasesForRole } from "./deploy-phases.mjs";
 import { openDeploymentAttempt, parseReleaseArtifactReceipt } from "./deployment-attempt.mjs";
 import {
   DeployFailure,
-  SERVICE_LABELS,
   decideInvocation,
   deployedBuildStampRefusal,
   dryRunDecision,
   executeUpgrade,
-  generateServiceInventory,
   parseDeployArguments,
   quietWindowIsOpen,
 } from "./quiet-window-lib.mjs";
+import { resolveServiceInventory } from "./service-inventory.mjs";
 import {
   DEPLOY_REQUIRED_ARTIFACT_PATHS,
   deployReleaseArtifactPaths,
@@ -71,6 +70,7 @@ import {
 } from "./runner-role-target.mjs";
 import { runnerRegistrationRefusal } from "./runner-role-verification.mjs";
 
+const SERVICE_LABELS = resolveServiceInventory().labels;
 const revisions = { from: "a".repeat(40), to: "b".repeat(40) };
 const REPOSITORY_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const EXPECTED_RUNTIME_PATHS = RUNTIME_TOOL_FILES
@@ -890,13 +890,6 @@ test("service inventory covers the thirteen production labels", () => {
   assert.equal(SERVICE_LABELS.length, 13);
   assert.equal(SERVICE_LABELS[0], "com.agentos.api");
   assert.equal(SERVICE_LABELS.at(-1), "com.agentos.web");
-});
-
-test("runner role inventory contains only the configured local runners", () => {
-  assert.deepEqual(generateServiceInventory(2, "mac-", "runner"), [
-    { label: "com.agentos.runner", runnerId: "mac-runner-1", unitName: "com.agentos.runner.service" },
-    { label: "com.agentos.runner-2", runnerId: "mac-runner-2", unitName: "com.agentos.runner-2.service" },
-  ]);
 });
 
 test("runner quiet-window SQL admits only exact local runner ids", () => {

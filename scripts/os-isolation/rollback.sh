@@ -23,6 +23,8 @@ source "$SCRIPT_DIR/../deploy/service-platform.sh"
 if ! SERVICE_PLATFORM="$(agentos_service_platform)"; then
   exit 64
 fi
+# shellcheck source=../deploy/service-inventory.sh
+source "$SCRIPT_DIR/../deploy/service-inventory.sh"
 
 APPLY=0
 FORCE=0
@@ -37,14 +39,8 @@ for arg in "$@"; do
 done
 
 ACCOUNT_COUNT="${ACCOUNT_COUNT:-8}"
-SERVICE_RUNNER_COUNT="${AGENTOS_RUNNER_COUNT-10}"
-case "$SERVICE_RUNNER_COUNT" in
-  ''|*[!0-9]*) echo "runner-count-invalid:$SERVICE_RUNNER_COUNT" >&2; exit 64 ;;
-esac
-if [ "$SERVICE_RUNNER_COUNT" -lt 1 ] || [ "$SERVICE_RUNNER_COUNT" -gt 64 ]; then
-  echo "runner-count-invalid:$SERVICE_RUNNER_COUNT" >&2
-  exit 64
-fi
+agentos_load_service_inventory || exit 64
+SERVICE_RUNNER_COUNT="$AGENTOS_RUNNER_SERVICE_COUNT"
 ACCOUNT_PREFIX="${ACCOUNT_PREFIX:-_agentos}"
 GROUP_NAME="${GROUP_NAME:-agentos-runners}"
 AGENTOS_PREFIX="${AGENTOS_PREFIX:-/opt/agentos}"
@@ -92,8 +88,8 @@ if [ "$SERVICE_PLATFORM" = "linux" ]; then
     exit 1
   fi
   for i in $(seq 1 "$SERVICE_RUNNER_COUNT"); do
-    if [ "$i" = 1 ]; then label=com.agentos.runner; else label="com.agentos.runner-$i"; fi
-    unit="$label.service"
+    label="${AGENTOS_RUNNER_LABELS[$i]}"
+    unit="${AGENTOS_RUNNER_UNITS[$i]}"
     if ! environment_output="$("$SYSTEMCTL" show -p Environment --value "$unit" 2>/dev/null)"; then
       echo "systemd-runner-inspection-failed:$unit" >&2
       exit 1

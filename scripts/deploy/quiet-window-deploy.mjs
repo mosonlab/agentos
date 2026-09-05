@@ -26,12 +26,10 @@ import {
   dryRunDecision,
   executeUpgrade,
   failureOf,
-  generateServiceInventory,
   parseDeployArguments,
-  resolveRunnerCount,
-  resolveRunnerIdPrefix,
   shouldPersistFailure,
 } from "./quiet-window-lib.mjs";
+import { resolveServiceInventory, serviceWrapperPath } from "./service-inventory.mjs";
 import {
   acquireProcessLock,
   blockingRunsStatement,
@@ -71,7 +69,6 @@ import {
 import { findReleaseArtifact, verifyReleaseArtifact } from "./release-artifact.mjs";
 import { activateReleasePointer, rollbackReleasePointer } from "./release-pointer.mjs";
 import { verifyServiceInventory } from "./launchd-service-wrapper.mjs";
-import { serviceWrapperPath } from "./install-launchd.mjs";
 import { createServiceControl, describesStableWrapper } from "./service-control.mjs";
 import { resolveServicePlatform } from "./service-platform.mjs";
 import {
@@ -604,6 +601,7 @@ const pruneHistory = () => {
 
 export const createDefaultServiceControl = () => createServiceControl({
   platform: resolveServicePlatform(),
+  inventory: resolveServiceInventory(),
   run: command,
   checked,
   wrapperPath: serviceWrapperPath(REPOSITORY_ROOT),
@@ -629,11 +627,7 @@ export const verifyStableServicePaths = async (serviceControl, {
   repositoryRoot = REPOSITORY_ROOT,
   environment = process.env,
   fetchImpl = fetch,
-  labels = generateServiceInventory(
-    resolveRunnerCount(environment),
-    resolveRunnerIdPrefix(environment),
-    resolveDeployRoleOrFail(environment),
-  ).map(({ label }) => label),
+  labels = resolveServiceInventory(environment, resolveDeployRoleOrFail(environment)).labels,
 } = {}) => {
   const wrapper = serviceWrapperPath(repositoryRoot);
   try {
@@ -698,13 +692,9 @@ export const createDeployHost = ({
   serviceVerificationWait = sleep,
 } = {}) => {
   const runnerConfig = deployRole === "runner" ? requireRunnerDeployPreflight(environment) : null;
-  const serviceInventory = generateServiceInventory(
-    resolveRunnerCount(environment),
-    resolveRunnerIdPrefix(environment),
-    deployRole,
-  );
-  const serviceLabels = serviceInventory.map(({ label }) => label);
-  const localRunnerIds = runnerIdsFromInventory(serviceInventory);
+  const serviceInventory = resolveServiceInventory(environment, deployRole);
+  const serviceLabels = serviceInventory.labels;
+  const localRunnerIds = runnerIdsFromInventory(serviceInventory.entries);
   const scopedBlockingRuns = blockingRunsAdapter
     ?? (() => blockingRuns(deployRole === "runner" ? localRunnerIds : null));
   const apiBaseUrl = runnerConfig?.apiBaseUrl ?? null;

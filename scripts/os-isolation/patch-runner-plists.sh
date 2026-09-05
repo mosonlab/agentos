@@ -37,15 +37,6 @@ for arg in "$@"; do
 done
 
 ACCOUNT_COUNT="${ACCOUNT_COUNT-8}"
-SERVICE_RUNNER_COUNT_VALUE="${AGENTOS_RUNNER_COUNT-10}"
-case "$SERVICE_RUNNER_COUNT_VALUE" in
-  ''|*[!0-9]*) echo "runner-count-invalid:$SERVICE_RUNNER_COUNT_VALUE" >&2; exit 64 ;;
-esac
-if [ "$SERVICE_RUNNER_COUNT_VALUE" -lt 1 ] || [ "$SERVICE_RUNNER_COUNT_VALUE" -gt 64 ]; then
-  echo "runner-count-invalid:$SERVICE_RUNNER_COUNT_VALUE" >&2
-  exit 64
-fi
-RUNNER_SERVICE_COUNT="$SERVICE_RUNNER_COUNT_VALUE"
 case "$ACCOUNT_COUNT" in
   ''|*[!0-9]*) echo "account-count-invalid:$ACCOUNT_COUNT" >&2; exit 64 ;;
 esac
@@ -80,6 +71,20 @@ if ! SERVICE_PLATFORM="$(agentos_service_platform)"; then
   exit 64
 fi
 
+# The labels, unit names and plist names this script patches come from the one
+# service inventory generator, never from a local re-spelling.
+SERVICE_INVENTORY_HELPER="$SCRIPT_DIR/../deploy/service-inventory.sh"
+if [ ! -r "$SERVICE_INVENTORY_HELPER" ]; then
+  echo "service-inventory-resolver-missing:$SERVICE_INVENTORY_HELPER" >&2
+  exit 64
+fi
+. "$SERVICE_INVENTORY_HELPER"
+agentos_load_service_inventory || exit 64
+RUNNER_SERVICE_COUNT="$AGENTOS_RUNNER_SERVICE_COUNT"
+agentos_service_entry_for_label "$API_LABEL" || exit 64
+API_UNIT="$AGENTOS_SERVICE_UNIT"
+API_PLIST="$AGENTOS_SERVICE_PLIST"
+
 if [ "$(id -u)" = 0 ]; then
   echo "Do not run this as root: it would rewrite the operator's LaunchAgents as root-owned files." >&2
   exit 64
@@ -104,7 +109,10 @@ run() {
 
 buddy_get()    { "$PLIST_BUDDY" -c "Print :EnvironmentVariables:$2" "$1" 2>/dev/null || true; }
 buddy_has()    { "$PLIST_BUDDY" -c "Print :EnvironmentVariables:$2" "$1" >/dev/null 2>&1; }
-label_for()    { if [ "$1" = 1 ]; then printf 'com.agentos.runner\n'; else printf 'com.agentos.runner-%s\n' "$1"; fi; }
+# Both names come from the inventory: the drop-in directory is named after the
+# unit, the LaunchAgent file after the plist name.
+dropin_for()   { agentos_service_entry_for_label "$1" || return 64; printf '%s/%s.d/os-isolation.conf\n' "$SYSTEMD_STAGING_DIR" "$AGENTOS_SERVICE_UNIT"; }
+plist_for()    { agentos_service_entry_for_label "$1" || return 64; printf '%s/%s\n' "$AGENT_DIR" "$AGENTOS_SERVICE_PLIST"; }
 account_index_for() { printf '%s' "$(( ( $1 - 1 ) % ACCOUNT_COUNT + 1 ))"; }
 account_for()  { printf '%s%s' "$ACCOUNT_PREFIX" "$(account_index_for "$1")"; }
 manifest_for() { printf '%s/%s.manifest' "$MANIFEST_DIR" "$1"; }
@@ -411,8 +419,8 @@ linux_main() {
   fi
   if [ "$REVERT" = 1 ]; then
     for i in $(seq 1 "$RUNNER_SERVICE_COUNT"); do
-      label="$(label_for "$i")"
-      file="$SYSTEMD_STAGING_DIR/$label.service.d/os-isolation.conf"
+      label="${AGENTOS_RUNNER_LABELS[$i]}"
+      file="$(dropin_for "$label")"
       manifest="$(manifest_for "$label")"
       [ -f "$manifest" ] || fail "$label has no manifest at $manifest; there is no record of what to undo"
       [ ! -f "$manifest" ] || [ -r "$manifest" ] || fail "$manifest is not readable"
@@ -420,7 +428,7 @@ linux_main() {
       # manifest is present it is a drift/error, not a reason to skip silently.
       [ -f "$file" ] || fail "$label drop-in is missing at $file"
     done
-    api_dropin="$SYSTEMD_STAGING_DIR/$API_LABEL.service.d/os-isolation.conf"
+    api_dropin="$(dropin_for "$API_LABEL")"
     api_manifest="$(manifest_for "$API_LABEL")"
     [ -f "$api_manifest" ] || fail "$API_LABEL has no manifest at $api_manifest; there is no record of what to undo"
     [ -f "$api_dropin" ] || fail "$API_LABEL drop-in is missing at $api_dropin"
@@ -456,9 +464,9 @@ linux_main() {
 
   if [ "$REVERT" = 1 ]; then
     step "revert pre-flight: has anything moved since the patch?"
-    for label in $(for i in $(seq 1 "$RUNNER_SERVICE_COUNT"); do label_for "$i"; done) "$API_LABEL"; do
+    for label in "${AGENTOS_RUNNER_LABELS[@]}" "$API_LABEL"; do
       [ -n "$label" ] || continue
-      file="$SYSTEMD_STAGING_DIR/$label.service.d/os-isolation.conf"
+      file="$(dropin_for "$label")"
       manifest="$(manifest_for "$label")"
       expected_sha="$(awk -F'\t' '$1 == "applied-sha256" { print $2 }' "$manifest")"
       current_sha="$(sha256_of "$file")"
@@ -481,9 +489,9 @@ linux_main() {
       return 1
     fi
     step "field-level revert"
-    for label in $(for i in $(seq 1 "$RUNNER_SERVICE_COUNT"); do label_for "$i"; done) "$API_LABEL"; do
+    for label in "${AGENTOS_RUNNER_LABELS[@]}" "$API_LABEL"; do
       [ -n "$label" ] || continue
-      file="$SYSTEMD_STAGING_DIR/$label.service.d/os-isolation.conf"
+      file="$(dropin_for "$label")"
       manifest="$(manifest_for "$label")"
       linux_revert_dropin "$file" "$manifest" "$label"
       labels_touched+=("$label")
@@ -491,7 +499,7 @@ linux_main() {
     if [ "$APPLY" = 1 ]; then
       for label in "${labels_touched[@]:-}"; do
         [ -n "$label" ] || continue
-        file="$SYSTEMD_STAGING_DIR/$label.service.d/os-isolation.conf"
+        file="$(dropin_for "$label")"
         manifest="$(manifest_for "$label")"
         for key in $(linux_expected_keys "$label"); do
           # A before=absent key must be gone; a before=value key must match.
@@ -511,9 +519,9 @@ linux_main() {
     fi
   else
     for i in $(seq 1 "$RUNNER_SERVICE_COUNT"); do
-      label="$(label_for "$i")"
+      label="${AGENTOS_RUNNER_LABELS[$i]}"
       account="$(account_for "$i")"
-      file="$SYSTEMD_STAGING_DIR/$label.service.d/os-isolation.conf"
+      file="$(dropin_for "$label")"
       manifest="$(manifest_for "$label")"
       step "$label -> $account"
       manifest_records=""
@@ -544,7 +552,7 @@ linux_main() {
     done
 
     account1="$(account_for 1)"
-    api_dropin="$SYSTEMD_STAGING_DIR/$API_LABEL.service.d/os-isolation.conf"
+    api_dropin="$(dropin_for "$API_LABEL")"
     api_manifest="$(manifest_for "$API_LABEL")"
     step "$API_LABEL -> $account1"
     manifest_records=""
@@ -609,8 +617,8 @@ fi
 
 targets=()
 for i in $(seq 1 "$RUNNER_SERVICE_COUNT"); do
-  label="$(label_for "$i")"
-  file="$AGENT_DIR/$label.plist"
+  label="${AGENTOS_RUNNER_LABELS[$i]}"
+  file="$(plist_for "$label")"
   if [ ! -f "$file" ]; then
     fail "$file does not exist"
     continue
@@ -630,7 +638,7 @@ for file in "${found[@]:-}"; do
   esac
 done
 
-api_plist="$AGENT_DIR/$API_LABEL.plist"
+api_plist="$AGENT_DIR/$API_PLIST"
 if [ -f "$api_plist" ]; then
   [ -w "$api_plist" ] || fail "$api_plist is not writable by $(id -un)"
   plutil -lint "$api_plist" >/dev/null 2>&1 || fail "$api_plist is not a valid plist; refusing to edit it"
@@ -810,7 +818,7 @@ if [ "$REVERT" = 1 ]; then
   # this script nor verify.sh can describe in a single sentence.
   for label in "${targets[@]:-}" "$API_LABEL"; do
     [ -n "$label" ] || continue
-    file="$AGENT_DIR/$label.plist"
+    file="$(plist_for "$label")"
     manifest="$(manifest_for "$label")"
     [ -f "$file" ] || continue
     if [ "$(sha256_of "$file")" != "$(awk -F'\t' '$1 == "applied-sha256" { print $2 }' "$manifest")" ]; then
@@ -840,7 +848,7 @@ if [ "$REVERT" = 1 ]; then
   step "field-level revert"
   for label in "${targets[@]:-}" "$API_LABEL"; do
     [ -n "$label" ] || continue
-    file="$AGENT_DIR/$label.plist"
+    file="$(plist_for "$label")"
     manifest="$(manifest_for "$label")"
     [ -f "$file" ] || continue
     while IFS=$'\t' read -r kind key state value; do
@@ -867,7 +875,7 @@ if [ "$REVERT" = 1 ]; then
     step "re-read after revert"
     for label in "${labels_touched[@]:-}"; do
       [ -n "$label" ] || continue
-      file="$AGENT_DIR/$label.plist"
+      file="$(plist_for "$label")"
       manifest="$(manifest_for "$label")"
       plutil -lint "$file" >/dev/null 2>&1 || fail "$label is no longer a valid plist"
       while IFS=$'\t' read -r kind key state value; do
@@ -887,9 +895,9 @@ if [ "$REVERT" = 1 ]; then
   fi
 else
   for i in $(seq 1 "$RUNNER_SERVICE_COUNT"); do
-    label="$(label_for "$i")"
+    label="${AGENTOS_RUNNER_LABELS[$i]}"
     account="$(account_for "$i")"
-    file="$AGENT_DIR/$label.plist"
+    file="$(plist_for "$label")"
     manifest="$(manifest_for "$label")"
     step "$label -> $account"
     manifest_records=""
@@ -950,9 +958,9 @@ else
     # nothing useful on a partial failure, and "Applied." is what the runbook
     # treats as the step being done.
     for i in $(seq 1 "$RUNNER_SERVICE_COUNT"); do
-      label="$(label_for "$i")"
+      label="${AGENTOS_RUNNER_LABELS[$i]}"
       account="$(account_for "$i")"
-      file="$AGENT_DIR/$label.plist"
+      file="$(plist_for "$label")"
       plutil -lint "$file" >/dev/null 2>&1 || fail "$label is no longer a valid plist"
       [ -f "$file$BACKUP_SUFFIX" ] || fail "$label has no $BACKUP_SUFFIX backup"
       [ -f "$(manifest_for "$label")" ] || fail "$label has no manifest; --revert would not know what to undo"
@@ -994,7 +1002,7 @@ echo "  Drain first: no run may be active. Then, for each label:"
 for label in "${labels_touched[@]:-}"; do
   [ -n "$label" ] || continue
   echo "    launchctl bootout gui/\$(id -u)/$label 2>/dev/null || true"
-  echo "    launchctl bootstrap gui/\$(id -u) $AGENT_DIR/$label.plist"
+  echo "    launchctl bootstrap gui/\$(id -u) $(plist_for "$label")"
 done
 echo "  Reload the API first — it canonicalises the root and holds the ownership"
 echo "  lock — then the runners. To reverse, re-run with --revert."

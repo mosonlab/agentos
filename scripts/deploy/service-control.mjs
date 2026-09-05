@@ -1,24 +1,16 @@
-import {
-  DeployFailure,
-  generateServiceInventory,
-  resolveDeployRole,
-  resolveRunnerCount,
-  resolveRunnerIdPrefix,
-  SERVICE_INVENTORY_ENTRIES,
-} from "./quiet-window-lib.mjs";
+import { DeployFailure } from "./quiet-window-lib.mjs";
 import { resolveServicePlatform } from "./service-platform.mjs";
 
 /**
- * The unit name is deliberately derived at the point where a control call is
- * made.  The installer and the deployment process therefore share the same
- * label spelling without giving callers an opportunity to pass a different
- * systemd unit name.
+ * The unit name is read out of the inventory this invocation resolved, so a
+ * control call cannot name a service the installer did not install and callers
+ * get no opportunity to pass a different systemd unit name.
  */
-export const serviceUnitName = (label, inventory = SERVICE_INVENTORY_ENTRIES) => {
+export const serviceUnitName = (label, inventory) => {
   if (typeof label !== "string" || label.length === 0 || /[\s/]/u.test(label)) {
     throw new DeployFailure("service-control-label-invalid", String(label));
   }
-  const entry = inventory.find((candidate) => candidate.label === label);
+  const entry = inventory?.entries?.find((candidate) => candidate.label === label);
   if (!entry) throw new DeployFailure("service-control-label-invalid", String(label));
   return entry.unitName;
 };
@@ -75,9 +67,13 @@ const normalizeResult = (result) => {
  * The adapter intentionally exposes text for `describe`: the wrapper-boundary
  * proof belongs to the caller that already owns the resolved invocation and
  * can therefore reject a description containing the wrong wrapper or label.
+ *
+ * The inventory is supplied by the caller that resolved it for this
+ * invocation; this module never resolves one of its own.
  */
 export const createServiceControl = ({
   platform = resolveServicePlatform(),
+  inventory,
   run,
   checked,
   wrapperPath = "",
@@ -90,20 +86,14 @@ export const createServiceControl = ({
     restart: 30_000,
     inspect: 15_000,
   }),
-  environment = process.env,
 } = {}) => {
   if (platform !== "darwin" && platform !== "linux") {
     throw new Error(`service-platform-unsupported:${String(platform)}`);
   }
   if (typeof run !== "function") throw new TypeError("service-control-run-required");
   if (typeof wrapperPath !== "string") throw new TypeError("service-control-wrapper-path-invalid");
-  const serviceInventory = generateServiceInventory(
-    resolveRunnerCount(environment),
-    resolveRunnerIdPrefix(environment),
-    resolveDeployRole(environment),
-  );
-  if (!Array.isArray(serviceInventory) || serviceInventory.length === 0
-      || serviceInventory.some((entry) => typeof entry?.label !== "string" || typeof entry?.unitName !== "string")) {
+  if (!Array.isArray(inventory?.entries) || inventory.entries.length === 0
+      || inventory.entries.some((entry) => typeof entry?.label !== "string" || typeof entry?.unitName !== "string")) {
     throw new Error("service-control-inventory-invalid");
   }
   const restartTimeoutMs = timeoutMs?.restart ?? 30_000;
@@ -118,7 +108,7 @@ export const createServiceControl = ({
     failureReason = "service-control-failed",
     useChecked = false,
   }) => {
-    const unit = serviceUnitName(label, serviceInventory);
+    const unit = serviceUnitName(label, inventory);
     const program = platform === "darwin"
       ? launchctlBinary
       : euid === 0 ? systemctlBinary : sudoBinary;
@@ -187,7 +177,7 @@ export const createServiceControl = ({
       useChecked: platform === "darwin",
       args: platform === "darwin"
         ? ["kickstart", "-k", `gui/${uid}/${label}`]
-        : ["restart", serviceUnitName(label, serviceInventory)],
+        : ["restart", serviceUnitName(label, inventory)],
       options: {
         timeoutMs: timeout,
         timeoutReason: timeoutReason ?? `${reason}-timeout`,
@@ -203,7 +193,7 @@ export const createServiceControl = ({
       inactiveExit: true,
       args: platform === "darwin"
         ? ["print", `gui/${uid}/${label}`]
-        : ["is-active", serviceUnitName(label, serviceInventory)],
+        : ["is-active", serviceUnitName(label, inventory)],
       options: {
         ...options,
         timeoutMs: options.timeoutMs ?? inspectTimeoutMs,
@@ -221,7 +211,7 @@ export const createServiceControl = ({
       inactiveExit: platform === "darwin",
       args: platform === "darwin"
         ? ["print", `gui/${uid}/${label}`]
-        : ["show", "-p", "ExecStart", "--value", serviceUnitName(label, serviceInventory)],
+        : ["show", "-p", "ExecStart", "--value", serviceUnitName(label, inventory)],
       options: {
         ...options,
         timeoutMs: options.timeoutMs ?? inspectTimeoutMs,

@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { SERVICE_LABELS, DeployFailure } from "./quiet-window-lib.mjs";
+import { DeployFailure } from "./quiet-window-lib.mjs";
+import { resolveServiceInventory } from "./service-inventory.mjs";
 import { deployPhasesForRole } from "./deploy-phases.mjs";
 
 const seconds = (value) => value * 1_000;
@@ -24,8 +25,12 @@ export const DEPLOY_STEP_TIMEOUT_MS = Object.freeze({
   previousServiceRestore: seconds(30),
 });
 
-const serviceSweepBudget = SERVICE_LABELS.length * DEPLOY_STEP_TIMEOUT_MS.serviceInspection;
-const serviceRestartBudget = SERVICE_LABELS.length * DEPLOY_STEP_TIMEOUT_MS.serviceRestart;
+/** The budgets below size one deployment's service sweep. The caller that
+ * knows its own inventory passes its service count to
+ * deployBarrierTimeoutMsForRole; this default sizes the exported constants. */
+const DEFAULT_SERVICE_COUNT = resolveServiceInventory().labels.length;
+const serviceSweepBudget = DEFAULT_SERVICE_COUNT * DEPLOY_STEP_TIMEOUT_MS.serviceInspection;
+const serviceRestartBudget = DEFAULT_SERVICE_COUNT * DEPLOY_STEP_TIMEOUT_MS.serviceRestart;
 
 /** Successful work that can run while the barrier is held. Synchronous phases
  * are covered by the separate watchdog process and by the explicit margin. */
@@ -45,14 +50,14 @@ export const DEPLOY_BARRIER_PHASE_TIMEOUT_MS = Object.freeze({
 });
 export const DEPLOY_BARRIER_BUDGETED_WORK_MS = Object.values(DEPLOY_BARRIER_PHASE_TIMEOUT_MS)
   .reduce((total, timeoutMs) => total + timeoutMs, 0);
-export const DEPLOY_BARRIER_RECOVERY_BUDGET_MS = SERVICE_LABELS.length
+export const DEPLOY_BARRIER_RECOVERY_BUDGET_MS = DEFAULT_SERVICE_COUNT
   * DEPLOY_STEP_TIMEOUT_MS.previousServiceRestore;
 export const DEPLOY_BARRIER_WATCHDOG_MARGIN_MS = minutes(5);
 export const DEPLOY_BARRIER_TIMEOUT_MS = DEPLOY_BARRIER_BUDGETED_WORK_MS
   + DEPLOY_BARRIER_RECOVERY_BUDGET_MS
   + DEPLOY_BARRIER_WATCHDOG_MARGIN_MS;
 
-export const deployBarrierTimeoutMsForRole = (role, serviceCount = SERVICE_LABELS.length) => {
+export const deployBarrierTimeoutMsForRole = (role, serviceCount = DEFAULT_SERVICE_COUNT) => {
   if (!Number.isSafeInteger(serviceCount) || serviceCount < 1) throw new TypeError("deploy-service-count-invalid");
   const phaseTimeouts = {
     ...DEPLOY_BARRIER_PHASE_TIMEOUT_MS,

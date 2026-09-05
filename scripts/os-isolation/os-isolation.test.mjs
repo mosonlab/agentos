@@ -16,6 +16,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
+import { generateServiceInventory } from "../deploy/service-inventory.mjs";
+
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_ROOT = resolve(TEST_DIR, "../..");
 const ISOLATION_DIR = join(REPOSITORY_ROOT, "scripts", "os-isolation");
@@ -566,16 +568,17 @@ test("Linux patch maps runners to accounts and field-level revert preserves unre
     const environment = { ...fixture.environment, SYSTEMD_STAGING_DIR: staging };
     const firstResult = runScript("patch-runner-plists.sh", ["--apply"], environment);
     assert.equal(firstResult.status, 0, runnerCount + ": " + firstResult.output);
-    for (let index = 1; index <= runnerCount; index += 1) {
-      const label = index === 1 ? "com.agentos.runner" : "com.agentos.runner-" + index;
-      const account = fixture.accounts[(index - 1) % fixture.accounts.length];
-      const dropin = join(staging, label + ".service.d", "os-isolation.conf");
+    const runners = generateServiceInventory({ runnerCount, runnerIdPrefix: "", deployRole: "runner" }).entries;
+    assert.equal(runners.length, runnerCount);
+    for (const { runnerIndex, unitName } of runners) {
+      const account = fixture.accounts[(runnerIndex - 1) % fixture.accounts.length];
+      const dropin = join(staging, unitName + ".d", "os-isolation.conf");
       const contents = readFileSync(dropin, "utf8");
       assert.match(contents, new RegExp("RUNNER_HOME=.*" + account));
       assert.match(contents, new RegExp(`RUNNER_PATH=.*${dirname(process.execPath).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}`, "u"));
     }
-    const firstLabel = "com.agentos.runner";
-    const firstDropin = join(staging, firstLabel + ".service.d", "os-isolation.conf");
+    const firstLabel = runners[0].label;
+    const firstDropin = join(staging, runners[0].unitName + ".d", "os-isolation.conf");
     const original = readFileSync(firstDropin, "utf8");
     writeFileSync(firstDropin, original + "Environment=UNRECORDED=keep-me\n");
     const revert = runScript("patch-runner-plists.sh", ["--revert", "--apply"], environment);

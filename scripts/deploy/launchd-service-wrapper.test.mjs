@@ -22,8 +22,9 @@ import test from "node:test";
 import {
   generateServiceInventory as generateDeployServiceInventory,
   resolveRunnerCount as resolveDeployRunnerCount,
-  SERVICE_LABELS as DEPLOY_SERVICE_LABELS,
-} from "./quiet-window-lib.mjs";
+  resolveServiceInventory,
+  serviceWrapperPath,
+} from "./service-inventory.mjs";
 import { resolveServicePlatform } from "./service-platform.mjs";
 import {
   generateServiceInventory,
@@ -41,9 +42,17 @@ import {
   bootstrapCurrentRelease,
   installLaunchdServices,
   renderServicePlists,
-  serviceWrapperPath,
   verifyServicePlistDefinitions,
 } from "./install-launchd.mjs";
+
+/** The standalone wrapper carries label, runner id and unit name; the resolved
+ * inventory carries those plus the runner index and plist name. Compare the
+ * wrapper against that projection: the lockstep the fixture proves is over the
+ * facts the wrapper itself generates. */
+const DEFAULT_INVENTORY = resolveServiceInventory();
+const wrapperFacts = (entries) => entries.map(({ label, runnerId, unitName }) => ({ label, runnerId, unitName }));
+const deployWrapperFacts = (runnerCount, runnerIdPrefix = "", deployRole = "control-plane") =>
+  wrapperFacts(generateDeployServiceInventory({ runnerCount, runnerIdPrefix, deployRole }).entries);
 
 // This suite is the frozen launchd compatibility fixture. Keep exercising
 // that path when the merge-gate host itself is Linux; systemd behavior lives
@@ -119,6 +128,7 @@ const releaseFixture = () => {
 
 const legacyServiceDefinitions = ({ fixture, home }) => {
   const rendered = renderServicePlists({
+    inventory: DEFAULT_INVENTORY,
     nodeBinary: "/usr/bin/node",
     repositoryRoot: fixture.root,
     sharedRoot: join(fixture.root, "shared"),
@@ -154,8 +164,8 @@ const legacyServiceDefinitions = ({ fixture, home }) => {
 };
 
 test("the wrapper inventory is exactly the loaded production service inventory", () => {
-  assert.deepEqual(SERVICE_LABELS, DEPLOY_SERVICE_LABELS);
-  assert.deepEqual(generateServiceInventory(16), generateDeployServiceInventory(16));
+  assert.deepEqual(SERVICE_LABELS, resolveServiceInventory().labels);
+  assert.deepEqual(wrapperFacts(generateServiceInventory(16)), deployWrapperFacts(16));
   assert.deepEqual(Object.keys(SERVICE_INVENTORY), [...SERVICE_LABELS]);
 });
 
@@ -203,17 +213,15 @@ test("runner deploy role inventory contains only the configured local runners", 
   const generated = generateServiceInventory(3, "mac-", "runner");
   assert.deepEqual(generated.map(({ label }) => label), expected);
   assert.deepEqual(generated.map(({ runnerId }) => runnerId), ["mac-runner-1", "mac-runner-2", "mac-runner-3"]);
-  assert.deepEqual(
-    generateDeployServiceInventory(3, "mac-", "runner"),
-    generated,
-  );
+  assert.deepEqual(deployWrapperFacts(3, "mac-", "runner"), wrapperFacts(generated));
   assert.equal(generated.some(({ label }) => ["com.agentos.api", "com.agentos.inbox", "com.agentos.web"].includes(label)), false);
 });
 
 test("a configured count drives both runtime inventory modules", () => {
   const source = [
     'import { SERVICE_INVENTORY, SERVICE_LABELS as wrapperLabels } from "./scripts/deploy/launchd-service-wrapper.mjs";',
-    'import { SERVICE_LABELS as deployLabels } from "./scripts/deploy/quiet-window-lib.mjs";',
+    'import { resolveServiceInventory } from "./scripts/deploy/service-inventory.mjs";',
+    "const deployLabels = [...resolveServiceInventory().labels];",
     "console.log(JSON.stringify({ wrapperLabels, deployLabels, services: Object.values(SERVICE_INVENTORY).map(({ label, runnerId, unitName }) => ({ label, runnerId, unitName })) }));",
   ].join("\n");
   const result = spawnSync(process.execPath, ["--input-type=module", "-e", source], {
@@ -276,10 +284,7 @@ test("runner identity prefixes stay in lockstep across inventory and invocation"
   const prefix = "vm-";
   assert.equal(resolveRunnerIdPrefix({ AGENTOS_RUNNER_ID_PREFIX: prefix }), prefix);
   assert.equal(runnerIdForLabel("com.agentos.runner-4", prefix), "vm-runner-4");
-  assert.deepEqual(
-    generateServiceInventory(4, prefix),
-    generateDeployServiceInventory(4, prefix),
-  );
+  assert.deepEqual(wrapperFacts(generateServiceInventory(4, prefix)), deployWrapperFacts(4, prefix));
   assert.throws(
     () => resolveRunnerIdPrefix({ AGENTOS_RUNNER_ID_PREFIX: "bad/prefix" }),
     /runner-id-prefix-invalid:bad\/prefix/u,
@@ -477,6 +482,7 @@ test("service plist rendering and installation cover every label before activati
   const home = join(fixture.root, "operator-home");
   try {
     const rendered = renderServicePlists({
+      inventory: DEFAULT_INVENTORY,
       nodeBinary: "/usr/bin/node",
       repositoryRoot: fixture.root,
       sharedRoot: join(fixture.root, "shared"),
@@ -484,7 +490,7 @@ test("service plist rendering and installation cover every label before activati
       stderrPath: join(home, "stderr.log"),
       path: "/usr/bin:/bin",
     });
-    assert.equal(verifyServicePlistDefinitions(rendered), true);
+    assert.equal(verifyServicePlistDefinitions(rendered, DEFAULT_INVENTORY), true);
     for (const label of SERVICE_LABELS) {
       assert.match(rendered[label], new RegExp(`<string>${label}</string>`, "u"));
       assert.match(rendered[label], /agentos-service-wrapper\.mjs/u);

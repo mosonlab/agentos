@@ -65,9 +65,10 @@ const runnerIndexForLabel = (label) => {
   return Number.isSafeInteger(index) && index >= 2 && index <= MAX_RUNNER_COUNT ? index : null;
 };
 
-/** Generate the ordered service inventory. This module is copied as a
- * standalone wrapper artifact, so the equivalent generator is deliberately
- * re-derived in quiet-window-lib.mjs rather than imported from this file. */
+/** Generate the ordered service inventory. This module is installed as a
+ * single standalone file outside the checkout, so it cannot import
+ * service-inventory.mjs; the generator is deliberately re-derived here and the
+ * wrapper fixture proves the two agree. */
 export const generateServiceInventory = (
   runnerCount = resolveRunnerCount(),
   runnerIdPrefix = resolveRunnerIdPrefix(),
@@ -94,7 +95,7 @@ export const generateServiceInventory = (
 
 /** The launchd labels are deliberately duplicated here so this file remains a
  * standalone artifact when it is copied outside the source checkout. Keep the
- * generated inventory in lockstep with quiet-window-lib.mjs; the wrapper
+ * generated inventory in lockstep with service-inventory.mjs; the wrapper
  * fixture proves that invariant. */
 export const SERVICE_INVENTORY_ENTRIES = generateServiceInventory();
 export const SERVICE_LABELS = Object.freeze(SERVICE_INVENTORY_ENTRIES.map(({ label }) => label));
