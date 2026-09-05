@@ -589,7 +589,7 @@ test("the model line is the run's snapshot, not the agent's current tier", () =>
   // assignee's current model directly under the run line, so a run claimed with
   // claude-opus-5:medium showed as gpt-5.6-sol:high.
   const markup = card({
-    assigneeAgent: { id: "a1", title: "merge-resolver", model: "gpt-5.6-sol:high" },
+    assigneeAgent: { id: "a1", title: "merge-resolver-opus-medium", model: "gpt-5.6-sol:high" },
     latestRun: { id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: null, endedAt: null, pullRequestUrl: null },
   });
   assert.match(markup, /claude-opus-5:medium/);
@@ -632,7 +632,7 @@ test("a running single-task card shows the elapsed time alone, in both locales",
 });
 
 test("a task with no runs still shows the agent's configured model", () => {
-  const markup = card({ assigneeAgent: { id: "a1", title: "merge-resolver", model: "gpt-5.6-sol:high" }, latestRun: null });
+  const markup = card({ assigneeAgent: { id: "a1", title: "merge-resolver-opus-medium", model: "gpt-5.6-sol:high" }, latestRun: null });
   assert.match(markup, /gpt-5\.6-sol:high/);
 });
 
@@ -659,9 +659,9 @@ test("a HUMAN card shows a person, an unassigned AGENT warns, and an assigned AG
   assert.match(unassignedAgent, /data-card-assignee="unassigned-agent"/);
   assert.match(unassignedAgent, /Unassigned/);
   // An agent, named, is unchanged.
-  const assigned = card({ assigneeType: "AGENT", assigneeAgent: { id: "a1", title: "merge-resolver", model: "gpt-5.6-sol:high" } });
-  assert.match(assigned, new RegExp(`aria-label="${en("tasks.card.assignee", { name: "merge-resolver" })}"`));
-  assert.match(assigned, />merge-resolver</);
+  const assigned = card({ assigneeType: "AGENT", assigneeAgent: { id: "a1", title: "merge-resolver-opus-medium", model: "gpt-5.6-sol:high" } });
+  assert.match(assigned, new RegExp(`aria-label="${en("tasks.card.assignee", { name: "merge-resolver-opus-medium" })}"`));
+  assert.match(assigned, />merge-resolver-opus-medium</);
 });
 
 /* ------------------------------------------------------------- the card's diet */

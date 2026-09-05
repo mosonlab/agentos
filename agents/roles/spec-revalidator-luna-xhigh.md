@@ -1,6 +1,6 @@
 ---
-name: spec-revalidator
-title: Specification Revalidator
+name: spec-revalidator-luna-xhigh
+title: Spec Revalidator
 model: gpt-5.6-luna:xhigh
 runner: codex
 inboxAccess: true

@@ -1,5 +1,5 @@
 ---
-name: regression-verifier
+name: regression-verifier-luna-xhigh
 title: Regression Verifier
 model: gpt-5.6-luna:xhigh
 runner: codex

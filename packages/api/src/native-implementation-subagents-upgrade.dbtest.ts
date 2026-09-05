@@ -55,7 +55,7 @@ test("the native-subagent migration backfills only active canonical implementati
         "id", "projectId", "environmentId", "name", "title", "model", "runnerPreference",
         "foundationalPrompt", "rolePrompt", "updatedAt"
       ) VALUES (
-        'a-native', 'p-native', 'e-native', 'implementation-plan-executioner', 'Executioner',
+        'a-native', 'p-native', 'e-native', 'plan-executor-astra-medium', 'Executioner',
         'gpt-5.6-sol:high', 'codex', 'foundation', 'role', NOW()
       );
       INSERT INTO "TaskTemplate" ("id", "projectId", "name", "description", "variables", "updatedAt")

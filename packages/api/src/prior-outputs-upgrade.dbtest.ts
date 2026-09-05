@@ -147,17 +147,17 @@ test("the whitelist migration preserves legacy claims and canonical sync adopts 
           `INSERT INTO "TaskTemplateStep" (
             "id", "taskTemplateId", "assigneeAgentId", "stepIndex", "name", "assigneeType", "prompt", "outputKind", "layer"
           ) VALUES ($1, 'template-legacy', $2, $3, $4, 'agent', $5, $6, $3)`,
-          `legacy-step-${index + 1}`, agentIds.get("senior-dev"), index + 1,
+          `legacy-step-${index + 1}`, agentIds.get("senior-dev-astra-medium"), index + 1,
           `Legacy step ${index + 1}`, `legacy prompt ${index + 1}`, outputKind,
         );
       }
 
       const taskRows = [
-        ["current-spec-task", "template-compound-engineer-workflow", "template-compound-engineer-workflow-step-1", "current-chain", 1, 1, "done", agentIds.get("spec")],
-        ["current-plan-task", "template-compound-engineer-workflow", "template-compound-engineer-workflow-step-2", "current-chain", 2, 2, "todo", agentIds.get("plan")],
-        ["legacy-spec-task", "template-legacy", "legacy-step-1", "legacy-chain", 1, 1, "done", agentIds.get("senior-dev")],
-        ["legacy-plan-task", "template-legacy", "legacy-step-2", "legacy-chain", 2, 2, "done", agentIds.get("senior-dev")],
-        ["legacy-target-task", "template-legacy", "legacy-step-3", "legacy-chain", 3, 3, "todo", agentIds.get("senior-dev")],
+        ["current-spec-task", "template-compound-engineer-workflow", "template-compound-engineer-workflow-step-1", "current-chain", 1, 1, "done", agentIds.get("spec-opus-high")],
+        ["current-plan-task", "template-compound-engineer-workflow", "template-compound-engineer-workflow-step-2", "current-chain", 2, 2, "todo", agentIds.get("plan-fable-medium")],
+        ["legacy-spec-task", "template-legacy", "legacy-step-1", "legacy-chain", 1, 1, "done", agentIds.get("senior-dev-astra-medium")],
+        ["legacy-plan-task", "template-legacy", "legacy-step-2", "legacy-chain", 2, 2, "done", agentIds.get("senior-dev-astra-medium")],
+        ["legacy-target-task", "template-legacy", "legacy-step-3", "legacy-chain", 3, 3, "todo", agentIds.get("senior-dev-astra-medium")],
       ] as const;
       for (const [id, templateId, templateStepId, chainId, chainIndex, chainLayer, status, agentId] of taskRows) {
         await preMigration.$executeRawUnsafe(

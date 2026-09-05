@@ -47,7 +47,7 @@ const claim: ClaimedTask = {
     maxSessionsPerTask: 3,
     templateStep: null,
   },
-  agent: { id: "agent-1", name: "senior-dev", model: "codex", foundationalPrompt: "Foundation", rolePrompt: "Implement", disabledTools: [] },
+  agent: { id: "agent-1", name: "senior-dev-astra-medium", model: "codex", foundationalPrompt: "Foundation", rolePrompt: "Implement", disabledTools: [] },
   repo: {
     id: "repo-1",
     remoteUrl: "/repo",
@@ -171,7 +171,7 @@ test("cancellation drains a Run-owned descendant that starts a separate process 
 });
 
 test("buildPrompt combines foundational, role, and task context", () => {
-  assert.match(buildPrompt(claim), /Foundation[\s\S]*Role \(senior-dev\): Implement[\s\S]*Task: Ship it[\s\S]*Do the work/);
+  assert.match(buildPrompt(claim), /Foundation[\s\S]*Role \(senior-dev-astra-medium\): Implement[\s\S]*Task: Ship it[\s\S]*Do the work/);
 });
 
 test("buildPrompt injects runner-owned worktree containment into every session", () => {
@@ -689,7 +689,7 @@ test("Codex fresh and resume launches preserve non-interactive tool authorizatio
 test("native implementation subagents are pinned on fresh and resumed Codex launches", () => {
   const executioner = {
     ...claim,
-    agent: { ...claim.agent, name: "implementation-plan-executioner" },
+    agent: { ...claim.agent, name: "plan-executor-astra-medium" },
     run: {
       ...claim.run,
       subagentModel: "gpt-5.6-luna:max",

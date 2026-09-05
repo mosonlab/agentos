@@ -167,8 +167,8 @@ curl "$BASE_URL/projects" -H "Authorization: Bearer $OPERATOR_TOKEN"
   database default of `false`.
 - A successful request creates the Project and, in the same transaction, one
   `local` Environment with `networking` `OPEN` and `allowedHosts` `[]`, four
-  Agents (`senior-dev-luna`, `review-coordinator-sol`,
-  `review-coordinator-opus`, and `senior-dev-astra-low`) bound to that Environment, and
+  Agents (`senior-dev-luna-max`, `code-reviewer-sol-high`,
+  `code-reviewer-opus-high`, and `senior-dev-astra-low`) bound to that Environment, and
   the canonical `pr-engineer-workflow` TaskTemplate with its four steps.
   The returned Project read shape includes `specGateDefault`,
   `mergeGateDefault`, and `skipOptionalSteps`, all `false` for a newly created
@@ -1864,7 +1864,7 @@ session and the `/runner/...` machine protocol are intentionally not listed:
 the authentication middleware denies those prefixes to the operator principal.
 The two revalidation routes below are session-only capabilities; they are
 listed here so their authorization boundary is explicit even though operators
-cannot call them directly. A `spec-revalidator` session on a bound direct chain
+cannot call them directly. A `spec-revalidator-luna-xhigh` session on a bound direct chain
 is the only caller accepted.
 
 The machine-only `/session/runs/:runId/status` projection is run-bound and is
@@ -1956,7 +1956,7 @@ curl -X POST "$BASE_URL/runs/$RUN_ID/cancel" \
 
 - Session bearer authentication must name the same `runId` as the path.
 - Required JSON fields: `fencingToken`, `description`.
-- Only the bound chain's `spec-revalidator` Run may call this route. The
+- Only the bound chain's `spec-revalidator-luna-xhigh` Run may call this route. The
   implementation task is derived server-side; no task ID or chain ID is
   accepted. The fenced write replaces the brief while preserving the
   platform-authored prompt and output instructions. The server rejects changes
@@ -1968,7 +1968,7 @@ curl -X POST "$BASE_URL/runs/$RUN_ID/cancel" \
 
 - Session bearer authentication must name the same `runId` as the path.
 - Required JSON field: `fencingToken`.
-- Only the bound chain's `spec-revalidator` Run may call this route, and only
+- Only the bound chain's `spec-revalidator-luna-xhigh` Run may call this route, and only
   after the same Run's premise-collapse Inbox question has an answered
   `cancel-chain` decision. It records cancellation intent for the current Run,
   parks every unfinished task in the bound chain, and revokes the session token;

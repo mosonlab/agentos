@@ -206,7 +206,7 @@ test("a structure-identical generation is decided by its prompt digest alone", (
   // registered prompt generation. This is the case a shape can never express.
   const shape = [{
     name: "Implementation",
-    agentName: "senior-dev",
+    agentName: "senior-dev-astra-medium",
     assigneeType: "AGENT",
     approvalGate: false,
     outputKind: "implementation",
@@ -219,7 +219,7 @@ test("a structure-identical generation is decided by its prompt digest alone", (
   }] as const;
   const stepsWith = (prompt: string): PersistedTransitionStep[] => [{
     id: "step-1", taskTemplateId: "template", stepIndex: 1, name: "Implementation",
-    assigneeAgent: { name: "senior-dev" }, assigneeType: "AGENT", layer: 1,
+    assigneeAgent: { name: "senior-dev-astra-medium" }, assigneeType: "AGENT", layer: 1,
     approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false,
     optional: false,
     priorOutputKinds: [],
@@ -491,14 +491,14 @@ test("optional review omission is a registered prompt-only rollover in both temp
     assert.equal(matchedLegacyGeneration(templateName, asPersisted(current)), null);
     // The rows that generation retired carried the outgoing prompts on its
     // shape: no optional steps, the review steps opting out of dependency
-    // provisioning as the source does, and the fix step still on senior-dev.
+    // provisioning as the source does, and the fix step still on senior-dev-astra-medium.
     assert.equal(
       legacyGenerationMatches(
         { marker: generation.marker, shape: generation.shape },
         asPersisted(current).map((step) => ({
           ...step,
           optional: false,
-          assigneeAgent: step.outputKind === "fixed-implementation" ? { name: "senior-dev" } : step.assigneeAgent,
+          assigneeAgent: step.outputKind === "fixed-implementation" ? { name: "senior-dev-astra-medium" } : step.assigneeAgent,
         })),
       ),
       true,
@@ -527,7 +527,7 @@ test("the Astra-low review-fix rebinding is a registered structural rollover in 
     // the structural entry matches them regardless of prompt digest.
     assert.equal(
       matchedLegacyGeneration(templateName, asPersisted(current).map((step) => (
-        step.outputKind === "fixed-implementation" ? { ...step, assigneeAgent: { name: "senior-dev" } } : step
+        step.outputKind === "fixed-implementation" ? { ...step, assigneeAgent: { name: "senior-dev-astra-medium" } } : step
       ))),
       "pre-astra-low-review-fix",
       templateName,

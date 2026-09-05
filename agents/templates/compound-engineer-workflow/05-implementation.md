@@ -1,7 +1,7 @@
 ---
 stepIndex: 5
 layer: 5
-agent: implementation-plan-executioner
+agent: plan-executor-astra-medium
 approvalGate: false
 optional: false
 outputKind: implementation

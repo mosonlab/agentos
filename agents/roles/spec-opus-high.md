@@ -1,6 +1,6 @@
 ---
-name: spec
-title: Specification Writer
+name: spec-opus-high
+title: Spec Writer
 model: claude-opus-5:high
 runner: claude
 inboxAccess: true

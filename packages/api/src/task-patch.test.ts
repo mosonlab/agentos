@@ -137,7 +137,7 @@ test("a compound implementation reassignment returns a structured refusal direct
     assigneeAgentId: null,
   }), {
     reason: "compound-implementation-assignee",
-    message: "Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner",
+    message: "Compound implementation step must remain assigned to the active in-project Agent plan-executor-astra-medium",
     detail: { code: COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE },
   });
 });

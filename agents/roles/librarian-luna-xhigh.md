@@ -1,5 +1,5 @@
 ---
-name: librarian
+name: librarian-luna-xhigh
 title: Librarian
 model: gpt-5.6-luna:xhigh
 runner: codex

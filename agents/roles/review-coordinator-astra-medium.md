@@ -1,5 +1,5 @@
 ---
-name: review-coordinator
+name: review-coordinator-astra-medium
 title: Review Coordinator
 model: gpt-6-astra:medium
 runner: codex

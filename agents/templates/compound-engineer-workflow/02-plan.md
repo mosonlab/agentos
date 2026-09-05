@@ -1,7 +1,7 @@
 ---
 stepIndex: 2
 layer: 2
-agent: plan
+agent: plan-fable-medium
 approvalGate: false
 optional: false
 outputKind: plan

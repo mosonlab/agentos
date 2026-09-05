@@ -82,7 +82,7 @@ test("rejects a non-revalidator, an unbound task, and ambiguous implementations"
       taskTemplate: { name: "direct-engineer-workflow" },
     },
   });
-  const wrongAgent = deriveBoundImplementationTask({ ...caller(), agentName: "senior-dev" }, [caller(), implementation]);
+  const wrongAgent = deriveBoundImplementationTask({ ...caller(), agentName: "senior-dev-astra-medium" }, [caller(), implementation]);
   assert.ok("message" in wrongAgent);
   if ("message" in wrongAgent) assert.equal(wrongAgent.reason, "forbidden");
   const unbound = deriveBoundImplementationTask(caller({ chainId: null, dispatchAfterTaskId: null }), [implementation]);
@@ -141,7 +141,7 @@ const brief = [
   "",
   "Acceptance: the named regression passes.",
   "",
-  "Route: implementation=senior-dev - transaction boundary",
+  "Route: implementation=senior-dev-astra-medium - transaction boundary",
 ].join("\n");
 
 test("revalidation permits background and descriptive code-reference drift", () => {
@@ -174,7 +174,7 @@ test("revalidation rejects mutations to every immutable Product Contract bar", (
     brief.replace("Out of scope: compound templates.", "Out of scope: nothing."),
     brief.replace("Constraints: existing chains stay byte-identical.", "Constraints: compatibility may break."),
     brief.replace("Acceptance: the named regression passes.", "Acceptance: no tests are required."),
-    brief.replace("Route: implementation=senior-dev", "Route: implementation=frontend-dev"),
+    brief.replace("Route: implementation=senior-dev-astra-medium", "Route: implementation=frontend-dev-opus-medium"),
   ];
   for (const proposed of attempts) {
     const refusal = validateRevalidatedBrief(brief, proposed);

@@ -1,5 +1,5 @@
 ---
-name: plan
+name: plan-fable-medium
 title: Planner
 model: claude-fable-5:medium
 runner: claude

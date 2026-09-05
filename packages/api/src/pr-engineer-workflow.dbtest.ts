@@ -23,7 +23,7 @@ const BRIEF = [
   "",
   "Keep the pull-request workflow's configured implementation assignee.",
 ].join("\n");
-const ROUTED_BRIEF = `${BRIEF}\n\nRoute: implementation=senior-dev - unsupported on the PR workflow.`;
+const ROUTED_BRIEF = `${BRIEF}\n\nRoute: implementation=senior-dev-astra-medium - unsupported on the PR workflow.`;
 
 let db: PrismaClient;
 let priorOperatorToken: string | undefined;

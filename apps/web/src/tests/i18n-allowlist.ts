@@ -9,7 +9,7 @@ export type I18nAllowlistEntry = {
  * Keep this list bounded: adding an entry is an explicit review decision.
  */
 export const I18N_ALLOWLIST: I18nAllowlistEntry[] = [
-  { file: "pages/Agents.tsx", text: "senior-dev", why: "Role slug example" },
+  { file: "pages/Agents.tsx", text: "senior-dev-astra-medium", why: "Role slug example" },
   { file: "pages/Agents.tsx", text: "claude", why: "CLI identifier example" },
   { file: "pages/Agents.tsx", text: "cuid", why: "Identifier format example" },
   { file: "pages/Agents.tsx", text: "git-read", why: "Repository permission identifier" },

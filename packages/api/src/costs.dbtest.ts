@@ -256,7 +256,7 @@ test("canonical token rows price identically across runners", async () => {
 
 test("agents with the same title remain distinct by their unique names", async () => {
   const { project, repo, agent } = await seedProject("costs-agent-identity");
-  const first = await agent("frontend-dev", "Developer");
+  const first = await agent("frontend-dev-opus-medium", "Developer");
   const second = await agent("backend-dev", "Developer");
   await seedRun(project.id, repo.id, "Frontend", {
     agentId: first.id, model: "claude-opus-5", runner: "CLAUDE", startedAt: daysAgo(1),
@@ -270,10 +270,10 @@ test("agents with the same title remain distinct by their unique names", async (
   const { body } = await call(costsPath(project.id, 7));
   assert.deepEqual(
     body.daily.find((entry: { byAgent: Record<string, string> }) => Object.keys(entry.byAgent).length > 0)?.byAgent,
-    { "backend-dev": "2", "frontend-dev": "1" },
+    { "backend-dev": "2", "frontend-dev-opus-medium": "1" },
   );
-  assert.deepEqual(body.byAgent.map((entry: { agent: string }) => entry.agent), ["backend-dev", "frontend-dev"]);
-  assert.deepEqual(body.topRuns.map((run: { agent: string }) => run.agent), ["backend-dev", "frontend-dev"]);
+  assert.deepEqual(body.byAgent.map((entry: { agent: string }) => entry.agent), ["backend-dev", "frontend-dev-opus-medium"]);
+  assert.deepEqual(body.topRuns.map((run: { agent: string }) => run.agent), ["backend-dev", "frontend-dev-opus-medium"]);
 });
 
 test("an entirely unpriced agent is explicit rather than indistinguishable from free", async () => {

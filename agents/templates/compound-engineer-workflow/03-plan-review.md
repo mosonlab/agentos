@@ -1,7 +1,7 @@
 ---
 stepIndex: 3
 layer: 3
-agent: review-coordinator
+agent: review-coordinator-astra-medium
 approvalGate: false
 optional: false
 outputKind: plan-review

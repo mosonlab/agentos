@@ -80,7 +80,7 @@ test("the regression steps adopt the verifier Agent from either retired review r
   ] as const) {
     const source = sourceStep(templateName, stepIndex);
     assert.equal(source.agentName, REGRESSION_VERIFIER_AGENT_NAME);
-    for (const retired of ["review-coordinator-opus", "review-coordinator-sol"]) {
+    for (const retired of ["code-reviewer-opus-high", "code-reviewer-sol-high"]) {
       const actual = { ...asPersisted(source), assigneeAgent: { name: retired } };
       assert.deepEqual(onlyAdoption(templateName, actual, source), {
         difference: "agent",
@@ -89,7 +89,7 @@ test("the regression steps adopt the verifier Agent from either retired review r
         write: { kind: "bind-agent", agentName: REGRESSION_VERIFIER_AGENT_NAME },
       });
     }
-    refuses(templateName, { ...asPersisted(source), assigneeAgent: { name: "senior-dev" } }, source, "agent");
+    refuses(templateName, { ...asPersisted(source), assigneeAgent: { name: "senior-dev-astra-medium" } }, source, "agent");
   }
 });
 
@@ -102,7 +102,7 @@ test("the direct revalidation step adopts the revalidator Agent only from an unb
     refusesReferencedStep: true,
     write: { kind: "bind-agent", agentName: SPEC_REVALIDATOR_AGENT_NAME },
   });
-  refuses("direct-engineer-workflow", { ...asPersisted(source), assigneeAgent: { name: "senior-dev" } }, source, "agent");
+  refuses("direct-engineer-workflow", { ...asPersisted(source), assigneeAgent: { name: "senior-dev-astra-medium" } }, source, "agent");
 });
 
 test("an unbound row on any other step is drift, not an assignee adoption", () => {

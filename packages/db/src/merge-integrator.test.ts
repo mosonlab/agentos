@@ -274,11 +274,11 @@ const integratorStep = { stepIndex: INTEGRATOR_STEP_INDEX, outputKind: "merge-re
 test("the binding predicate holds in both directions", () => {
   assert.ok(isIntegratorStep(integratorStep));
   assert.ok(integratorBindingValid(INTEGRATOR_AGENT_NAME, integratorStep));
-  assert.ok(integratorBindingValid("senior-dev", { stepIndex: 5, outputKind: "implementation", taskTemplate: { name: "compound-engineer-workflow" } }));
+  assert.ok(integratorBindingValid("senior-dev-astra-medium", { stepIndex: 5, outputKind: "implementation", taskTemplate: { name: "compound-engineer-workflow" } }));
   // The sentinel on an ordinary step, and an ordinary agent on step 12.
   assert.ok(!integratorBindingValid(INTEGRATOR_AGENT_NAME, null));
   assert.ok(!integratorBindingValid(INTEGRATOR_AGENT_NAME, { stepIndex: 5, outputKind: "implementation", taskTemplate: { name: "compound-engineer-workflow" } }));
-  assert.ok(!integratorBindingValid("senior-dev", integratorStep));
+  assert.ok(!integratorBindingValid("senior-dev-astra-medium", integratorStep));
 });
 
 test("integrator binding follows Step role across template names and ordinals", () => {

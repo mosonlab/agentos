@@ -265,7 +265,7 @@ test("Agent API refuses an executioner rename", async () => {
       id: "agent-executioner",
       projectId: "project-1",
       environmentId: "environment-1",
-      name: "implementation-plan-executioner",
+      name: "plan-executor-astra-medium",
       title: "Implementation Plan Executioner",
       model: "gpt-5.6-sol:high",
       runnerPreference: RunnerPreference.CODEX,
@@ -290,7 +290,7 @@ test("Agent API refuses an executioner rename", async () => {
     });
     assert.equal(response.status, 400);
     assert.deepEqual(await response.json(), {
-      error: "implementation-plan-executioner is a canonical Agent name and cannot be changed",
+      error: "plan-executor-astra-medium is a canonical Agent name and cannot be changed",
     });
     assert.equal(updated, false);
   });
@@ -303,7 +303,7 @@ test("Agent API refuses a non-Codex executioner runtime", async () => {
       id: "agent-executioner",
       projectId: "project-1",
       environmentId: "environment-1",
-      name: "implementation-plan-executioner",
+      name: "plan-executor-astra-medium",
       title: "Implementation Plan Executioner",
       model: "gpt-5.6-sol:high",
       runnerPreference: RunnerPreference.CODEX,
@@ -328,7 +328,7 @@ test("Agent API refuses a non-Codex executioner runtime", async () => {
     });
     assert.equal(response.status, 400);
     assert.deepEqual(await response.json(), {
-      error: "implementation-plan-executioner requires a Codex gpt-* model",
+      error: "plan-executor-astra-medium requires a Codex gpt-* model",
     });
     assert.equal(updated, false);
   });
@@ -341,7 +341,7 @@ test("Agent API does not mark unchanged runtime fields as an operator override",
       id: "agent-executioner",
       projectId: "project-1",
       environmentId: "environment-1",
-      name: "implementation-plan-executioner",
+      name: "plan-executor-astra-medium",
       title: "Implementation Plan Executioner",
       model: "gpt-5.6-sol:high",
       runnerPreference: RunnerPreference.CODEX,
@@ -912,8 +912,8 @@ test("POST repo runs successful dependency-policy preflights through to creation
 test("POST repo optionally grants every active non-integrator Agent atomically", async () => {
   await withTokens(async () => {
     const agents = [
-      { id: "agent-1", name: "senior-dev", archivedAt: null },
-      { id: "agent-2", name: "review-coordinator-sol", archivedAt: null },
+      { id: "agent-1", name: "senior-dev-astra-medium", archivedAt: null },
+      { id: "agent-2", name: "code-reviewer-sol-high", archivedAt: null },
       { id: "agent-3", name: "archived", archivedAt: new Date() },
       { id: "agent-4", name: "merge-integrator", archivedAt: null },
     ];

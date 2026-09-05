@@ -1,5 +1,5 @@
 ---
-name: plan-reviser
+name: plan-reviser-opus-high
 title: Plan Reviser
 model: claude-opus-5:high
 runner: claude

@@ -108,7 +108,7 @@ test("project bootstrap validates source inventories before opening its transact
     () => createProjectBootstrap(database, input, loaders({
       loadAgentSources: async () => ({ foundationalPrompt: "foundation", roles: [] }),
     })),
-    /senior-dev-luna/u,
+    /senior-dev-luna-max/u,
   );
   assert.equal(transactionCalls, 0);
 

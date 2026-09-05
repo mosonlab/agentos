@@ -61,8 +61,8 @@ const seedRegression = async (options: RegressionSeedOptions = {}) => {
     model: "gpt-5.6-sol:high", runnerPreference: "CODEX", foundationalPrompt: "foundation", rolePrompt: "role",
   } });
   const [regressionAgent, resolverAgent, fixAgent, reviewAgent, librarianAgent] = await Promise.all([
-    makeAgent("review-coordinator-sol"), makeAgent("merge-resolver"), makeAgent("senior-dev"),
-    makeAgent("review-coordinator"), makeAgent("librarian"),
+    makeAgent("code-reviewer-sol-high"), makeAgent("merge-resolver-opus-medium"), makeAgent("senior-dev-astra-medium"),
+    makeAgent("review-coordinator-astra-medium"), makeAgent("librarian-luna-xhigh"),
   ]);
   const repo = await db.repo.create({ data: {
     projectId: project.id, name: "widgets", remoteUrl: "https://github.com/acme/widgets.git",
@@ -575,7 +575,7 @@ test("a repair whose whole budget fails retryably still stops the tail", async (
 test("a refresh conflict creates exactly one resolver and its completion re-runs regression", async () => {
   const seeded = await exercise("refresh-conflict");
   const repair = await repairFor(seeded, "refresh-conflict");
-  assert.equal((await db.agent.findUniqueOrThrow({ where: { id: repair.assigneeAgentId! } })).name, "merge-resolver");
+  assert.equal((await db.agent.findUniqueOrThrow({ where: { id: repair.assigneeAgentId! } })).name, "merge-resolver-opus-medium");
   assert.equal(await repairCount(seeded), 1);
   await completeRepair(seeded, repair.id, JSON.stringify({
     schemaVersion: 1, outcome: "resolved", startHeadSha: HEAD, targetHeadSha: BASE,
@@ -595,7 +595,7 @@ test("a refresh conflict creates exactly one resolver and its completion re-runs
 test("a gate FAIL is repaired twice and the third FAIL escalates with both heads in activity", async () => {
   const seeded = await exercise("gate-fail");
   const first = await repairFor(seeded, "gate-fix");
-  assert.equal((await db.agent.findUniqueOrThrow({ where: { id: first.assigneeAgentId! } })).name, "senior-dev");
+  assert.equal((await db.agent.findUniqueOrThrow({ where: { id: first.assigneeAgentId! } })).name, "senior-dev-astra-medium");
   await completeRepair(seeded, first.id, "Fixed the failing regression and reran the affected suite.", RESOLVED);
   assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 2);
   // The first repair moved the tree, so this FAIL is a verdict on a different
@@ -663,7 +663,7 @@ test("a gate-fix prompt renders its failure excerpt while other repair prompts r
   assert.equal(conflictRepair.description, [
     `Resolve the refresh conflict between chain head ${HEAD} and target head ${BASE}.`,
     "merge conflict",
-    `Re-run the merge, preserve both intents under the merge-resolver role contract, commit the resolution, and persist the role's versioned JSON bound to start ${HEAD} and target ${BASE}.`,
+    `Re-run the merge, preserve both intents under the merge-resolver-opus-medium role contract, commit the resolution, and persist the role's versioned JSON bound to start ${HEAD} and target ${BASE}.`,
     conflictContext,
   ].join("\n\n"));
 });
@@ -671,7 +671,7 @@ test("a gate-fix prompt renders its failure excerpt while other repair prompts r
 test("a semantic FAIL skips the gate path and is repaired twice before it escalates", async () => {
   const seeded = await exercise("review-fail");
   const first = await repairFor(seeded, "review-fix");
-  assert.equal((await db.agent.findUniqueOrThrow({ where: { id: first.assigneeAgentId! } })).name, "senior-dev");
+  assert.equal((await db.agent.findUniqueOrThrow({ where: { id: first.assigneeAgentId! } })).name, "senior-dev-astra-medium");
   assert.match(first.description, /MF-2 remains open/u);
   await completeRepair(seeded, first.id, "Closed MF-2 and reran its focused regression.", RESOLVED);
   assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 2);
