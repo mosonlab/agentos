@@ -25,9 +25,9 @@ has never walked.
 
 | Platform | Status | Evidence boundary |
 | --- | --- | --- |
-| macOS on Apple Silicon | **Target platform** | The only platform this release targets. The install shape is in [`developer-preview.md`](developer-preview.md). |
+| macOS on Apple Silicon | **Target platform** | The install shape is in [`developer-preview.md`](developer-preview.md). |
 | macOS on Intel | **Unverified** | The portable design and locked `darwin-x64` dependencies make this path expected to work, but nothing has been run there. |
-| Linux | **Unverified** | The POSIX design, explicit Linux command branches and locked Linux dependencies make this path expected to work, but no release install or Run has been exercised there. |
+| Linux | **Maintainer-verified** | Ubuntu 24.04 LTS on x86_64, Node.js 26.8.1, Codex CLI 0.153.4: the maintainer's own installation runs the API, web console, PostgreSQL, release migrations, sixteen Codex and Pi runners and the merge executor there. Other distributions are **Unverified**. |
 | Windows | **Unsupported** | The runner relies on POSIX process-group, path and command behaviour. This is a design position, not a gap waiting to be filled. |
 
 ## Runtime prerequisites
@@ -88,6 +88,7 @@ the CLI vendor.
 | Repository command-line interface | **Retired** | This release ships no repository CLI. v0.1.0 and v0.2.0 contained a help-only interface; v0.3.0 retires it rather than carrying it forward without operational command families. |
 | Feishu / Lark integration | **Experimental** | A maintainer's own integration, published because it is in the tree rather than because it is offered. Not part of the quickstart sequence and not part of the committed surface. |
 | launchd service definitions | **Unsupported** | Outside the supported install shape. |
+| Runners on a second machine | **Experimental** | The runner machine forwards the control plane's loopback port over its own SSH tunnel; see [`install.md`](../install.md). The maintainer runs Claude Code runners this way. The tunnel adds no identity, so the row below stands. |
 | Remote access of any kind | **Unsupported** | There is no remote authentication design — no login, no per-user identity, no session model for anyone but the machine's own operator. A tunnel or a reverse proxy does not add one. |
 
 ## Data and operations

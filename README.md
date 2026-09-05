@@ -11,7 +11,7 @@ already signed in to.
 
 [![status](https://img.shields.io/badge/status-developer%20preview-orange)](#status)
 [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![platform](https://img.shields.io/badge/platform-macOS%20Apple%20Silicon%20verified-lightgrey)](#status)
+[![platform](https://img.shields.io/badge/platform-macOS%20Apple%20Silicon%20%7C%20Linux-lightgrey)](#status)
 [![node](https://img.shields.io/badge/node-22.17.0-brightgreen)](.nvmrc)
 
 [Install](#quick-start) · [How it works](#how-it-works) · [Status](#status) · [简体中文](README.zh-CN.md)
@@ -126,15 +126,15 @@ board column semantics in the
 
 The verified release path needs:
 
-- an Apple Silicon Mac
+- an Apple Silicon Mac or a Linux machine (Ubuntu 24.04 LTS verified)
 - Node.js satisfying `^20.19.0 || ^22.13.0 || >=24`; use `22.17.0` from
   `.nvmrc`, with npm 10.9.2+
 - Docker Compose and Git
-- the official Codex CLI signed in under the same macOS account
+- the official Codex CLI signed in under the account that runs the runner
   (Claude Code and Pi optional)
 
-Linux and macOS on Intel are expected to work but are not yet
-release-verified. This quick start documents the verified Apple Silicon path.
+macOS on Intel is expected to work but is not yet release-verified;
+Windows is unsupported.
 
 ```sh
 git clone https://github.com/mosonlab/anneal.git
@@ -156,14 +156,15 @@ The full sequence with its preflights is in
 
 Developer Preview 7 (v0.7.0): interfaces and stored data shapes may
 change between previews, and the only upgrade path is a fresh install.
-The verified target is macOS on Apple Silicon. Linux and macOS on Intel
-are expected to work but are not yet release-verified; Windows is unsupported.
+The verified targets are macOS on Apple Silicon and Linux (Ubuntu 24.04 LTS,
+x86_64). macOS on Intel is expected to work but is not yet release-verified;
+Windows is unsupported.
 
 For the pull-request workflow, follow [Add a project](docs/runbooks/add-a-project.md).
 
 **Read before pointing this at anything you care about:** Anneal
 launches coding CLIs with non-interactive permission bypass, as your
-macOS user, outside a sandbox. Use a disposable repository and a
+own user account, outside a sandbox. Use a disposable repository and a
 machine you are willing to let an agent modify. Details in
 [`docs/release/security.md`](docs/release/security.md).
 
