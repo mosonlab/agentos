@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, sep } from "node:path";
@@ -28,6 +28,17 @@ const RUNTIME_TOOL_DESTINATIONS = Object.freeze([
 const RUNTIME_TOOL_ENTRIES = new Map([
   ["", new Set(["gate-worker", "git-credential-runner.sh", "regression-verification.sh"])],
   ["gate-worker", new Set(["gate-dispatch.sh", "lib.sh", "mirror-push.sh", "remote-gate.sh", "run-gate.sh"])],
+]);
+
+const CLONE_ATTEMPT_LIMIT = 3;
+const CLONE_RETRY_DELAYS_MS = Object.freeze([2_000, 8_000]);
+// GitHub from the deploy host is intermittently flaky. Retry only the
+// transport shapes that a later attempt can plausibly clear.
+const TRANSIENT_CLONE_STDERR = Object.freeze([
+  /gnutls_handshake\(\) failed/iu,
+  /\bTLS connection\b/iu,
+  /connection reset by peer/iu,
+  /could not resolve host/iu,
 ]);
 
 const fail = (reason, detail) => {
@@ -261,10 +272,61 @@ export const findReleaseArtifact = ({ deployRoot, revision }) => {
 };
 
 const run = (program, args, options = {}) => {
+  const { reason, captureStderr, ...spawnOptions } = options;
   try {
-    return execFileSync(program, args, { stdio: "inherit", ...options });
+    if (captureStderr) {
+      const result = spawnSync(program, args, {
+        stdio: ["inherit", "inherit", "pipe"],
+        maxBuffer: 10 * 1024 * 1024,
+        ...spawnOptions,
+      });
+      if (result.error || result.status !== 0) throw result;
+      if (result.stderr) process.stderr.write(result.stderr);
+      return result.stdout;
+    }
+    return execFileSync(program, args, { stdio: "inherit", ...spawnOptions });
   } catch (error) {
-    fail(options.reason ?? "release-artifact-build-failed", error?.status === undefined ? "command-failed" : `exit-${error.status}`);
+    // Captured stderr still belongs in the operator's log; classification is a
+    // second reader of it, not its owner.
+    if (captureStderr && error?.stderr) process.stderr.write(error.stderr);
+    const failure = new DeployFailure(
+      reason ?? "release-artifact-build-failed",
+      error?.status === undefined ? "command-failed" : `exit-${error.status}`,
+    );
+    failure.status = error?.status;
+    failure.stderr = error?.stderr;
+    throw failure;
+  }
+};
+
+const isTransientCloneFailure = (error) => {
+  if (error?.status !== 128) return false;
+  const stderr = typeof error?.stderr === "string" ? error.stderr : error?.stderr?.toString("utf8") ?? "";
+  return TRANSIENT_CLONE_STDERR.some((pattern) => pattern.test(stderr));
+};
+
+const sleepSync = (milliseconds) => {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+};
+
+/** Clone the release source, retrying a network-shaped git failure. Returns
+ * the number of attempts made; the last failure escalates unchanged. */
+const cloneSource = ({ execute, gitBinary, sourceRemote, buildRoot, sleep }) => {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      execute(gitBinary, ["clone", "--no-checkout", "--filter=blob:none", sourceRemote, buildRoot], {
+        reason: "release-artifact-source-unavailable",
+        captureStderr: true,
+      });
+      return attempt;
+    } catch (error) {
+      if (attempt >= CLONE_ATTEMPT_LIMIT || !isTransientCloneFailure(error)) throw error;
+      sleep(CLONE_RETRY_DELAYS_MS[attempt - 1]);
+      // A failed clone can leave a partial tree behind, and git refuses a
+      // non-empty destination.
+      rmSync(buildRoot, { recursive: true, force: true });
+      mkdirSync(buildRoot, { recursive: true, mode: 0o700 });
+    }
   }
 };
 
@@ -276,6 +338,7 @@ export const buildReleaseArtifact = ({
   nodeBinary,
   npmBinary,
   execute = run,
+  sleep = sleepSync,
   assemble = assembleReleaseDirectory,
   verify = verifyReleaseArtifact,
   requiredPaths = DEPLOY_REQUIRED_ARTIFACT_PATHS,
@@ -285,7 +348,7 @@ export const buildReleaseArtifact = ({
   if (!SHA.test(revision ?? "")) fail("release-artifact-build-refused", "target-commit-invalid");
   if (typeof sourceRemote !== "string" || sourceRemote.length === 0) fail("release-artifact-build-refused", "source-remote-missing");
   try {
-    return findReleaseArtifact({ deployRoot, revision });
+    return Object.freeze({ ...findReleaseArtifact({ deployRoot, revision }), cloneAttempts: 0 });
   } catch (error) {
     if (!(error instanceof DeployFailure) || error.reason !== "release-artifact-missing") throw error;
   }
@@ -294,9 +357,7 @@ export const buildReleaseArtifact = ({
   mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
   const buildRoot = mkdtempSync(join(stateRoot, "artifact-build-"));
   try {
-    execute(gitBinary, ["clone", "--no-checkout", "--filter=blob:none", sourceRemote, buildRoot], {
-      reason: "release-artifact-source-unavailable",
-    });
+    const cloneAttempts = cloneSource({ execute, gitBinary, sourceRemote, buildRoot, sleep });
     execute(gitBinary, ["-C", buildRoot, "checkout", "--detach", revision], {
       reason: "release-artifact-source-unavailable",
     });
@@ -314,11 +375,14 @@ export const buildReleaseArtifact = ({
       retention: false,
       probeImmutability: true,
     });
-    return verify({
-      deployRoot,
-      revision,
-      releaseName: result.releaseName,
-      verifierRoot: buildRoot,
+    return Object.freeze({
+      ...verify({
+        deployRoot,
+        revision,
+        releaseName: result.releaseName,
+        verifierRoot: buildRoot,
+      }),
+      cloneAttempts,
     });
   } finally {
     rmSync(buildRoot, { recursive: true, force: true });
