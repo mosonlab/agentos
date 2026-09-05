@@ -1,7 +1,7 @@
 ---
 name: review-coordinator
 title: Review Coordinator
-model: gpt-5.6-sol:xhigh
+model: gpt-6-astra:medium
 runner: codex
 inboxAccess: false
 collaborators: []

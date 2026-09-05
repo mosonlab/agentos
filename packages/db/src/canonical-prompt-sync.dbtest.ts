@@ -922,8 +922,8 @@ test("sync adopts uncustomized model-only runtime drift", async () => {
 
 test("sync notifies once per current customized runtime drift without overwriting it", async (t) => {
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
-  const originalProduction = { model: "claude-opus-5:medium", runnerPreference: RunnerPreference.CLAUDE };
-  const changedProduction = { model: "claude-opus-5:high", runnerPreference: RunnerPreference.CLAUDE };
+  const originalProduction = { model: "gpt-5.6-sol:high", runnerPreference: RunnerPreference.CODEX };
+  const changedProduction = { model: "gpt-5.6-sol:medium", runnerPreference: RunnerPreference.CODEX };
   const mergeResolverSource = canonicalRuntime("merge-resolver");
   const mergeResolver = await prisma.agent.findUniqueOrThrow({
     where: { projectId_name: { projectId: project.id, name: "merge-resolver" } },
@@ -994,7 +994,7 @@ test("sync notifies once per current customized runtime drift without overwritin
     `Canonical: model=${escapeRegex(mergeResolverSource.model)}, runner=${mergeResolverSource.runnerPreference}`,
     "u",
   ));
-  assert.match(firstNotice[0]!.body, /Production: model=claude-opus-5:medium, runner=CLAUDE/u);
+  assert.match(firstNotice[0]!.body, /Production: model=gpt-5\.6-sol:high, runner=CODEX/u);
   assert.match(firstNotice[0]!.body, /runtimeConfigCustomized=true/u);
 
   const unchangedSync = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
@@ -1014,7 +1014,7 @@ test("sync notifies once per current customized runtime drift without overwritin
     orderBy: { createdAt: "asc" },
   });
   assert.equal(notices.length, 2);
-  assert.match(notices[1]!.body, /Production: model=claude-opus-5:high, runner=CLAUDE/u);
+  assert.match(notices[1]!.body, /Production: model=gpt-5\.6-sol:medium, runner=CODEX/u);
   const afterChangedSync = await prisma.agent.findUniqueOrThrow({
     where: { id: mergeResolver.id },
     select: { model: true, runnerPreference: true, runtimeConfigCustomized: true },
@@ -1204,6 +1204,68 @@ test("sync recreates a missing spec revalidator with read-only repository covera
     where: { agentId: revalidator.id, repoId: repo.id },
     select: { mountPath: true, permissions: true },
   }), [{ mountPath: repo.mountPath, permissions: RepoPermission.GIT_READ }]);
+});
+
+test("sync recreates a missing senior-dev-sol fallback Agent from senior-dev", async (t) => {
+  const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  const solSource = canonicalRuntime("senior-dev-sol");
+  const source = await prisma.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: "senior-dev" } },
+  });
+  const existingSol = await prisma.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: "senior-dev-sol" } },
+  });
+
+  const repo = await prisma.repo.create({
+    data: {
+      projectId: project.id,
+      name: `canonical-sync-sol-${randomBytes(4).toString("hex")}`,
+      remoteUrl: "file:///tmp/agentos-canonical-sync-sol.git",
+      mountPath: "/workspace/canonical-sync-sol",
+      dependencyProvisioning: "NONE",
+    },
+  });
+  await prisma.agentRepoAccess.create({
+    data: {
+      agentId: source.id,
+      repoId: repo.id,
+      projectId: project.id,
+      mountPath: repo.mountPath,
+      permissions: RepoPermission.GIT_WRITE,
+    },
+  });
+  t.after(async () => {
+    await prisma.repo.delete({ where: { id: repo.id } });
+  });
+
+  await prisma.agent.delete({ where: { id: existingSol.id } });
+
+  const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(synced.status, 0, synced.output);
+  assert.match(synced.output, /"createdAgents":1/u);
+  assert.match(synced.output, /"createdAgentRepoGrants":1/u);
+
+  const sol = await prisma.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: "senior-dev-sol" } },
+  });
+  assert.equal(sol.model, solSource.model);
+  assert.equal(sol.runnerPreference, solSource.runnerPreference);
+  assert.equal(sol.inboxAccess, true);
+  assert.equal(sol.environmentId, source.environmentId);
+  assert.equal(sol.runtimeConfigCustomized, false);
+  // The role binds no template step, so the source Agent's write grant is the
+  // only way it can reach a repository.
+  assert.deepEqual(await prisma.agentRepoAccess.findMany({
+    where: { agentId: sol.id, repoId: repo.id },
+    select: { mountPath: true, permissions: true },
+  }), [{ mountPath: repo.mountPath, permissions: RepoPermission.GIT_WRITE }]);
+
+  const second = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(second.status, 0, second.output);
+  assert.match(second.output, /"createdAgents":0/u);
+  assert.equal(await prisma.agent.count({
+    where: { projectId: project.id, name: "senior-dev-sol" },
+  }), 1);
 });
 
 test("canonical sync adopts the tolerated differences and refuses every other one before mutating", async () => {

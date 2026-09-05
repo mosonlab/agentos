@@ -248,8 +248,8 @@ test("a fresh seed writes the twelve-step, eight-step, and four-step canonical t
   assert.equal(direct.steps[7]?.outputKind, INTEGRATOR_OUTPUT_KIND);
   assert.match(direct.steps[5]?.prompt ?? "", /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" finalize/u);
   const resolver = await db.agent.findFirstOrThrow({ where: { projectId: step.taskTemplate.projectId, name: "merge-resolver" } });
-  assert.equal(resolver.model, "gpt-5.6-sol:high");
-  assert.equal(resolver.runnerPreference, "CODEX");
+  assert.equal(resolver.model, "claude-opus-5:medium");
+  assert.equal(resolver.runnerPreference, "CLAUDE");
 
   const pullRequest = await db.taskTemplate.findUniqueOrThrow({
     where: { projectId_name: { projectId: step.taskTemplate.projectId, name: PR_TEMPLATE_NAME } },

@@ -55,6 +55,19 @@ test("a provider-prefixed Claude Fable model uses its bare price row", () => {
   assert.equal(cost.estimated, true);
 });
 
+test("GPT-6 Astra token-only usage prices from its own row", () => {
+  const cost = sessionUsageCost("gpt-6-astra:medium", {
+    costUsd: null,
+    inputTokens: 800_000,
+    cachedInputTokens: 300_000,
+    cacheCreationInputTokens: 0,
+    outputTokens: 60_000,
+  });
+  // 500k uncached at $10/M = 5.0, 300k cached at $1/M = 0.3, 60k output at $50/M = 3.0 => 8.3
+  assert.equal(cost.costUsd?.toString(), "8.3");
+  assert.equal(cost.estimated, true);
+});
+
 test("splitting cache creation from the legacy cached total preserves the estimate", () => {
   const beforeSplit = sessionUsageCost("gpt-5.6-luna", {
     costUsd: null,

@@ -1,7 +1,7 @@
 ---
-name: senior-dev
-title: Senior Developer (Astra medium)
-model: gpt-6-astra:medium
+name: senior-dev-sol
+title: Senior Developer (Sol high)
+model: gpt-5.6-sol:high
 runner: codex
 inboxAccess: true
 collaborators: []

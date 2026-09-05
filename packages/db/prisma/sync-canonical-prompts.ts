@@ -38,8 +38,19 @@ import {
   type TemplateStepSource,
 } from "../src/template-sources.js";
 
-const REGRESSION_AGENT_SOURCE = "review-coordinator-sol";
-const SPEC_REVALIDATOR_AGENT_SOURCE = "review-coordinator-sol";
+const SENIOR_DEV_SOL_AGENT_NAME = "senior-dev-sol";
+
+// Canonical roles that no template step binds, so ordinary synchronization
+// never creates them: each is created once from an active source Agent row.
+const SPECIAL_CANONICAL_AGENTS: readonly {
+  name: string;
+  source: string;
+  permissions: RepoPermission | null;
+}[] = [
+  { name: REGRESSION_VERIFIER_AGENT_NAME, source: "review-coordinator-sol", permissions: null },
+  { name: SPEC_REVALIDATOR_AGENT_NAME, source: "review-coordinator-sol", permissions: RepoPermission.GIT_READ },
+  { name: SENIOR_DEV_SOL_AGENT_NAME, source: "senior-dev", permissions: null },
+];
 
 const runtimeConfigRefusal = (agent: { model: string; runnerPreference: RunnerPreference }): string | null => {
   const expected = catalogRunnerForModel(agent.model);
@@ -194,31 +205,20 @@ const migrateSpecialCanonicalAgents = async (
   rolesByName: ReadonlyMap<string, RoleSource>,
   counters: CanonicalSyncCounters,
 ): Promise<void> => {
-  const regressionRole = rolesByName.get(REGRESSION_VERIFIER_AGENT_NAME);
-  if (!regressionRole) throw projectError(canonicalProject, `Canonical role ${REGRESSION_VERIFIER_AGENT_NAME} was not found`);
-  const regression = await createSpecialCanonicalAgent(
-    tx,
-    canonicalProject,
-    sources,
-    regressionRole,
-    REGRESSION_AGENT_SOURCE,
-    null,
-  );
-  if (regression.created) counters.createdAgents += 1;
-  if (regression.grants > 0) counters.createdAgentRepoGrants += regression.grants;
-
-  const revalidatorRole = rolesByName.get(SPEC_REVALIDATOR_AGENT_NAME);
-  if (!revalidatorRole) throw projectError(canonicalProject, `Canonical role ${SPEC_REVALIDATOR_AGENT_NAME} was not found`);
-  const revalidator = await createSpecialCanonicalAgent(
-    tx,
-    canonicalProject,
-    sources,
-    revalidatorRole,
-    SPEC_REVALIDATOR_AGENT_SOURCE,
-    RepoPermission.GIT_READ,
-  );
-  if (revalidator.created) counters.createdAgents += 1;
-  if (revalidator.grants > 0) counters.createdAgentRepoGrants += revalidator.grants;
+  for (const special of SPECIAL_CANONICAL_AGENTS) {
+    const role = rolesByName.get(special.name);
+    if (!role) throw projectError(canonicalProject, `Canonical role ${special.name} was not found`);
+    const outcome = await createSpecialCanonicalAgent(
+      tx,
+      canonicalProject,
+      sources,
+      role,
+      special.source,
+      special.permissions,
+    );
+    if (outcome.created) counters.createdAgents += 1;
+    if (outcome.grants > 0) counters.createdAgentRepoGrants += outcome.grants;
+  }
 };
 
 const installMissingAgents = async (

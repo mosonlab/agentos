@@ -74,9 +74,9 @@ test("canonical OpenAI roles pin their Codex model and runner", async () => {
     roleSource("spec-revalidator"),
   ]);
 
-  assert.equal(frontmatterValue(reviewCoordinator, "model"), "gpt-5.6-sol:xhigh");
+  assert.equal(frontmatterValue(reviewCoordinator, "model"), "gpt-6-astra:medium");
   assert.equal(frontmatterValue(reviewCoordinator, "runner"), "codex");
-  assert.equal(frontmatterValue(reviewCoordinatorSol, "model"), "gpt-5.6-sol:xhigh");
+  assert.equal(frontmatterValue(reviewCoordinatorSol, "model"), "gpt-5.6-sol:high");
   assert.equal(frontmatterValue(reviewCoordinatorSol, "runner"), "codex");
   assert.equal(frontmatterValue(librarian, "model"), "gpt-5.6-luna:xhigh");
   assert.equal(frontmatterValue(librarian, "runner"), "codex");
@@ -124,6 +124,7 @@ test("named canonical roles use their model catalog runner and retired role name
     "regression-verifier",
     "librarian",
     "senior-dev",
+    "senior-dev-sol",
     "spec-revalidator",
     "implementation-plan-executioner",
   ]) {
@@ -201,7 +202,7 @@ test("the split review prompts enforce persisted-range, blindness, and regressio
 
 test("the executioner delegates only through platform-pinned native Luna children", async () => {
   const executioner = await roleSource("implementation-plan-executioner");
-  assert.equal(frontmatterValue(executioner, "model"), "gpt-5.6-sol:high");
+  assert.equal(frontmatterValue(executioner, "model"), "gpt-6-astra:medium");
   assert.match(executioner, /pins every native child to Luna max/u);
   assert.match(executioner, /eight concurrent child threads/u);
   assert.match(executioner, /Delegation is not one slice per child/u);

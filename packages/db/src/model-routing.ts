@@ -35,6 +35,8 @@ export type CatalogModel = {
 const CODEX_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 const PI_EFFORTS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+/** The catalog is the console's allowlist, not the CLI's: it deliberately omits Astra's `ultra` tier. */
+const ASTRA_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 
 export const MODELS: CatalogModel[] = [
   { id: "claude-fable-5", label: "Claude Fable 5", runner: "CLAUDE", efforts: CLAUDE_EFFORTS, defaultEffort: "medium" },
@@ -44,6 +46,7 @@ export const MODELS: CatalogModel[] = [
   { id: "gpt-5.6-sol", label: "GPT-5.6 Sol (codex)", runner: "CODEX", efforts: CODEX_EFFORTS, defaultEffort: "high" },
   { id: "gpt-5.6-terra", label: "GPT-5.6 Terra (codex)", runner: "CODEX", efforts: CODEX_EFFORTS, defaultEffort: "medium" },
   { id: "gpt-5.6-luna", label: "GPT-5.6 Luna (codex)", runner: "CODEX", efforts: CODEX_EFFORTS, defaultEffort: "max" },
+  { id: "gpt-6-astra", label: "GPT-6 Astra (codex)", runner: "CODEX", efforts: ASTRA_EFFORTS, defaultEffort: "medium" },
   { id: "openai-codex/gpt-5.6-sol", label: "GPT-5.6 Sol (pi)", runner: "PI", efforts: PI_EFFORTS, defaultEffort: "high" },
   { id: "openai-codex/gpt-5.6-luna", label: "GPT-5.6 Luna (pi)", runner: "PI", efforts: PI_EFFORTS, defaultEffort: "max" },
 ];

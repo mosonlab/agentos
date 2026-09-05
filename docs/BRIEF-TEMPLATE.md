@@ -74,15 +74,17 @@ it can.
 
 ## Routing
 
-Implementation has three routes:
+Implementation has four routes:
 
 - **senior-dev-luna** (template default): a brief with mechanical Acceptance
   is work that tier finishes under the chain's review and regression tail.
 - **senior-dev**, with the reason on the same line, when the hazard is one
   the acceptance suite cannot witness even when stated: concurrency and
   transaction-boundary semantics, lock or lease ownership windows,
-  cross-module contract migrations. A sol route without a reason is a brief
-  defect.
+  cross-module contract migrations. A senior-dev route without a reason is a
+  brief defect.
+- **senior-dev-sol**, with the reason on the same line, only when the
+  senior-dev model is unavailable for that work. It is never a default.
 - **frontend-dev** for frontend implementation work (UI components, pages,
   client-side behavior).
 

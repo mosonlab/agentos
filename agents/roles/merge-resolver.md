@@ -1,8 +1,8 @@
 ---
 name: merge-resolver
 title: Merge Resolver
-model: gpt-5.6-sol:high
-runner: codex
+model: claude-opus-5:medium
+runner: claude
 inboxAccess: true
 collaborators: []
 ---
