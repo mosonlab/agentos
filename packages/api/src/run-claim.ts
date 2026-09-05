@@ -31,10 +31,8 @@ import {
 import { heldPredicate, heldSql, heldWhere } from "@anneal/db/chain-hold";
 import type { ClaimContract, ClaimRefusal } from "@anneal/db/claim-contract";
 import {
-  MECHANICAL_CONTRACT_MISMATCH_ALERT_BODY_PREFIX,
-  MECHANICAL_CONTRACT_MISMATCH_CODE,
   MECHANICAL_CONTRACT_MISMATCH_DEDUPE_KEY_PREFIX,
-  RUN_COMPLETION_CONTRACT_VERSION,
+  mechanicalContractMismatch,
 } from "@anneal/db/claim-contract";
 import { z } from "zod";
 
@@ -623,22 +621,26 @@ export const claimRun = async (
       // empty — the shipped default — or with `MERGE_EXECUTOR_TOKEN` unset or
       // aliased onto the runner token, no integrator run is claimable at all.
       if (!claimantMayTake(executionMode, claimantClass, body.runnerId, executorRunnerIds)) return SKIP;
-      if (executionMode === "mechanical" && body.contractVersion !== RUN_COMPLETION_CONTRACT_VERSION) {
-        const receivedVersion = body.contractVersion ?? null;
-        const displayedVersion = receivedVersion ?? "missing";
-        const message = `Mechanical completion contract mismatch: executor version ${displayedVersion}; API version ${RUN_COMPLETION_CONTRACT_VERSION}`;
-        const alertKeyPrefix = `${MECHANICAL_CONTRACT_MISMATCH_DEDUPE_KEY_PREFIX}${RUN_COMPLETION_CONTRACT_VERSION}:${displayedVersion}:`;
+      // Compatibility with the independently released merge executor is one
+      // decision, and `mechanicalContractMismatch` is all of it: the
+      // comparison, the refusal on the wire, this record and the alert. What
+      // is left here is the writing.
+      const mismatch = executionMode === "mechanical"
+        ? mechanicalContractMismatch({ receivedVersion: body.contractVersion ?? null, taskId: candidate.task.id, now })
+        : null;
+      if (mismatch) {
+        const { code, apiVersion, executorVersion } = mismatch.activity.metadata;
         const existingActivity = await tx.taskActivity.findFirst({
           where: {
             taskId: candidate.task.id,
             actorType: "control-plane",
             AND: [
-              { metadata: { path: ["code"], equals: MECHANICAL_CONTRACT_MISMATCH_CODE } },
-              { metadata: { path: ["apiVersion"], equals: RUN_COMPLETION_CONTRACT_VERSION } },
+              { metadata: { path: ["code"], equals: code } },
+              { metadata: { path: ["apiVersion"], equals: apiVersion } },
               {
                 metadata: {
                   path: ["executorVersion"],
-                  equals: receivedVersion === null ? Prisma.JsonNull : receivedVersion,
+                  equals: executorVersion === null ? Prisma.JsonNull : executorVersion,
                 },
               },
             ],
@@ -650,26 +652,13 @@ export const claimRun = async (
             data: {
               taskId: candidate.task.id,
               actorType: "control-plane",
-              body: message,
-              metadata: {
-                code: MECHANICAL_CONTRACT_MISMATCH_CODE,
-                executorVersion: receivedVersion,
-                apiVersion: RUN_COMPLETION_CONTRACT_VERSION,
-              },
+              body: mismatch.activity.body,
+              metadata: mismatch.activity.metadata,
             },
           });
         }
-        await openMechanicalContractMismatchAlert(tx, {
-          body: `${MECHANICAL_CONTRACT_MISMATCH_ALERT_BODY_PREFIX} executor version ${displayedVersion}; API version ${RUN_COMPLETION_CONTRACT_VERSION}; task ${candidate.task.id}`,
-          dedupeKey: `${alertKeyPrefix}${now.toISOString()}`,
-          dedupeKeyPrefix: alertKeyPrefix,
-        });
-        return {
-          error: message,
-          reason: MECHANICAL_CONTRACT_MISMATCH_CODE,
-          expectedVersion: RUN_COMPLETION_CONTRACT_VERSION,
-          receivedVersion,
-        };
+        await openMechanicalContractMismatchAlert(tx, mismatch.alert);
+        return mismatch.refusal;
       }
       // The backend circuit breaker tracks model-CLI health. A mechanical run
       // spawns no CLI, so an open CLI circuit is not evidence about it; the

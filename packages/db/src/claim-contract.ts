@@ -10,6 +10,13 @@
  * aliases it, so a consumer that reads a field the server never sends fails
  * to compile too.
  *
+ * It also owns the one decision the same two processes make about each other:
+ * whether a mechanical claim's build is compatible with this one, and what the
+ * control plane answers, records and alerts when it is not. That decision's
+ * strings used to be constants here while its comparison, its wire shape and
+ * its dedupe keys were assembled in three other files across two packages; a
+ * version bump now changes this file alone.
+ *
  * Prisma is imported as types only: persisted enum widening becomes a
  * compile-time change at this seam without pulling generated client code into
  * a consumer. Unlike `wire-contract.ts` and `board-contract.ts` this contract
@@ -40,13 +47,20 @@ export const RUN_COMPLETION_CONTRACT_VERSION = 1;
 /** Stable refusal discriminator shared by the API and mechanical executor. */
 export const MECHANICAL_CONTRACT_MISMATCH_CODE = "mechanical_contract_mismatch";
 
-/** Stable Inbox body prefix for mechanical completion contract mismatch alerts. */
-export const MECHANICAL_CONTRACT_MISMATCH_ALERT_BODY_PREFIX =
-  "merge executor completion contract mismatch:";
-
-/** Stable Inbox dedupe-key prefix for mechanical completion contract mismatch alerts. */
+/**
+ * Stable Inbox dedupe-key prefix for every mechanical contract mismatch alert.
+ *
+ * Exported because the claim transaction takes its advisory lock on this
+ * prefix and closes every OPEN alert under it once a compatible executor
+ * claims. The per-version-pair prefix that decides whether a *new* alert is
+ * opened is built by `mechanicalContractMismatch` below.
+ */
 export const MECHANICAL_CONTRACT_MISMATCH_DEDUPE_KEY_PREFIX =
   "merge-executor-completion-contract-mismatch:";
+
+/** Stable Inbox body prefix for mechanical completion contract mismatch alerts. */
+const MECHANICAL_CONTRACT_MISMATCH_ALERT_BODY_PREFIX =
+  "merge executor completion contract mismatch:";
 
 /** The step identity a runner needs: title the delivery, and decide provisioning. */
 export type ClaimTemplateStep = {
@@ -234,11 +248,111 @@ export type ClaimContract = {
 };
 
 /** The refusal `claimRun` reports instead of a claim, rendered as a 409. */
-export type ClaimRefusal = {
+export type ClaimRefusal = ClaimRefused | MechanicalContractMismatchRefusal;
+
+/** A refusal that carries no evidence beyond its reason. */
+export type ClaimRefused = {
   error: string;
   reason: string;
-  /** Present only for a mechanical completion-contract mismatch. */
-  expectedVersion?: number;
-  /** Null means the mechanical executor omitted its version. */
-  receivedVersion?: number | null;
 };
+
+/**
+ * The refusal a mechanical claim gets when the two independently released
+ * processes disagree about the completion contract.
+ *
+ * Every field here is on the wire: the route answers 409 with `{ error,
+ * ...rest }` of this value and adds nothing, so this type *is* the response
+ * body the merge executor decodes. `code` repeats `reason` because the
+ * released executor branches on `code`; changing which field carries the
+ * discriminator would go unrecognised by exactly the build this refusal
+ * exists to stop.
+ */
+export type MechanicalContractMismatchRefusal = {
+  error: string;
+  reason: typeof MECHANICAL_CONTRACT_MISMATCH_CODE;
+  code: typeof MECHANICAL_CONTRACT_MISMATCH_CODE;
+  expectedVersion: number;
+  /** Null means the mechanical executor omitted its version. */
+  receivedVersion: number | null;
+};
+
+/**
+ * Everything the control plane says and records about one incompatible
+ * mechanical claim: what it answers, what it writes on the Task, and what it
+ * raises for an operator. The caller performs the writes; it composes no
+ * string of its own.
+ */
+export type MechanicalContractMismatch = {
+  refusal: MechanicalContractMismatchRefusal;
+  /**
+   * The Task record. `metadata` is also the dedupe predicate: one record per
+   * (code, apiVersion, executorVersion) triple, so a poll every few seconds
+   * does not fill the Task feed.
+   */
+  activity: {
+    body: string;
+    metadata: {
+      code: typeof MECHANICAL_CONTRACT_MISMATCH_CODE;
+      executorVersion: number | null;
+      apiVersion: number;
+    };
+  };
+  /**
+   * The operator alert. A new one is opened only when no OPEN alert starts
+   * with `dedupeKeyPrefix`, which names this exact version pair; `dedupeKey`
+   * makes the row itself unique.
+   */
+  alert: { body: string; dedupeKey: string; dedupeKeyPrefix: string };
+};
+
+/**
+ * Decide whether a mechanical claim is compatible with this build.
+ *
+ * Null means compatible. Anything else — the version comparison, the refusal
+ * on the wire, the recorded fact, the alert text and both dedupe keys — is
+ * this module's, so a version bump changes one file rather than four.
+ */
+export const mechanicalContractMismatch = (input: {
+  /** The version the executor sent; null when it sent none. */
+  receivedVersion: number | null;
+  taskId: string;
+  now: Date;
+}): MechanicalContractMismatch | null => {
+  if (input.receivedVersion === RUN_COMPLETION_CONTRACT_VERSION) return null;
+  const displayedVersion = input.receivedVersion ?? "missing";
+  const versions = `executor version ${displayedVersion}; API version ${RUN_COMPLETION_CONTRACT_VERSION}`;
+  const message = `Mechanical completion contract mismatch: ${versions}`;
+  const dedupeKeyPrefix =
+    `${MECHANICAL_CONTRACT_MISMATCH_DEDUPE_KEY_PREFIX}${RUN_COMPLETION_CONTRACT_VERSION}:${displayedVersion}:`;
+  return {
+    refusal: {
+      error: message,
+      reason: MECHANICAL_CONTRACT_MISMATCH_CODE,
+      code: MECHANICAL_CONTRACT_MISMATCH_CODE,
+      expectedVersion: RUN_COMPLETION_CONTRACT_VERSION,
+      receivedVersion: input.receivedVersion,
+    },
+    activity: {
+      body: message,
+      metadata: {
+        code: MECHANICAL_CONTRACT_MISMATCH_CODE,
+        executorVersion: input.receivedVersion,
+        apiVersion: RUN_COMPLETION_CONTRACT_VERSION,
+      },
+    },
+    alert: {
+      body: `${MECHANICAL_CONTRACT_MISMATCH_ALERT_BODY_PREFIX} ${versions}; task ${input.taskId}`,
+      dedupeKey: `${dedupeKeyPrefix}${input.now.toISOString()}`,
+      dedupeKeyPrefix,
+    },
+  };
+};
+
+/**
+ * The claim fields the merge executor reads, projected from `ClaimContract`
+ * rather than restated: a projection that stops producing one of them fails to
+ * compile in the executor instead of arriving there as `undefined`.
+ */
+export type MechanicalClaim =
+  & Pick<ClaimContract, "executionMode" | "fencingToken" | "sessionToken">
+  & { task: Pick<ClaimTask, "chainIndex">; run: Pick<ClaimRun, "id"> };

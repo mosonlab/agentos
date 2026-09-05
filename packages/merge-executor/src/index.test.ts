@@ -8,9 +8,9 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import type { RunOutcome } from "@anneal/db";
-import { RUN_COMPLETION_CONTRACT_VERSION } from "@anneal/db/claim-contract";
+import { RUN_COMPLETION_CONTRACT_VERSION, type MechanicalClaim } from "@anneal/db/claim-contract";
 
-import { makeAgentOsClient, type MechanicalClaim } from "./agentos.js";
+import { makeAgentOsClient } from "./agentos.js";
 import type { ExecutorConfig } from "./config.js";
 import { mintInstallationToken } from "./github-app-auth.js";
 import { claimOnce, pollClaims, runClaim } from "./index.js";
@@ -37,9 +37,8 @@ const config: ExecutorConfig = {
 
 const claimed = (id: string): MechanicalClaim => ({
   executionMode: "mechanical",
-  task: { id: `task-${id}`, name: "merge", chainIndex: 7 },
-  run: { id, runNumber: 1, maxRunsPerTask: 3 },
-  session: { id: `session-${id}` },
+  task: { chainIndex: 7 },
+  run: { id },
   fencingToken: `fence-${id}`,
   sessionToken: `session-token-${id}`,
 });

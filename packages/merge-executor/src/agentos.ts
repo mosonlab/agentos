@@ -14,19 +14,12 @@ import type { MergeOutcome } from "@anneal/db/merge-integrator";
 import {
   MECHANICAL_CONTRACT_MISMATCH_CODE,
   RUN_COMPLETION_CONTRACT_VERSION,
+  type MechanicalClaim,
+  type MechanicalContractMismatchRefusal,
 } from "@anneal/db/claim-contract";
 
 import type { ExecutorConfig } from "./config.js";
 import type { ChainEnvelope, IntentRecord } from "./decision-table.js";
-
-export type MechanicalClaim = {
-  executionMode: "mechanical" | "agent";
-  task: { id: string; name: string; chainIndex?: number | null };
-  run: { id: string; runNumber: number; maxRunsPerTask: number };
-  session: { id: string };
-  fencingToken: string;
-  sessionToken: string;
-};
 
 export type MechanicalCancellation = {
   requestId: string;
@@ -92,6 +85,40 @@ export class CompletionTransportError extends Error {
   }
 }
 
+/**
+ * Read a 409 body as the contract-mismatch refusal the control plane composes,
+ * or null when it is any other refusal.
+ *
+ * Every field name checked here belongs to the declared refusal, so this
+ * process recognises the mismatch by the same value the API produced rather
+ * than by a shape restated on this side. A body that is not that refusal — a
+ * different reason, or a malformed one — is not the named compatibility
+ * result, and the caller surfaces the original response error through the
+ * ordinary claim-loop path.
+ */
+export const decodeContractMismatchRefusal = (
+  responseBody: string,
+): MechanicalContractMismatchRefusal | null => {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(responseBody) as unknown;
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+  const refusal = parsed as Record<string, unknown>;
+  if (refusal.code !== MECHANICAL_CONTRACT_MISMATCH_CODE) return null;
+  if (typeof refusal.error !== "string" || typeof refusal.expectedVersion !== "number") return null;
+  if (typeof refusal.receivedVersion !== "number" && refusal.receivedVersion !== null) return null;
+  return {
+    error: refusal.error,
+    reason: MECHANICAL_CONTRACT_MISMATCH_CODE,
+    code: MECHANICAL_CONTRACT_MISMATCH_CODE,
+    expectedVersion: refusal.expectedVersion,
+    receivedVersion: refusal.receivedVersion,
+  };
+};
+
 const jsonHeaders = (token: string): Record<string, string> => ({
   Authorization: `Bearer ${token}`,
   "Content-Type": "application/json",
@@ -137,22 +164,9 @@ export const makeAgentOsClient = (config: ExecutorConfig, fetchImpl: typeof fetc
       });
     } catch (error: unknown) {
       if (error instanceof AgentOsResponseError && error.status === 409) {
-        let refusal: Record<string, unknown> | null = null;
-        try {
-          const parsed = JSON.parse(error.responseBody) as unknown;
-          if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) refusal = parsed as Record<string, unknown>;
-        } catch {
-          // A malformed refusal is not the named compatibility result; surface
-          // the original response error through the ordinary claim-loop path.
-        }
-        if (refusal?.code === MECHANICAL_CONTRACT_MISMATCH_CODE
-          && typeof refusal.expectedVersion === "number"
-          && (typeof refusal.receivedVersion === "number" || refusal.receivedVersion === null)) {
-          throw new MechanicalContractMismatchError(
-            refusal.receivedVersion,
-            refusal.expectedVersion,
-            typeof refusal.error === "string" ? refusal.error : error.message,
-          );
+        const refusal = decodeContractMismatchRefusal(error.responseBody);
+        if (refusal) {
+          throw new MechanicalContractMismatchError(refusal.receivedVersion, refusal.expectedVersion, refusal.error);
         }
       }
       throw error;
