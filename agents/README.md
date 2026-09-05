@@ -118,7 +118,10 @@ revalidation row and retains the historical seven-step prompts. All three step
 contracts live in their Markdown directories under `templates/`.
 
 Provider-specific or temporary roles are not canonical defaults unless the
-cross-provider review contract explicitly requires separate identities. Keep
+cross-provider review contract explicitly requires separate identities.
+`senior-dev-sol` is canonical rather than an experiment because it is the
+explicit fallback implementation tier named by the implementation-assignee
+routing rules in `docs/governance/task-routing-v1.md`. Keep
 experiments out of `roles/`; create them as local overlays and archive them
 when no longer needed so a seed cannot silently turn an experiment into a
 release default. Implementation-assignee escalation follows the

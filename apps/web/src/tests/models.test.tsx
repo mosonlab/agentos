@@ -26,6 +26,7 @@ test("the catalog covers every canonical roster model", () => {
   for (const id of mechanical) assert.equal(findModel(id), null, id);
   assert.equal(findModel("claude-fable-5")?.defaultEffort, "medium");
   assert.equal(findModel("gpt-5.6-luna")?.defaultEffort, "max");
+  assert.equal(findModel("gpt-6-astra")?.defaultEffort, "medium");
   assert.equal(findModel("openai-codex/gpt-5.6-sol")?.defaultEffort, "high");
   assert.equal(findModel("openai-codex/gpt-5.6-luna")?.defaultEffort, "max");
 });

@@ -1,7 +1,7 @@
 ---
 name: implementation-plan-executioner
 title: Implementation Plan Executioner
-model: gpt-5.6-sol:high
+model: gpt-6-astra:medium
 runner: codex
 inboxAccess: true
 collaborators: []

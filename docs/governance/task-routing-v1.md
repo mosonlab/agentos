@@ -80,7 +80,9 @@ belongs in Full Assurance, not in assignee escalation.
 Keep the template's default implementation assignee. Use `senior-dev` (the
 same rule applies to the review-fix step) only for persisted data, a
 defense-list path (merge gate, gate worker, migrations, or merge
-automation), or uncertain classification. Use `frontend-dev` for work primarily
+automation), or uncertain classification. Use `senior-dev-sol` for that same
+work only when named explicitly because the senior-dev model is unavailable;
+it is never a default. Use `frontend-dev` for work primarily
 consisting of a new or redesigned web page or UI surface. The defense-list rule
 wins when both apply.
 
