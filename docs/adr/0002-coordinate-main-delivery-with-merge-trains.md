@@ -179,6 +179,12 @@ They are removed:
   preserving exact-head evidence.
 - The lease covers only live-state recheck and prefix publication, not the full
   gate duration.
+- To avoid wasting completed gate proofs when another window holds the lease for
+  only a few seconds, lease acquisition waits up to 10 minutes by default and
+  accepts an operator-supplied bound through `--lease-wait-minutes <n>`. This
+  wait still occurs after gating, so the lease remains a publication-only hold;
+  once acquired, live `main` must still equal the original base or the train
+  returns `stale-base` and discards the proofs.
 - FIFO is visible in the command line rather than hidden in lease acquisition
   timing.
 - A downstream gate may be wasted when an earlier prefix fails. With a maximum
@@ -197,9 +203,16 @@ worktrees. It proves:
 - `.chain` is absent from the prefix tree;
 - a failed middle prefix cuts publication even when the final prefix passes;
 - a mechanical conflict ends the batch without an invented resolution;
-- main drift after gates causes zero publication; and
+- main drift after gates causes zero publication;
 - rerunning after a partial publication reads live `main`, skips the delivered
-  head, and rebuilds the remaining candidates.
+  head, and rebuilds the remaining candidates;
+- the post-gate acquire forwards the bounded `--timeout-minutes`, including an
+  explicit zero;
+- a wait resolved with unchanged `main` publishes the already-gated prefixes
+  without rerunning a gate;
+- a wait resolved with moved `main` returns `stale-base` and publishes nothing;
+  and
+- an expired wait returns `lease-contended` carrying `leaseWaitedMs`.
 
 The full merge gate remains the acceptance authority for the exact commit that
 introduces this machinery. That first delivery uses the old single-candidate

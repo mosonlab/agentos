@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
 
@@ -94,7 +95,7 @@ const noLease = (events = []) => ({
   },
 });
 
-test("merge train lease caller uses the release root and zero-wait acquisition policy", async () => {
+test("merge train lease caller uses the release root and bounded-wait acquisition policy", async () => {
   const calls = [];
   const environment = { AGENTOS_RELEASE_ROOT: "/srv/agentos/current" };
   const runner = async (...args) => {
@@ -116,7 +117,7 @@ test("merge train lease caller uses the release root and zero-wait acquisition p
       "--reason",
       "Publish 2-entry merge train",
       "--timeout-minutes",
-      "0",
+      "10",
     ],
     { cwd: "/checkout", environment, processTimeoutMs: undefined },
   ]);
@@ -125,6 +126,158 @@ test("merge train lease caller uses the release root and zero-wait acquisition p
     ["/srv/agentos/current/scripts/merge-lease.sh", "release", "--task", "train-42"],
     { cwd: "/checkout", environment, processTimeoutMs: undefined },
   ]);
+});
+
+test("merge train lease caller forwards an explicit wait including zero", async () => {
+  for (const leaseWaitMinutes of [0, 2]) {
+    await acquireMergeTrainLease("/checkout", "train-42", 2, {
+      leaseWaitMinutes,
+      environment: {},
+      runner: async (_command, args) => {
+        assert.equal(args.at(-1), String(leaseWaitMinutes));
+        return { code: 0 };
+      },
+    });
+  }
+});
+
+for (const scenario of ["unchanged", "moved", "expired", "unreachable"]) {
+  test(`lease wait after passing gates: ${scenario}`, async (t) => {
+    const fixture = await makeFixture();
+    let elapsed = 0;
+    t.mock.method(performance, "now", () => elapsed);
+    try {
+      const candidates = [
+        await fixture.candidate(280, { "a.txt": "a\n" }),
+        await fixture.candidate(281, { "b.txt": "b\n" }),
+      ];
+      const events = [];
+      const gated = [];
+      const options = {
+        repoRoot: fixture.repo,
+        task: "waiting-train",
+        candidates,
+        leaseWaitMinutes: 2,
+        adapters: {
+          gate: async (repoRoot, prefix) => {
+            gated.push(prefix.oid);
+            return passGate(repoRoot, prefix);
+          },
+          acquireLease: (repoRoot, task, count, waitOptions) =>
+            acquireMergeTrainLease(repoRoot, task, count, {
+              ...waitOptions,
+              environment: {},
+              runner: async (_command, args) => {
+                assert.equal(args.at(-1), "2");
+                assert.equal(count, 2);
+                assert.equal(gated.length, 2, "all gates finish before acquisition starts");
+                events.push("acquire-attempted");
+                // Model polling inside the lease script: the caller awaits one execution.
+                await new Promise((resolve) => setImmediate(resolve));
+                assert.equal(await fixture.remoteMain(), fixture.baseSha);
+                if (scenario === "moved") {
+                  const drift = await fixture.candidate(282, { "drift.txt": "drift\n" });
+                  await git(fixture.repo, "push", "origin", `${drift.headSha}:refs/heads/main`);
+                }
+                elapsed = scenario === "expired" ? 120_000 : 5_000;
+                if (scenario === "expired") return { code: 75, stderr: "timed out" };
+                if (scenario === "unreachable") return { code: 2, stderr: "transport failed" };
+                events.push("acquired");
+                return { code: 0 };
+              },
+            }),
+          releaseLease: async () => {
+            events.push("released");
+            return { outcome: "released" };
+          },
+          readPullRequest: fixture.readPullRequest(candidates),
+          sleep: async () => {},
+        },
+      };
+      if (scenario === "unreachable") {
+        await assert.rejects(coordinateMergeTrain(options), /acquisition was unreachable: transport failed/u);
+        assert.deepEqual(events, ["acquire-attempted"]);
+        assert.equal(await fixture.remoteMain(), fixture.baseSha);
+      } else {
+        const result = await coordinateMergeTrain(options);
+        assert.equal(gated.length, 2, "no gates rerun after waiting");
+        if (scenario === "unchanged") {
+          assert.equal(result.status, "published-all");
+          assert.deepEqual(result.published.map((prefix) => prefix.oid), gated);
+          assert.equal(await fixture.remoteMain(), gated[1]);
+        } else {
+          assert.equal(result.status, scenario === "moved" ? "stale-base" : "lease-contended");
+          assert.deepEqual(result.published, []);
+          for (const candidate of candidates) assert.equal(await fixture.remoteContains(candidate.headSha), false);
+        }
+        if (scenario === "expired") {
+          assert.equal(result.leaseWaitedMs, 120_000);
+          assert.deepEqual(events, ["acquire-attempted"]);
+        } else {
+          assert.deepEqual(events, ["acquire-attempted", "acquired", "released"]);
+        }
+      }
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+}
+
+test("CLI documents lease wait and rejects invalid minute values before gating", async () => {
+  const script = fileURLToPath(new URL("./merge-train.mjs", import.meta.url));
+  const help = await command(process.execPath, [script, "--help"]);
+  assert.match(help, /--lease-wait-minutes <n>/u);
+  assert.match(help, /default: 10/u);
+  for (const value of ["-1", "1.5", "NaN", "Infinity", "", "9007199254740992"]) {
+    await assert.rejects(execFileAsync(process.execPath, [script, "--lease-wait-minutes", value]),
+      (error) => error.code === 1 && /--lease-wait-minutes must be a non-negative safe integer/u.test(error.stderr));
+  }
+});
+
+test("CLI forwards the wait and includes elapsed duration in contention JSON", async () => {
+  const fixture = await makeFixture();
+  try {
+    const candidate = await fixture.candidate(283, { "cli.txt": "cli\n" });
+    const bin = path.join(fixture.root, "bin");
+    await mkdir(bin);
+    // Intercept subprocesses; no actual gate-worker or lease script runs.
+    const fakeBash = path.join(bin, "bash");
+    await writeFile(fakeBash, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0].endsWith("/gate-dispatch.sh")) {
+  console.log("MERGE GATE: PASS " + args[1]);
+} else if (args[0].endsWith("/merge-lease.sh") && args[1] === "acquire"
+  && args.at(-2) === "--timeout-minutes" && args.at(-1) === "2") {
+  setTimeout(() => process.exit(75), 20);
+} else {
+  process.exit(2);
+}
+`);
+    const fakeGh = path.join(bin, "gh");
+    await writeFile(fakeGh, `#!/usr/bin/env node
+console.log(JSON.stringify({state: "OPEN", headRefOid: ${JSON.stringify(candidate.headSha)}}));
+`);
+    await chmod(fakeBash, 0o755);
+    await chmod(fakeGh, 0o755);
+    const script = fileURLToPath(new URL("./merge-train.mjs", import.meta.url));
+    await assert.rejects(execFileAsync(process.execPath, [
+      script, "--task", "cli-wait", "--candidate", `283:${candidate.headSha}`, "--lease-wait-minutes", "2",
+    ], {
+      cwd: fixture.repo,
+      env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}` },
+    }), (error) => {
+      assert.equal(error.code, 1);
+      const summary = JSON.parse(error.stdout.slice(error.stdout.indexOf("{\n")));
+      assert.equal(summary.status, "lease-contended");
+      assert.ok(Number.isSafeInteger(summary.leaseWaitedMs));
+      assert.ok(summary.leaseWaitedMs >= 20);
+      assert.deepEqual(summary.published, []);
+      return true;
+    });
+    assert.equal(await fixture.remoteMain(), fixture.baseSha);
+  } finally {
+    await fixture.cleanup();
+  }
 });
 
 test("lease contention is a structured no-publication result", async () => {
