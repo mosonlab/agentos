@@ -1732,6 +1732,33 @@ test("Codex resume backoff uses attempts one, two, and three within the seven-se
   }
 });
 
+// The lease floor is the one gate fact the backoff itself can invalidate, so
+// it is proven end to end: the wait consumes the lease this Run is holding.
+test("a lease the backoff consumes down to the floor does not relaunch a disconnected provider", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-codex-in-run-resume-ttl-floor-"));
+  const clock = new ResumeFakeClock();
+  try {
+    const remote = await seedRemote(root);
+    const { controlPlane, resumeCalls } = await executeCodexResumeScenario(root, remote, [{
+      evidence: reconnectEvidence(),
+      providerConversationId: "thread-resume",
+    }], {
+      runLeaseClock: clock,
+      providerResumeBackoff: async () => { await clock.advanceBy(45_000); },
+    });
+
+    assert.equal(resumeCalls.length, 0);
+    assert.equal(
+      controlPlane.eventBatches.flat().some(({ type }) => type === "PROVIDER_RESUME_STARTED"),
+      false,
+    );
+    assert.equal(controlPlane.completions.at(-1)?.outcome.case, "provider-failure");
+  } finally {
+    await cleanupTestSession(root);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("a refused renewal never relaunches a disconnected provider", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-codex-in-run-resume-refused-"));
   try {

@@ -52,6 +52,7 @@ type ResumeDisconnectQuestion = ProviderRelaunchFacts & {
   remainingWalltimeMs: () => number;
   /** Asked once per Run, before the first relaunch only. */
   probeDurableTerminalProduct: () => Promise<"present" | "absent" | "inconclusive">;
+  /** Asked after the backoff, so its facts describe the launch about to happen. */
   renewLease: () => Promise<ProviderRelaunchLeaseFacts>;
   /** Waits out this attempt's backoff and reports how long it waited. */
   backoff: (attempt: number) => Promise<number>;
@@ -130,9 +131,12 @@ export const decideProviderRelaunch = async (
   }
 
   const attempt = question.attempts + 1;
-  // The renewal runs alongside the backoff so the lease facts are as fresh as
-  // the launch they authorize, without adding the backoff to the round trip.
-  const [lease, backoffMs] = await Promise.all([question.renewLease(), question.backoff(attempt)]);
+  // The backoff is waited out before the lease is renewed: a floor checked
+  // against headroom the wait then consumes is not a floor, and an authority
+  // read before the wait can be revoked during it. Every fact below is
+  // therefore established after the last thing that can invalidate it.
+  const backoffMs = await question.backoff(attempt);
+  const lease = await question.renewLease();
   if (!lease.accepted) return refuse("renewal-unacknowledged");
   if (!lease.authorityHeld) return refuse("authority-lost");
   if (question.budgetRefused()) return refuse("budget-refused");

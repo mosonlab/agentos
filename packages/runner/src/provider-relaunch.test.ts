@@ -120,6 +120,22 @@ test("a qualifying disconnect is allowed with the attempt and the backoff it wai
   assert.deepEqual(backoffs, [2]);
 });
 
+test("the lease and the walltime facts are established after the backoff, not before it", async () => {
+  const order: string[] = [];
+  let waitedMs = 0;
+  const question = resumeQuestion({
+    backoff: async () => { order.push("backoff"); waitedMs += 45_000; return 45_000; },
+    renewLease: async () => {
+      order.push("renewal");
+      return { accepted: true, authorityHeld: true, leaseHeadroomMs: 60_000 - waitedMs };
+    },
+    remainingWalltimeMs: () => 60_000 - waitedMs,
+  });
+
+  assert.equal(refusalOf(await decideProviderRelaunch(question)), "lease-headroom-exhausted");
+  assert.deepEqual(order, ["backoff", "renewal"]);
+});
+
 test("the terminal product is probed once per Run, before the first relaunch only", async () => {
   let probes = 0;
   const probe = async (): Promise<"absent"> => { probes += 1; return "absent"; };
