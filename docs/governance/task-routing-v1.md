@@ -81,7 +81,7 @@ Keep the template's default implementation assignee. Use `senior-dev-astra-mediu
 for persisted data, a
 defense-list path (merge gate, gate worker, migrations, or merge
 automation), or uncertain classification. Use `senior-dev-sol-high` for that same
-work only when named explicitly because the senior-dev-astra-medium model is unavailable;
+work only when named explicitly because the Astra model is unavailable;
 it is never a default. Use `senior-dev-opus-medium` when the operator names it to
 spend Claude capacity on the implementation instead of Codex capacity; it is
 never a default either. Use `frontend-dev-opus-medium` for work primarily

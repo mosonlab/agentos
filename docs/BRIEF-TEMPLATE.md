@@ -84,7 +84,7 @@ Implementation has five routes:
   cross-module contract migrations. A senior-dev-astra-medium route without a reason is a
   brief defect.
 - **senior-dev-sol-high**, with the reason on the same line, only when the
-  senior-dev-astra-medium model is unavailable for that work. It is never a default.
+  Astra model is unavailable for that work. It is never a default.
 - **senior-dev-opus-medium**, with the reason on the same line, when the operator
   chooses to spend Claude capacity on that work instead of Codex capacity.
   It is the same senior-developer prompt on Claude Opus 5 medium; it is
