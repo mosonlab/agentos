@@ -100,6 +100,21 @@ prefix; the coordinator does not resolve them. Stale `main` publishes nothing.
 After partial publication, rerun the command: it skips heads already in live
 `main` and rebuilds the remaining prefixes.
 
+The train acquires the lease only after its gates pass, so another window can
+take the lease during those minutes and the proved prefix is discarded as
+`lease-contended`. A host window that wants the train to publish acquires the
+lease first with the train's own task id, then runs the train in the same
+shell:
+
+```sh
+scripts/merge-lease.sh acquire --task <coordinator-id> --reason "<why>" --timeout-minutes <n>
+scripts/merge-train.mjs --task <coordinator-id> --candidate <pr>:<40-character-head>
+```
+
+Acquire is reentrant for the same task, so the train's own acquire succeeds and
+its release ends the hold. Never pre-acquire with another task's id or steal a
+lease another window holds.
+
 Changes to delivery authority, merge train, lease, dispatcher, or gate use the
 existing single-candidate path. New delivery machinery cannot authorize its own
 first publication.
