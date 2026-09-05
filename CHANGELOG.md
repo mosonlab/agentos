@@ -15,6 +15,9 @@ written.
   alongside macOS on Apple Silicon; the install documents drop their
   macOS-only wording. Running some runners on a second machine over an SSH
   tunnel is documented as experimental in `docs/install.md`.
+- The remote gate-worker profile, the autonomous merge tail and the Linux
+  systemd merge executor move from Unverified to Maintainer-verified in the
+  support matrix; the macOS LaunchDaemon executor profile stays Unverified.
 
 ## v0.7.0 — Developer Preview 7
 

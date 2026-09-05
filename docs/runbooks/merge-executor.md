@@ -2,11 +2,10 @@
 
 This is the current public authority for provisioning and maintaining the
 self-hosted `@anneal/merge-executor`. It covers GitHub.com, a dedicated local
-service identity, and documented but unverified macOS LaunchDaemon and Linux
-systemd profiles. These profiles are procedures, not qualifying platform
-evidence or a support commitment. They do not change the public support matrix,
-and this runbook does not describe mosonlab's installation or any private
-operator service.
+service identity, a Linux systemd profile the maintainer runs in production,
+and a macOS LaunchDaemon profile nobody has run. The support matrix carries the
+classification of each; this runbook does not describe mosonlab's installation
+or any private operator service.
 
 The executor is fail closed. A missing permission, unreadable field, shared
 principal, unsafe key path, failed disarm, or uncertain merge result stops the
