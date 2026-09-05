@@ -7,6 +7,7 @@ import {
   canonicalReviewArtifactSchema as reviewArtifact,
   isRegressionVerificationOutputKind,
   Prisma,
+  platformImplementationBaseSha,
   recordGateAttestation,
   REGRESSION_VERIFICATION_OUTPUT_KIND,
   REGRESSION_VERIFICATION_SCHEMA_VERSION,
@@ -84,6 +85,20 @@ const metadataPhase = (metadata: Prisma.JsonValue | Prisma.InputJsonValue | unde
   if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return null;
   const phase = (metadata as Record<string, unknown>).phase;
   return typeof phase === "string" ? phase : null;
+};
+
+/** The informational `baseSha` an implementation body carries, if it carries a
+ *  well-formed one. Nothing pins on it; only the mismatch record reads it. */
+const implementationBodyBaseSha = (body: string): string | null => {
+  let value: unknown;
+  try {
+    value = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const baseSha = (value as Record<string, unknown>).baseSha;
+  return typeof baseSha === "string" && baseSha.length > 0 ? baseSha : null;
 };
 
 type ReviewArtifact = CanonicalReviewArtifact;
@@ -559,6 +574,30 @@ export const persistSessionTaskOutput = async (
       ...(input.metadata ? { metadata: input.metadata } : {}),
     },
   });
+  // `baseSha` in an implementation body is informational: the reviewed range is
+  // pinned from the platform's own Run records. Persistence therefore never
+  // refuses over it, but a body that disagrees with the derived base is the
+  // exact typo that once sent every review sibling to a nonexistent commit, so
+  // the disagreement is recorded where an operator reads the task.
+  if (input.kind === "implementation") {
+    const bodyBaseSha = implementationBodyBaseSha(input.body);
+    const platformBaseSha = await platformImplementationBaseSha(tx, input.task.id);
+    if (bodyBaseSha && platformBaseSha && bodyBaseSha !== platformBaseSha) {
+      await tx.taskActivity.create({ data: {
+        taskId: input.task.id,
+        actorType: "control-plane",
+        body: `Implementation output baseSha ${bodyBaseSha} differs from the platform-derived base ${platformBaseSha}; the reviewed range is pinned to ${platformBaseSha}`,
+        metadata: {
+          kind: "canonicalTaskOutput.implementationBaseShaMismatch",
+          schemaVersion: 1,
+          runId: input.fence.runId,
+          outputKind: input.kind,
+          bodyBaseSha,
+          platformBaseSha,
+        },
+      } });
+    }
+  }
   // The gate's signature is recorded in the same transaction that persists the
   // output it was copied from, so an attestation can never outlive or contradict
   // its evidence. Ingestion is the only writer because it is the only path every

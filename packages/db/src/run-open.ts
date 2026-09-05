@@ -283,11 +283,11 @@ export const isPinnedBaseCommitError = (error: unknown): error is PinnedBaseComm
 
 const IMPLEMENTATION_SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u;
 
-const implementationRangeFromOutput = (
+const implementationHeadFromOutput = (
   taskId: string,
   baseFromStepIndex: number,
   source: { kind: string; body: string; commitSha: string | null },
-): { implementationBaseSha: string; implementationHeadSha: string } => {
+): string => {
   if (!source.commitSha) {
     throw new PinnedBaseCommitError(taskId, baseFromStepIndex, "referenced step has no recorded commitSha");
   }
@@ -310,16 +310,30 @@ const implementationRangeFromOutput = (
   if (output.schemaVersion !== 1) {
     throw new PinnedBaseCommitError(taskId, baseFromStepIndex, "referenced implementation output has unsupported schemaVersion");
   }
-  if (typeof output.baseSha !== "string" || !IMPLEMENTATION_SHA.test(output.baseSha)) {
-    throw new PinnedBaseCommitError(taskId, baseFromStepIndex, "referenced implementation output has invalid baseSha");
-  }
   if (typeof output.headSha !== "string" || !IMPLEMENTATION_SHA.test(output.headSha)) {
     throw new PinnedBaseCommitError(taskId, baseFromStepIndex, "referenced implementation output has invalid headSha");
   }
   if (output.headSha !== source.commitSha) {
     throw new PinnedBaseCommitError(taskId, baseFromStepIndex, "referenced implementation output headSha does not match commitSha");
   }
-  return { implementationBaseSha: output.baseSha, implementationHeadSha: output.headSha };
+  return output.headSha;
+};
+
+/**
+ * Where the implementation Task actually started, from the platform's own
+ * record rather than a SHA an agent typed: the earliest Run of that Task that
+ * recorded a provisioning `baseSha`, which is the chain's specification commit.
+ * A later recovery Run starts at the prior head or at a salvaged WIP commit, so
+ * only the earliest recorded base names the range every review sibling and
+ * every later fix or regression step must see. Null when no Run recorded one.
+ */
+export const platformImplementationBaseSha = async (tx: Tx, taskId: string): Promise<string | null> => {
+  const run = await tx.run.findFirst({
+    where: { taskId, baseSha: { not: null } },
+    orderBy: { runNumber: "asc" },
+    select: { baseSha: true },
+  });
+  return run?.baseSha ?? null;
 };
 
 export const pinnedImplementationRange = async (
@@ -349,16 +363,33 @@ export const pinnedImplementationRange = async (
         templateStep: { stepIndex: baseFromStepIndex },
       },
     },
-    select: { kind: true, body: true, commitSha: true },
+    select: { taskId: true, kind: true, body: true, commitSha: true },
   });
   if (!source) {
     throw new PinnedBaseCommitError(task.id, baseFromStepIndex, "referenced step has no canonical implementation output");
   }
-  // A recovery Run republishes an already-complete head, so its workspace
-  // base legitimately equals that head. The canonical implementation output
-  // preserves the original reviewed range and is the authority for every
-  // later blind-review claim.
-  return implementationRangeFromOutput(task.id, baseFromStepIndex, source);
+  // The head is the commit the output is bound to, which persistence already
+  // validated against the authored commit. The base is never read from the
+  // body: a mistyped SHA there once sent every review sibling to a commit that
+  // does not exist, so the range comes from the platform's own Run records and
+  // fails loud when they hold none.
+  const implementationHeadSha = implementationHeadFromOutput(task.id, baseFromStepIndex, source);
+  const implementationBaseSha = await platformImplementationBaseSha(tx, source.taskId);
+  if (!implementationBaseSha) {
+    throw new PinnedBaseCommitError(
+      task.id,
+      baseFromStepIndex,
+      `implementation task ${source.taskId} has no Run with a recorded baseSha`,
+    );
+  }
+  if (!IMPLEMENTATION_SHA.test(implementationBaseSha)) {
+    throw new PinnedBaseCommitError(
+      task.id,
+      baseFromStepIndex,
+      `implementation task ${source.taskId} recorded an invalid Run baseSha`,
+    );
+  }
+  return { implementationBaseSha, implementationHeadSha };
 };
 
 /** The shape the branch rules need once a Repo is known. Structural rather than

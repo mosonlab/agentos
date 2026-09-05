@@ -1230,6 +1230,8 @@ test("a pinned successor fails explicitly without canonical source output and ad
   const predecessor = chain.tasks[0]!;
   const predecessorRun = await db.run.findFirstOrThrow({ where: { taskId: predecessor.id } });
   const implementationBaseSha = "b".repeat(40);
+  // What the implementer typed: a SHA that is not the one the platform recorded.
+  const authoredBaseSha = "c".repeat(40);
   await db.run.update({
     where: { id: predecessorRun.id },
     data: { status: "SUCCEEDED" },
@@ -1250,13 +1252,27 @@ test("a pinned successor fails explicitly without canonical source output and ad
     kind: "implementation",
     body: JSON.stringify({
       schemaVersion: 1,
-      baseSha: implementationBaseSha,
+      baseSha: authoredBaseSha,
       headSha: commitSha,
       summary: "implemented",
       testsRun: ["focused"],
     }),
     commitSha,
   } });
+
+  // The range is pinned from the platform's own Run records, so an output body
+  // alone cannot activate the successor: the implementation Run must have
+  // recorded where it started.
+  await assert.rejects(
+    () => db.$transaction((tx) => activateChainSuccessor(tx, predecessor)),
+    new RegExp(`implementation task ${predecessor.id} has no Run with a recorded baseSha`, "u"),
+  );
+  assert.equal(await db.run.count({ where: { taskId: chain.tasks[1]!.id } }), 0);
+
+  await db.run.update({
+    where: { id: predecessorRun.id },
+    data: { baseSha: implementationBaseSha },
+  });
   const advanced = await db.$transaction((tx) => activateChainSuccessor(tx, predecessor));
   assert.equal(advanced.nextTaskId, chain.tasks[1]!.id);
   const pinnedRun = await db.run.findFirstOrThrow({ where: { taskId: chain.tasks[1]!.id } });
