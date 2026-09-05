@@ -26,6 +26,7 @@ import {
   stopStateFor,
 } from "./merge-integrator-db.js";
 import { runnerFor } from "./model-routing.js";
+import { runOwnedHead } from "./run-head.js";
 import { stepRole } from "./step-role.js";
 
 type Tx = Prisma.TransactionClient;
@@ -300,9 +301,9 @@ export const pinnedImplementationRange = async (
   return implementationRangeFromOutput(task.id, baseFromStepIndex, source);
 };
 
-/** The shape `resolveRunBranches` needs. Structural rather than a Prisma payload
- *  type so `openRun` can pass each intent's branch facts without coupling the
- *  resolver to its full Task query. */
+/** The shape the branch rules need once a Repo is known. Structural rather than
+ *  a Prisma payload type so `openRun` can pass each intent's branch facts
+ *  without coupling the resolver to its full Task query. */
 export type RunBranchTask = {
   id: string;
   projectId: string;
@@ -313,6 +314,17 @@ export type RunBranchTask = {
   templateStep?: { baseFromStepIndex: number | null } | null;
   targetBranch: string | null;
   repo: { defaultBranch: string };
+};
+
+/** A Task at Run birth, whose Repo may still be absent. */
+export type RunBirthTask = Omit<RunBranchTask, "repo"> & { repo: { defaultBranch: string } | null };
+
+/** The Run being born, as `resolveRunBranches` needs to see it: which rule
+ *  applies, which ref this Run would own, and what its predecessor carried. */
+export type RunBirth = {
+  intent: OpenRunIntent["kind"];
+  runNumber: number;
+  prior: { branch: string | null; targetBranch: string | null; runNumber: number } | null;
 };
 
 /**
@@ -425,25 +437,33 @@ export const resolveRequeueBase = async (
   return run.targetBranch;
 };
 
-const retryPublishHead = (
+/**
+ * The head a retry keeps because the *Task* owns it — a shared chain head, or
+ * the ref a merge-tail repair card was created to land on. A head this module
+ * minted for the previous Run belongs to that Run alone and is never carried
+ * forward: the retry receives its own.
+ *
+ * The comparison is against `runOwnedHead`, which this module is the only
+ * producer of, so it reads back a decision made here rather than recognising
+ * another package's naming convention.
+ */
+const taskOwnedHead = (
   taskId: string,
   prior: { branch: string | null; runNumber: number } | null | undefined,
 ): string | null => {
   if (!prior?.branch) return null;
-  const runnerFallback = `agentos/${taskId}/run-${prior.runNumber}`;
-  return prior.branch === runnerFallback ? null : prior.branch;
+  return prior.branch === runOwnedHead(taskId, prior.runNumber) ? null : prior.branch;
 };
 
 /**
- * Decides a new Run's head (`branch`) and base (`targetBranch`). `openRun` is
- * its only Run-birth caller; keeping the branch rule behind that seam prevents
- * one intent from putting a Step on a different branch from the rest of its
- * Chain.
+ * The head a Chain or Template Step publishes on, and the base it clones. Null
+ * head means no Chain, Template or repair rule names one, and the Run receives
+ * the ref it owns (`resolveRunBranches`).
  *
  * Writes at most one TaskActivity row (see the chain branch below), so it takes
  * the caller's transaction.
  */
-export const resolveRunBranches = async (
+const chainDeclaredBranches = async (
   tx: Tx,
   task: RunBranchTask,
   prior: { branch: string | null } | null,
@@ -531,11 +551,103 @@ export const resolveRunBranches = async (
   return { branch: shared, targetBranch };
 };
 
+/**
+ * Decides the publish target of a Run: the head it publishes (`branch`) and the
+ * base it clones (`targetBranch`).
+ *
+ * This is the only place either is decided. Every `openRun` intent goes through
+ * it, `repairReplacementAfterSalvage` re-runs it for a queued replacement whose
+ * clone base moved, and nothing else writes `Run.branch`. A caller that needs a
+ * different head adds its intent here; patching the row after birth would put
+ * the decision back in two places, which is how one Step ended up on a
+ * different branch from the rest of its Chain.
+ *
+ * A Run whose Task has a Repo always leaves here with a head, so the runner
+ * never invents one and `Run.branch` carries exactly one fact: the head the
+ * control plane declared. When no Chain, Template or repair rule names a head,
+ * it is the ref this Run owns (`runOwnedHead`).
+ *
+ * Writes at most one TaskActivity row (see `chainDeclaredBranches`), so it takes
+ * the caller's transaction.
+ */
+export const resolveRunBranches = async (
+  tx: Tx,
+  task: RunBirthTask,
+  birth: RunBirth,
+): Promise<{ branch: string | null; targetBranch: string | null }> => {
+  const { intent, prior } = birth;
+  // A Task with no Repo publishes nothing, so there is no head to declare; it
+  // carries its predecessor's columns forward untouched.
+  if (!task.repo) {
+    return { branch: prior?.branch ?? null, targetBranch: prior?.targetBranch ?? task.targetBranch };
+  }
+  const repoTask = { ...task, repo: task.repo };
+  const declared = await declaredPublishTarget(tx, repoTask, intent, prior);
+  return {
+    branch: declared.branch ?? runOwnedHead(task.id, birth.runNumber),
+    targetBranch: declared.targetBranch,
+  };
+};
+
+/** The head each birth intent names, before the Run's own ref fills a null. */
+const declaredPublishTarget = async (
+  tx: Tx,
+  task: RunBranchTask,
+  intent: OpenRunIntent["kind"],
+  prior: RunBirth["prior"],
+): Promise<{ branch: string | null; targetBranch: string | null }> => {
+  const requeueBase = async (): Promise<string | null> => (prior
+    ? resolveRequeueBase(tx, task, prior)
+    : task.targetBranch ?? task.repo.defaultBranch);
+  switch (intent) {
+    // A recovered human authorization renews the mechanical Run of a Step that
+    // already sits on its Chain's head against the base it was authorized on.
+    // It moves neither.
+    case "integrator-authorized":
+      return { branch: prior?.branch ?? null, targetBranch: prior?.targetBranch ?? task.targetBranch };
+    // A merge-tail repair card is chain-detached on purpose, but its commits
+    // have to land on the ref the tail is trying to merge. That ref is the
+    // Task's own targetBranch, written when the card was created from the
+    // source Run's head, so the card publishes onto its base.
+    case "merge-tail-repair":
+      return { branch: task.targetBranch, targetBranch: task.targetBranch };
+    case "retry-after-completion":
+      // A Chain or Template step's head belongs to the chain, so the chain rule
+      // answers. A Template retry may carry a head its runner published under;
+      // an indexed non-template sibling must not.
+      if (task.chainId && (task.templateId || task.chainIndex !== null)) {
+        return chainDeclaredBranches(tx, task, task.templateId ? { branch: prior?.branch ?? null } : null);
+      }
+      // Publication evidence answers the base. Only a head the Task owns
+      // answers the publish target; the ref the previous Run owned does not,
+      // so this Run receives its own.
+      return { branch: taskOwnedHead(task.id, prior), targetBranch: await requeueBase() };
+    case "retry-after-lease-loss":
+      // A pinned Step keeps its immutable range; an indexed non-template
+      // sibling re-derives the shared head from publication evidence alone.
+      if (task.templateStep?.baseFromStepIndex != null) {
+        return chainDeclaredBranches(tx, task, { branch: prior?.branch ?? null });
+      }
+      if (task.chainId && task.chainIndex !== null && !task.templateId) {
+        return chainDeclaredBranches(tx, task, null);
+      }
+      // Unlike a completion retry, the replacement for a lost lease continues
+      // the head its predecessor was told to publish: the lost Run may already
+      // have pushed it, and nothing terminal was reported about it.
+      return { branch: prior?.branch ?? null, targetBranch: await requeueBase() };
+    default:
+      return chainDeclaredBranches(tx, task, prior ? { branch: prior.branch } : null);
+  }
+};
+
 export type IntegratorStopBypass = { integratorTaskId: string; sourceStopId: string };
 
 export type OpenRunIntent =
   | { kind: "enqueue"; readyAt: Date; stopBypass?: IntegratorStopBypass | null }
   | { kind: "merge-tail-requeue"; readyAt: Date; budgetGrant: 1 }
+  /** The first Run of an automatic merge-tail repair card, which publishes onto
+   *  the chain head it was created to repair rather than onto a ref of its own. */
+  | { kind: "merge-tail-repair"; readyAt: Date }
   | { kind: "task-created"; readyAt: Date }
   | { kind: "retry"; readyAt: Date }
   | { kind: "integrator-authorized"; readyAt: Date }
@@ -689,6 +801,7 @@ export const openRun = async (
   }
   if (!task.repo && (intent.kind === "enqueue"
     || intent.kind === "merge-tail-requeue"
+    || intent.kind === "merge-tail-repair"
     || intent.kind === "task-created"
     || intent.kind === "integrator-authorized")) {
     return openRunRefusal("repo-required", "invalid-request", `Task ${task.id} cannot open a ${intent.kind} Run without a Repo`);
@@ -841,38 +954,13 @@ export const openRun = async (
     }
   }
 
-  const branches = intent.kind === "integrator-authorized"
-    ? { branch: prior?.branch ?? null, targetBranch: prior?.targetBranch ?? task.targetBranch }
-    : !task.repo
-      ? { branch: prior?.branch ?? null, targetBranch: prior?.targetBranch ?? task.targetBranch }
-      : intent.kind === "retry-after-completion"
-        ? task.chainId && (task.templateId || task.chainIndex !== null)
-          ? await resolveRunBranches(
-            tx,
-            { ...task, repo: task.repo },
-            task.templateId ? { branch: prior?.branch ?? null } : null,
-          )
-          : {
-            // Publication evidence answers the base. A head the task declared
-            // answers the publish target; a runner per-Run fallback does not,
-            // so it resets to null and lets this Run receive its own fallback.
-            branch: retryPublishHead(task.id, prior),
-            targetBranch: prior
-              ? await resolveRequeueBase(tx, { ...task, repo: task.repo }, prior)
-              : task.targetBranch ?? task.repo.defaultBranch,
-          }
-        : intent.kind === "retry-after-lease-loss"
-          ? task.templateStep?.baseFromStepIndex != null
-            ? await resolveRunBranches(tx, { ...task, repo: task.repo }, { branch: prior?.branch ?? null })
-            : task.chainId && task.chainIndex !== null && !task.templateId
-              ? await resolveRunBranches(tx, { ...task, repo: task.repo }, null)
-              : {
-                branch: prior?.branch ?? null,
-                targetBranch: prior
-                  ? await resolveRequeueBase(tx, { ...task, repo: task.repo }, prior)
-                  : task.targetBranch ?? task.repo.defaultBranch,
-              }
-          : await resolveRunBranches(tx, { ...task, repo: task.repo }, prior ?? null);
+  // Every intent asks the same module, so no arm can put a Step on a different
+  // branch from the rest of its Chain, and no caller has to fill in a head.
+  const branches = await resolveRunBranches(tx, task, {
+    intent: intent.kind,
+    runNumber,
+    prior: prior ?? null,
+  });
 
   // A salvaged publication can sit behind an intermediate cancelled Run, so
   // the latest Run alone is not the ownership proof. Bind the relaxation to

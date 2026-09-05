@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
 
-import { agentExecutionSucceeded, isCodexReconnectStatus } from "@anneal/db";
+import { agentExecutionSucceeded, isCodexReconnectStatus, runOwnedHead } from "@anneal/db";
 
 import {
   adapters, argsForRunner, buildChildEnvironment, buildPrompt, createAdapterState, failureReasonFromEvidence,
@@ -74,7 +74,7 @@ const claim: ClaimedTask = {
     implementationHeadSha: null,
     promptHash: "hash",
     workspacePath: null,
-    branch: null,
+    branch: runOwnedHead("task-1", 1),
     baseSha: null,
   },
   session: { id: "session-1" },

@@ -9,7 +9,7 @@ import { after, before, beforeEach, test } from "node:test";
 
 import {
   activateChainSuccessor, DependencyProvisioning, FAILURE_ENVELOPE_VERSION, type FailureEnvelope,
-  PrismaClient, type RunOutcome, TaskStatus,
+  PrismaClient, type RunOutcome, runOwnedHead, TaskStatus,
 } from "@anneal/db";
 import { buildChildEnvironment } from "@anneal/runner/adapters";
 import type { ClaimedTask } from "@anneal/runner/api";
@@ -575,21 +575,23 @@ test("T16: a pull-request failure after a successful push still counts as public
 
 // --- WI-4: POST /tasks -------------------------------------------------------
 
-test("T9: a non-chain task's first run is unchanged", async () => {
+test("T9: a non-chain task's first run publishes the ref that run owns", async () => {
   const seed = await seedProject("t9");
   const explicit = await postTask(seed.project.id, {
     name: "Solo", description: "d", assigneeAgentId: seed.agent.id, repoId: seed.repo.id, targetBranch: "some/branch",
   });
   const explicitRun = await db.run.findFirstOrThrow({ where: { taskId: explicit.body.id } });
   assert.equal(explicitRun.targetBranch, "some/branch");
-  assert.equal(explicitRun.branch, null);
+  // The control plane declares the head at birth, so the runner never has to
+  // invent one and the column carries a single fact.
+  assert.equal(explicitRun.branch, runOwnedHead(explicit.body.id, 1));
 
   const implicit = await postTask(seed.project.id, {
     name: "Solo 2", description: "d", assigneeAgentId: seed.agent.id, repoId: seed.repo.id,
   });
   const implicitRun = await db.run.findFirstOrThrow({ where: { taskId: implicit.body.id } });
   assert.equal(implicitRun.targetBranch, seed.repo.defaultBranch);
-  assert.equal(implicitRun.branch, null);
+  assert.equal(implicitRun.branch, runOwnedHead(implicit.body.id, 1));
 });
 
 // --- WI-5: operator retry and lost-lease requeue -----------------------------
@@ -756,7 +758,7 @@ test("T12: a non-chain requeue is unchanged", async () => {
   await reconcileDatabaseRuns(db, new Date());
   const requeued = await db.run.findFirstOrThrow({ where: { taskId: solo.body.id, runNumber: 2 } });
   assert.equal(requeued.targetBranch, "some/branch");
-  assert.equal(requeued.branch, null);
+  assert.equal(requeued.branch, runOwnedHead(solo.body.id, 1), "a lost lease keeps the head its run was told to publish");
 });
 
 test("T12c: a lost-lease requeue drops a base that is only this run's unpushed head", async () => {
@@ -931,7 +933,7 @@ test("T14a: an automatic retry of a non-chain task answers to publication eviden
   const retry = await db.run.findFirstOrThrow({ where: { taskId: solo.body.id, runNumber: 2 } });
   assert.notEqual(retry.targetBranch, poisoned, "nothing published this ref");
   assert.equal(retry.targetBranch, seed.repo.defaultBranch);
-  assert.equal(retry.branch, null, "this path still carries no branch forward");
+  assert.equal(retry.branch, runOwnedHead(solo.body.id, 2), "the previous Run's ref is not carried forward");
 
   // …and the salvage this completion just recorded is evidence in the same
   // transaction, so the next automatic retry keeps the work that reached the
@@ -956,7 +958,7 @@ test("T14: an automatic retry of a non-chain task is unchanged", async () => {
   });
   const retry = await db.run.findFirstOrThrow({ where: { taskId: solo.body.id, runNumber: 2 } });
   assert.equal(retry.targetBranch, "some/branch");
-  assert.equal(retry.branch, null, "this path has never carried branch forward; that asymmetry is preserved");
+  assert.equal(retry.branch, runOwnedHead(solo.body.id, 2), "the previous Run's ref is not carried forward");
 });
 
 // --- WI-7 / WI-8: the flag through the API ----------------------------------

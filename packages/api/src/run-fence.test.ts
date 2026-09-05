@@ -156,6 +156,7 @@ const authorityRun: LockedAuthorityRun = {
   runNumber: 4,
   pushedBranch: null,
   branch: "feature/task-1",
+  targetBranch: "main",
 };
 
 test("authority modes stay distinct while sharing one refusal vocabulary", () => {

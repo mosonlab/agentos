@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import {
   asJsonObject,
-  enqueueTaskRun,
+  errorForOpenRunRefusal,
   isIntegratorStep,
   isRegressionVerificationOutputKind,
   latestMarker,
@@ -11,6 +11,7 @@ import {
   MERGE_TAIL_SCHEMA_VERSION,
   MergeRecoveryStatus,
   type Marker,
+  openRun,
   parseResolverResult,
   parseRegressionVerdict,
   Prisma,
@@ -675,11 +676,11 @@ export const createMergeTailRepairTask = async (
     // tail opens.
     maxSessionsPerTask: 2,
   } });
-  const repairRun = await enqueueTaskRun(tx, task.id, input.now);
-  await tx.run.update({
-    where: { id: repairRun.id },
-    data: { branch: input.sourceRun.branch, targetBranch: input.sourceRun.branch },
-  });
+  // The repair card's own intent, not an ordinary enqueue followed by a
+  // correction: `resolveRunBranches` reads the head off the Task's targetBranch
+  // above, so the Run is born publishing onto the chain head it repairs.
+  const opened = await openRun(tx, task.id, { kind: "merge-tail-repair", readyAt: input.now });
+  if (!opened.ok) throw errorForOpenRunRefusal(opened.refusal);
   await writeMarker(tx, regressionTask.id, "repairAttempt", {
     actorType: "control-plane",
     body: `Automatic ${input.repairKind} attempt queued at chain head ${input.headSha} against ${input.baseHeadSha}`,

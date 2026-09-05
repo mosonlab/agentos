@@ -7,7 +7,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import type { RunOutcome, RunOutputEvidence } from "@anneal/db";
+import { type RunOutcome, type RunOutputEvidence, runOwnedHead } from "@anneal/db";
 
 import {
   adapters, buildPrompt, RUNNER_KINDS, type AdapterEvent, type CliAdapter, type ExitEvidence, type RuntimeHandle,
@@ -119,7 +119,9 @@ const mechanicalClaim: ClaimedTask = {
     implementationHeadSha: null,
     promptHash: "hash",
     workspacePath: null,
-    branch: null,
+    // The control plane declares the head at Run birth; provisioning refuses a
+    // claim without one, so no fixture may leave it null.
+    branch: runOwnedHead("task-10", 1),
     baseSha: null,
   },
   session: { id: "session-10" },

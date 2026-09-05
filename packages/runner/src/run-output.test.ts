@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { PR_TEMPLATE_NAME, type RunOutputEvidence, type RunOutputSatisfaction } from "@anneal/db";
+import { PR_TEMPLATE_NAME, runOwnedHead, type RunOutputEvidence, type RunOutputSatisfaction } from "@anneal/db";
 
 import { ControlPlaneError, type ClaimedTask } from "./api.js";
 import { adapters, type CliAdapter, type ExitEvidence, type RuntimeHandle } from "./adapters.js";
@@ -217,7 +217,7 @@ const claim = (remoteUrl: string): ClaimedTask => ({
     implementationHeadSha: null,
     promptHash: "hash",
     workspacePath: null,
-    branch: null,
+    branch: runOwnedHead("task-114", 1),
     baseSha: null,
   },
   session: { id: "session-114" },

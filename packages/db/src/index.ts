@@ -12,6 +12,7 @@ if (process.env.NODE_ENV !== "production") {
 
 export * from "@prisma/client";
 export * from "./chain-branch.js";
+export * from "./run-head.js";
 export * from "./agent-message.js";
 export * from "./maintenance-lock.js";
 export * from "./service-maintenance-lock.js";
@@ -64,6 +65,7 @@ export {
   compoundImplementationAssigneeValid,
   deriveRunConfig,
   enqueueTaskRun,
+  errorForOpenRunRefusal,
   EXTERNAL_FAILURE_REFUND_CAP,
   gateQuestion,
   isArchivedAssigneeError,

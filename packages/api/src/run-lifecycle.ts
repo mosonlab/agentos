@@ -266,6 +266,7 @@ export const publishRun = async (
           taskId: run.taskId,
           runNumber: run.runNumber,
           branch: run.branch,
+          targetBranch: run.targetBranch,
         })
       : "none";
     return repair === "already-started"

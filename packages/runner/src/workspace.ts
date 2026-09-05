@@ -430,7 +430,12 @@ export const provisionWorkspace = async (
   try {
     const identity = await resolveRunnerGitIdentity(config, run);
     const target = claim.run.targetBranch ?? claim.repo.defaultBranch;
-    const branch = claim.run.branch ?? `agentos/${claim.task.id}/run-${claim.run.runNumber}`;
+    // The control plane declares the head at Run birth (`resolveRunBranches` in
+    // @anneal/db). A claim without one is a Run that cannot publish, and
+    // inventing a name here is what let two processes disagree about which ref
+    // a retry owns.
+    const branch = claim.run.branch;
+    if (branch === null) throw new Error(`Claimed run ${claim.run.id} carries no publish head`);
     const pinnedBaseSha = claim.run.pinnedBaseSha;
     // Dependencies are materialised after the mirror lock is released: `npm ci`
     // is bounded in half-hours, and holding a machine-wide lock across it would

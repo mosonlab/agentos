@@ -43,6 +43,7 @@ const authorityRun = (overrides: Partial<LockedAuthorityRun> = {}): LockedAuthor
   runNumber: 1,
   pushedBranch: null,
   branch: "feature/task-1",
+  targetBranch: "main",
   ...overrides,
 });
 

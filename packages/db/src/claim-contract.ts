@@ -151,6 +151,15 @@ export type ClaimRun = {
   implementationHeadSha: string | null;
   promptHash: string | null;
   workspacePath: string | null;
+  /**
+   * The head this Run publishes, decided once at Run birth by
+   * `resolveRunBranches` (`run-open.ts`) and never derived by a consumer: a
+   * runner that invented its own name put two processes in disagreement about
+   * which ref a retry owns.
+   *
+   * Null only for a Run whose Task has no Repo, which publishes nothing.
+   * Provisioning refuses a claim that reaches it without a head.
+   */
   branch: string | null;
   baseSha: string | null;
 };

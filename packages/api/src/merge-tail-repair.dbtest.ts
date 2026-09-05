@@ -275,7 +275,10 @@ const completeRepair = async (
 ) => {
   const run = await db.run.findFirstOrThrow({ where: { taskId: repairId, runNumber } });
   const repair = await db.task.findUniqueOrThrow({ where: { id: repairId } });
-  const publishBranch = run.branch ?? `agentos/${repairId}/run-${runNumber}`;
+  // The control plane declared this Run's head at birth; a fixture that
+  // rebuilds the name here would stop proving that it did.
+  const publishBranch = run.branch;
+  assert.ok(publishBranch, `repair Run ${runNumber} was born without a publish head`);
   const runnerId = `repair-runner-${run.id}`;
   const fencingToken = `repair:${run.id}:1`;
   await db.run.update({ where: { id: run.id }, data: {
