@@ -84,9 +84,9 @@ export const sessionUsageCost = (
     return { costUsd: new Prisma.Decimal(session.costUsd), estimated: false, ...tokens };
   }
   if (!hasTokens(session)) return { costUsd: null, estimated: false, ...tokens };
-  // USAGE PROVENANCE (checked 2026-09-05): the Codex adapter persists only
-  // flat `turn.completed` usage as FINAL_OUTPUT; `recomputeSessionUsage`
-  // reads those events into session token columns. No per-thread or per-model
+  // USAGE PROVENANCE (checked 2026-09-05): the Codex adapter persists
+  // `turn.completed` events as FINAL_OUTPUT; `recomputeSessionUsage` extracts
+  // their flat usage into session token columns. No per-thread or per-model
   // split reaches this pricing function. See the `turn.completed` branch of
   // packages/runner/src/adapters/codex.ts and packages/db/src/usage.ts.
   // The capture spikes/cli-capabilities/samples/codex-gpt-5.6-luna-max-20260828.stdout
