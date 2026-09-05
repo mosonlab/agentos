@@ -3,7 +3,10 @@ import { type ReactNode, useEffect, useState } from "react";
 import { api } from "../lib/api";
 import { useAction, usePoll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
-import type { Agent, Project, Repo, TaskTemplate, TaskTemplateStep } from "../lib/types";
+import { findModel, splitModel } from "../lib/models";
+import type {
+  Agent, Project, Repo, StaffingProfile, StaffingProfileEntry, TaskTemplate, TaskTemplateStep,
+} from "../lib/types";
 import {
   CARD_TITLE, CODE_BLOCK, FIELD_ROW, HINT, ROW, STACK,
   Card, Check, EmptyState, ErrorNotice, Field, FullPanel, Tabs, Toggle,
@@ -63,6 +66,111 @@ const changedGateValues = (selection: GateSelection): GateValues | undefined => 
   return Object.keys(changed).length === 0 ? undefined : changed;
 };
 
+/* ------------------------------------------------------------ staffing */
+
+/** A stable empty list, so the profiles read is referentially quiet between
+ *  polls and the reseed effect below does not fire on every render. */
+const NO_PROFILES: StaffingProfile[] = [];
+
+/** One step's staffing for this dispatch. `assigneeAgentId` is empty when the
+ *  step is human, or when nothing has ever bound it. */
+type StaffingStepChoice = { assigneeAgentId: string; include: boolean };
+
+type StaffingSelection = {
+  contextKey: string;
+  /** `""` is the explicit canonical option, which sends no `staffingProfileId`. */
+  profileId: string;
+  steps: Record<string, StaffingStepChoice>;
+};
+
+/** R2: entries key on the exact `outputKind`, never a normalised one, so a
+ *  custom graph's `foo` and `foo-v2` stay separate steps here too. */
+const staffingEntryOf = (
+  profile: StaffingProfile | null,
+  outputKind: string,
+): StaffingProfileEntry | undefined => profile?.entries.find((entry) => entry.outputKind === outputKind);
+
+/** How the control plane staffs each step of `template` under `profile` before
+ *  any per-step override: the profile's opinion, else the canonical binding the
+ *  template step carries. */
+const staffedSteps = (
+  template: TaskTemplate | null,
+  profile: StaffingProfile | null,
+): Record<string, StaffingStepChoice> => {
+  const steps: Record<string, StaffingStepChoice> = {};
+  for (const step of template?.steps ?? []) {
+    const entry = staffingEntryOf(profile, step.outputKind);
+    steps[String(step.stepIndex)] = {
+      assigneeAgentId: step.assigneeType === "AGENT" ? entry?.assigneeAgentId ?? step.assigneeAgentId ?? "" : "",
+      include: step.optional ? entry?.include ?? true : true,
+    };
+  }
+  return steps;
+};
+
+const defaultProfileOf = (profiles: StaffingProfile[]): StaffingProfile | null =>
+  profiles.find((profile) => profile.isDefault) ?? null;
+
+const staffingSelectionFor = (
+  contextKey: string,
+  template: TaskTemplate | null,
+  profiles: StaffingProfile[],
+): StaffingSelection => {
+  const preselected = defaultProfileOf(profiles);
+  return { contextKey, profileId: preselected?.id ?? "", steps: staffedSteps(template, preselected) };
+};
+
+/** The profile the control plane will staff from for the body this selection
+ *  sends. An absent `staffingProfileId` does not mean "no profile": the route
+ *  falls back to the template's default profile. */
+const appliedProfileOf = (selection: StaffingSelection, profiles: StaffingProfile[]): StaffingProfile | null =>
+  selection.profileId === ""
+    ? defaultProfileOf(profiles)
+    : profiles.find((profile) => profile.id === selection.profileId) ?? null;
+
+/**
+ * The per-step overrides this dispatch has to carry.
+ *
+ * Each step is compared against what the *server* resolves for the body being
+ * sent, not against what the panel seeded from. The two differ in exactly one
+ * case, and it is the one the canonical option exists for: a request naming no
+ * profile is still staffed from the default profile, so choosing "template
+ * default" has to pin every step that default profile would otherwise have
+ * moved. A selected profile, or a template with no default, makes the two
+ * identical and emits only what the operator actually changed.
+ */
+const changedStepOverrides = (
+  template: TaskTemplate | null,
+  selection: StaffingSelection,
+  profiles: StaffingProfile[],
+): Record<string, { assigneeAgentId?: string; include?: boolean }> | undefined => {
+  const baseline = staffedSteps(template, appliedProfileOf(selection, profiles));
+  const overrides: Record<string, { assigneeAgentId?: string; include?: boolean }> = {};
+  for (const step of template?.steps ?? []) {
+    const key = String(step.stepIndex);
+    const chosen = selection.steps[key];
+    const base = baseline[key];
+    if (chosen === undefined || base === undefined) continue;
+    const override: { assigneeAgentId?: string; include?: boolean } = {};
+    // An empty id means nothing is bound, which `stepOverrides` cannot say: the
+    // field carries an Agent id or is absent. A human step cannot carry one at
+    // all — the route refuses that as `step_override_step_not_agent`.
+    if (step.assigneeType === "AGENT" && chosen.assigneeAgentId !== "" && chosen.assigneeAgentId !== base.assigneeAgentId) {
+      override.assigneeAgentId = chosen.assigneeAgentId;
+    }
+    if (step.optional && chosen.include !== base.include) override.include = chosen.include;
+    if (Object.keys(override).length > 0) overrides[key] = override;
+  }
+  return Object.keys(overrides).length === 0 ? undefined : overrides;
+};
+
+/** `title · model effort`, the reading the model picker gives everywhere else. */
+const agentOptionLabel = (agent: Agent): string => {
+  const parsed = splitModel(agent.model);
+  const model = findModel(parsed.model)?.label ?? parsed.model;
+  return parsed.effort === null ? `${agent.title} · ${model}` : `${agent.title} · ${model} ${parsed.effort}`;
+};
+
 export const NewTask = ({ projectId, project, agents, repos, onClose, onCreated }: {
   projectId: string;
   project?: Project | null;
@@ -92,6 +200,14 @@ export const NewTask = ({ projectId, project, agents, repos, onClose, onCreated 
   const t = useT();
 
   const template = (templates.data ?? []).find((candidate) => candidate.id === templateId) ?? templates.data?.[0] ?? null;
+  // Only the template tab staffs anything, and only once a template is chosen.
+  const staffingProfiles = usePoll<StaffingProfile[]>(
+    mode === "template" && template !== null
+      ? `/projects/${projectId}/task-templates/${template.id}/staffing-profiles`
+      : null,
+    30_000,
+  );
+  const profiles = staffingProfiles.data ?? NO_PROFILES;
   const specDefault = project?.specGateDefault ?? false;
   const mergeDefault = project?.mergeGateDefault ?? false;
   /** Defaults are part of the dispatch context: if the operator changes the
@@ -114,10 +230,54 @@ export const NewTask = ({ projectId, project, agents, repos, onClose, onCreated 
     : gateSelectionFor(gateContextKey, template, project);
   const gateSlots = gateSlotsOf(template);
 
+  /** The staffing context is the template and the profiles that belong to it.
+   * A profile edited elsewhere changes what "seeded from the profile" means, so
+   * the panel reseeds rather than keep choices against a plan that moved. */
+  const staffingContextKey = `${projectId}:${template?.id ?? ""}:${
+    profiles.map((profile) => `${profile.id}@${profile.updatedAt}`).join(",")
+  }`;
+  const [staffingSelection, setStaffingSelection] = useState<StaffingSelection>(() => (
+    staffingSelectionFor(staffingContextKey, template, profiles)
+  ));
+  useEffect(() => {
+    setStaffingSelection((held) => held.contextKey === staffingContextKey
+      ? held
+      : staffingSelectionFor(staffingContextKey, template, profiles));
+  }, [staffingContextKey, profiles, template]);
+  // Same reason as the gate selection above: the reset effect runs after paint,
+  // so the render that first sees a new context must already use it.
+  const activeStaffing = staffingSelection.contextKey === staffingContextKey
+    ? staffingSelection
+    : staffingSelectionFor(staffingContextKey, template, profiles);
+  const assignableAgents = activeAgents.filter((agent) => agent.assignable !== false);
+  const agentsById = new Map(agents.map((agent) => [agent.id, agent]));
+
   useEffect(() => {
     setTemplateId("");
     setVariables({});
   }, [projectId]);
+
+  const staffingBaseline = (held: StaffingSelection): StaffingSelection => (
+    held.contextKey === staffingContextKey ? held : staffingSelectionFor(staffingContextKey, template, profiles)
+  );
+
+  const chooseStaffingProfile = (profileId: string): void => {
+    setStaffingSelection((held) => {
+      const baseline = staffingBaseline(held);
+      const chosen = profiles.find((profile) => profile.id === profileId) ?? null;
+      return { ...baseline, profileId, steps: staffedSteps(template, chosen) };
+    });
+  };
+
+  const changeStaffingStep = (stepIndex: number, change: Partial<StaffingStepChoice>): void => {
+    const key = String(stepIndex);
+    setStaffingSelection((held) => {
+      const baseline = staffingBaseline(held);
+      const current = baseline.steps[key];
+      if (current === undefined) return baseline;
+      return { ...baseline, steps: { ...baseline.steps, [key]: { ...current, ...change } } };
+    });
+  };
 
   const toggleGate = (slot: GateSlot, next: boolean): void => {
     setGateSelection((held) => {
@@ -151,12 +311,15 @@ export const NewTask = ({ projectId, project, agents, repos, onClose, onCreated 
   const createFromTemplate = async (): Promise<void> => {
     if (!template) return;
     const gates = changedGateValues(activeGateSelection);
+    const stepOverrides = changedStepOverrides(template, activeStaffing, profiles);
     const ok = await run(() => api.post(`/projects/${projectId}/task-templates/${template.id}/instantiate`, {
       name: form.name,
       repoId: form.repoId,
       variables,
       autoStart: false,
       ...(gates === undefined ? {} : { gates }),
+      ...(activeStaffing.profileId === "" ? {} : { staffingProfileId: activeStaffing.profileId }),
+      ...(stepOverrides === undefined ? {} : { stepOverrides }),
     }));
     if (ok) { onCreated(); onClose(); }
   };
@@ -284,18 +447,78 @@ export const NewTask = ({ projectId, project, agents, repos, onClose, onCreated 
                   </div>
                 )}
                 {template ? (
-                  <div>
+                  <div className="grid gap-[10px]">
+                    <div className={CARD_TITLE}>{t("newTask.staffing.title")}</div>
+                    {profiles.length === 0 ? null : (
+                      <Field label={t("newTask.staffing.profile.label")} hint={t("newTask.staffing.profile.hint")}>
+                        <Select value={activeStaffing.profileId} onChange={(event) => chooseStaffingProfile(event.target.value)}>
+                          {profiles.map((profile) => (
+                            <option key={profile.id} value={profile.id}>
+                              {profile.isDefault ? t("newTask.staffing.profile.default", { name: profile.name }) : profile.name}
+                            </option>
+                          ))}
+                          <option value="">{t("newTask.staffing.profile.canonical")}</option>
+                        </Select>
+                      </Field>
+                    )}
+                    {activeStaffing.profileId === "" && defaultProfileOf(profiles) !== null
+                      ? <div className={HINT}>{t("newTask.staffing.canonical.hint")}</div>
+                      : null}
+                    {template.steps.map((step) => {
+                      const chosen = activeStaffing.steps[String(step.stepIndex)];
+                      const chosenId = chosen?.assigneeAgentId ?? "";
+                      const listed = assignableAgents.some((agent) => agent.id === chosenId);
+                      return (
+                        <div className="grid gap-[6px]" key={step.id}>
+                          <Field label={t("newTask.staffing.step.agent", { name: step.name })}>
+                            {step.assigneeType === "HUMAN"
+                              ? <div className={HINT}>{t("newTask.preview.human")}</div>
+                              : (
+                                <Select value={chosenId}
+                                  onChange={(event) => changeStaffingStep(step.stepIndex, { assigneeAgentId: event.target.value })}>
+                                  {chosenId === "" ? <option value="">{t("newTask.staffing.unstaffed")}</option> : null}
+                                  {/* The seeded agent may be archived or otherwise
+                                      unassignable; it still has to be readable and
+                                      re-selectable rather than silently swapped. */}
+                                  {chosenId === "" || listed ? null : (
+                                    <option value={chosenId}>{agentsById.get(chosenId)?.title ?? chosenId}</option>
+                                  )}
+                                  {assignableAgents.map((agent) => (
+                                    <option key={agent.id} value={agent.id}>{agentOptionLabel(agent)}</option>
+                                  ))}
+                                </Select>
+                              )}
+                          </Field>
+                          {step.optional ? (
+                            <div className={ROW}>
+                              <Toggle on={chosen?.include !== false}
+                                onChange={(next) => changeStaffingStep(step.stepIndex, { include: next })}
+                                label={t("newTask.staffing.step.include", { name: step.name })} />
+                              <div className={HINT}>{t("newTask.staffing.step.include", { name: step.name })}</div>
+                            </div>
+                          ) : null}
+                        </div>
+                      );
+                    })}
                     <div className={CARD_TITLE}>{t("newTask.preview.title")}</div>
                     <div className={CODE_BLOCK}>
                       {template.steps.map((step) => {
                         const slot = gateSlotOf(step);
+                        const chosen = activeStaffing.steps[String(step.stepIndex)];
+                        const chosenId = step.assigneeType === "HUMAN" ? "" : chosen?.assigneeAgentId ?? "";
+                        const resolved = chosenId === ""
+                          ? t("newTask.preview.human")
+                          : agentsById.get(chosenId)?.title
+                            ?? (chosenId === step.assigneeAgentId ? step.assigneeAgent?.title : undefined)
+                            ?? chosenId;
                         return [
                           `- ${step.name}`,
-                          `    ${t("newTask.preview.agent", { name: step.assigneeAgent?.title ?? t("newTask.preview.human") })}`,
+                          `    ${t("newTask.preview.agent", { name: resolved })}`,
                           (slot === null ? step.approvalGate : activeGateSelection.current[slot] === true)
                             ? `    ${t("newTask.preview.gate")}`
                             : null,
                           step.optional ? `    ${t("newTask.preview.optional")}` : null,
+                          step.optional && chosen?.include === false ? `    ${t("newTask.preview.skipped")}` : null,
                         ].filter((line) => line !== null).join("\n");
                       }).join("\n")}
                     </div>

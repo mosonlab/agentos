@@ -122,6 +122,7 @@ const mount = async (templates: TaskTemplate[] = [compound, direct, plain]) => {
       const path = String(input).replace(/^.*\/api/u, "");
       if (method === "POST") posts.push(JSON.parse(String(init.body)) as Record<string, unknown>);
       if (path === "/projects/project-1/task-templates") return response(templates);
+      if (path.endsWith("/staffing-profiles")) return response([]);
       return response({});
     } },
   );
@@ -256,6 +257,7 @@ test("changing project resets current gate choices to that project's defaults", 
       if (path === "/projects/project-1/task-templates" || path === "/projects/project-2/task-templates") {
         return response(templates);
       }
+      if (path.endsWith("/staffing-profiles")) return response([]);
       return response({});
     } },
   );
@@ -283,7 +285,8 @@ test("gate labels are translated in Chinese", async () => {
     </LocaleProvider>,
     { "*": ({ input }) => {
       const path = String(input).replace(/^.*\/api/u, "");
-      return path === "/projects/project-1/task-templates" ? response([compound]) : response({});
+      if (path === "/projects/project-1/task-templates") return response([compound]);
+      return path.endsWith("/staffing-profiles") ? response([]) : response({});
     } },
   );
   try {

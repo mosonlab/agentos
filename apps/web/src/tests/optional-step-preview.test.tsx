@@ -43,9 +43,11 @@ for (const locale of ["en", "zh"] as const) {
       <LocaleProvider initialLocale={locale}>
         <NewTask projectId="project-1" agents={[]} repos={[]} onClose={() => undefined} onCreated={() => undefined} />
       </LocaleProvider>,
-      { "*": ({ input }) => String(input).replace(/^.*\/api/u, "") === "/projects/project-1/task-templates"
-        ? response([template])
-        : response({}) },
+      { "*": ({ input }) => {
+        const path = String(input).replace(/^.*\/api/u, "");
+        if (path === "/projects/project-1/task-templates") return response([template]);
+        return path.endsWith("/staffing-profiles") ? response([]) : response({});
+      } },
     );
     try {
       await page.press(translate(locale, "newTask.tab.template"));

@@ -83,6 +83,8 @@ export type {
   RunnersResponse,
   SessionEvent,
   SessionEventSource,
+  StaffingProfile,
+  StaffingProfileEntry,
   TaskTemplate,
   TaskTemplateStep,
   VersionInfo,
