@@ -11,7 +11,12 @@ import {
   type LegacyTemplateGeneration,
   type PersistedTransitionStep,
 } from "./canonical-template-transition.js";
-import { loadTemplateStepSources, type TemplateStepSource } from "./template-sources.js";
+import {
+  loadAllTemplateStepSources,
+  loadTemplateStepSources,
+  type CanonicalTemplateName,
+  type TemplateStepSource,
+} from "./template-sources.js";
 
 const asPersisted = (steps: readonly TemplateStepSource[]): PersistedTransitionStep[] => steps.map((step) => ({
   id: `step-${String(step.stepIndex)}`,
@@ -40,7 +45,9 @@ const generationAsPersisted = (generation: LegacyTemplateGeneration): PersistedT
     taskTemplateId: "template",
     stepIndex: index + 1,
     name: step.name,
-    assigneeAgent: step.agentName === null ? null : { name: step.agentName },
+    // A retired shape states no binding; whatever staffed the row, the
+    // fingerprint does not read it.
+    assigneeAgent: step.assigneeType === "AGENT" ? { name: "some-staffed-agent" } : null,
     assigneeType: step.assigneeType,
     layer: step.layer,
     approvalGate: step.approvalGate,
@@ -76,6 +83,8 @@ test("installation planning decides source generation drift, half migrations, an
   halfMigrated[0] = { ...halfMigrated[0]!, approvalGate: !halfMigrated[0]!.approvalGate };
   const missingRevalidator = asPersisted(loaded);
   missingRevalidator[0] = { ...missingRevalidator[0]!, assigneeAgent: null };
+  const restaffed = asPersisted(loaded);
+  restaffed[1] = { ...restaffed[1]!, assigneeAgent: { name: "some-other-agent" } };
   const spawnPolicy = { mode: "parallel", limit: 2 };
   const sourceWithSpawnPolicy = loaded.map((step, index) => index === 0 ? { ...step, spawnPolicy } : step);
   // Prompts edited after the rollover was registered: the retired row still
@@ -112,6 +121,13 @@ test("installation planning decides source generation drift, half migrations, an
       plan: planCanonicalInstallation([row(missingRevalidator)], sources(loaded)),
       kind: "current",
     },
+    {
+      // The binding is the canonical default, and sync adopts it at every
+      // step, so a row staffed with another Agent is current, not drift.
+      name: "current row staffed away from its canonical default",
+      plan: planCanonicalInstallation([row(restaffed)], sources(loaded)),
+      kind: "current",
+    },
   ] as const;
 
   for (const candidate of cases) {
@@ -119,6 +135,28 @@ test("installation planning decides source generation drift, half migrations, an
     const action = candidate.plan[0]!;
     assert.equal(action.kind, candidate.kind, candidate.name);
     if (action.kind === "refused" && "reason" in candidate) assert.match(action.reason, candidate.reason, candidate.name);
+  }
+});
+
+test("a deployed current graph is installed as current, never planned for rollover", async () => {
+  // The installer matches retired generations before it checks the current
+  // graph, so an entry that still matched the deployed graph would plan a
+  // rollover on every sync -- and refuse the deploy outright as soon as one
+  // task on that template had an active Run.
+  const sources = await loadAllTemplateStepSources();
+  for (const [templateName, steps] of sources) {
+    const deployed: CanonicalInstallationRow = {
+      id: `${templateName}-row`,
+      projectId: "project",
+      name: templateName as CanonicalTemplateName,
+      steps: asPersisted(steps),
+    };
+    assert.deepEqual(planCanonicalInstallation([deployed], new Map([[templateName, steps]])), [{
+      kind: "current",
+      templateName,
+      projectId: "project",
+      rowId: deployed.id,
+    }], templateName);
   }
 });
 

@@ -4,8 +4,6 @@ import test from "node:test";
 import {
   canonicalStepAdoptions,
   canonicalStepDrift,
-  REGRESSION_VERIFIER_AGENT_NAME,
-  SPEC_REVALIDATOR_AGENT_NAME,
   type CanonicalStepAdoption,
 } from "./canonical-step-adoption.js";
 import {
@@ -73,41 +71,42 @@ test("a step that matches its source offers no adoption and no drift", () => {
   }
 });
 
-test("the regression steps adopt the verifier Agent from either retired review role", () => {
-  for (const [templateName, stepIndex] of [
-    ["compound-engineer-workflow", 10],
-    ["direct-engineer-workflow", 6],
-  ] as const) {
-    const source = sourceStep(templateName, stepIndex);
-    assert.equal(source.agentName, REGRESSION_VERIFIER_AGENT_NAME);
-    for (const retired of ["code-reviewer-opus-high", "code-reviewer-sol-high"]) {
-      const actual = { ...asPersisted(source), assigneeAgent: { name: retired } };
-      assert.deepEqual(onlyAdoption(templateName, actual, source), {
-        difference: "agent",
-        counter: "adoptedAssignees",
-        refusesReferencedStep: true,
-        write: { kind: "bind-agent", agentName: REGRESSION_VERIFIER_AGENT_NAME },
-      });
+test("every step adopts the Agent its source binds, whoever it binds now", () => {
+  // Staffing a chain differently is a staffing profile, applied to the Task;
+  // the template row always states the canonical default. So this is not a
+  // roster of retired roles at named steps: any binding, and an unbound row,
+  // adopts the source binding at every canonical step.
+  for (const [templateName, steps] of sources) {
+    for (const source of steps) {
+      if (source.agentName === null) continue;
+      for (const bound of [{ name: "some-other-agent" }, { name: "renamed", canonicalRole: "some-other-agent" }, null]) {
+        const actual = { ...asPersisted(source), assigneeAgent: bound };
+        assert.deepEqual(onlyAdoption(templateName, actual, source), {
+          difference: "agent",
+          counter: "adoptedAssignees",
+          // A Task instantiated from this step keeps the assignee it was
+          // created with, so moving the template row does not mutate work in
+          // flight and a referenced step is not refused.
+          refusesReferencedStep: false,
+          write: { kind: "bind-agent", agentName: source.agentName },
+        }, `${templateName}:${source.stepIndex}`);
+      }
     }
-    refuses(templateName, { ...asPersisted(source), assigneeAgent: { name: "senior-dev-astra-medium" } }, source, "agent");
   }
 });
 
-test("the direct revalidation step adopts the revalidator Agent only from an unbound row", () => {
+test("the Agent is identified by canonical role, not by its editable name", () => {
   const source = sourceStep("direct-engineer-workflow", 1);
-  assert.equal(source.agentName, SPEC_REVALIDATOR_AGENT_NAME);
-  assert.deepEqual(onlyAdoption("direct-engineer-workflow", { ...asPersisted(source), assigneeAgent: null }, source), {
-    difference: "agent",
-    counter: "adoptedAssignees",
-    refusesReferencedStep: true,
-    write: { kind: "bind-agent", agentName: SPEC_REVALIDATOR_AGENT_NAME },
-  });
-  refuses("direct-engineer-workflow", { ...asPersisted(source), assigneeAgent: { name: "senior-dev-astra-medium" } }, source, "agent");
-});
-
-test("an unbound row on any other step is drift, not an assignee adoption", () => {
-  const source = sourceStep("compound-engineer-workflow", 1);
-  refuses("compound-engineer-workflow", { ...asPersisted(source), assigneeAgent: null }, source, "agent");
+  assert.notEqual(source.agentName, null);
+  // An operator-renamed Agent still binds the canonical role, so there is
+  // nothing to adopt and nothing to refuse.
+  const renamed = {
+    ...asPersisted(source),
+    assigneeAgent: { name: "operator's own label", canonicalRole: source.agentName! },
+  };
+  assert.deepEqual(canonicalStepAdoptions("direct-engineer-workflow", renamed, source), []);
+  assert.deepEqual(canonicalStepDrift("direct-engineer-workflow", renamed, source, "adopt"), []);
+  assert.deepEqual(canonicalStepDrift("direct-engineer-workflow", renamed, source, "refuse-all"), []);
 });
 
 test("the merge authorization steps adopt their canonical name from the retired one", () => {

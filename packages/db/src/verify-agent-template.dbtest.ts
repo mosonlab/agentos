@@ -69,9 +69,9 @@ let agentSources: Awaited<ReturnType<typeof loadAgentSources>>;
 let templateSources: Awaited<ReturnType<typeof loadAllTemplateStepSources>>;
 
 const partialRoleNames = [
-  "senior-dev-luna",
-  "review-coordinator-sol",
-  "review-coordinator-opus",
+  "senior-dev-luna-max",
+  "code-reviewer-sol-high",
+  "code-reviewer-opus-high",
   "senior-dev-astra-low",
 ] as const;
 
@@ -245,7 +245,7 @@ test("--project rejects every canonical Agent field drift with project and Agent
       name: "title",
       apply: async (fixture) => {
         await prisma.agent.update({
-          where: { id: fixture.agents.get("senior-dev-luna")!.id },
+          where: { id: fixture.agents.get("senior-dev-luna-max")!.id },
           data: { title: "drifted title" },
         });
       },
@@ -253,14 +253,14 @@ test("--project rejects every canonical Agent field drift with project and Agent
     {
       name: "inboxAccess",
       apply: async (fixture) => {
-        const agent = fixture.agents.get("senior-dev-luna")!;
+        const agent = fixture.agents.get("senior-dev-luna-max")!;
         await prisma.agent.update({ where: { id: agent.id }, data: { inboxAccess: !agent.source.inboxAccess } });
       },
     },
     {
       name: "collaborators",
       apply: async (fixture) => {
-        const agent = fixture.agents.get("senior-dev-luna")!;
+        const agent = fixture.agents.get("senior-dev-luna-max")!;
         const allowed = fixture.agents.get("senior-dev-astra-low")!;
         await prisma.agentCollaboration.create({
           data: { agentId: agent.id, allowedAgentId: allowed.id, projectId: fixture.id },
@@ -271,7 +271,7 @@ test("--project rejects every canonical Agent field drift with project and Agent
       name: "foundationalPrompt",
       apply: async (fixture) => {
         await prisma.agent.update({
-          where: { id: fixture.agents.get("senior-dev-luna")!.id },
+          where: { id: fixture.agents.get("senior-dev-luna-max")!.id },
           data: { foundationalPrompt: "drifted foundational prompt" },
         });
       },
@@ -280,7 +280,7 @@ test("--project rejects every canonical Agent field drift with project and Agent
       name: "rolePrompt",
       apply: async (fixture) => {
         await prisma.agent.update({
-          where: { id: fixture.agents.get("senior-dev-luna")!.id },
+          where: { id: fixture.agents.get("senior-dev-luna-max")!.id },
           data: { rolePrompt: "drifted role prompt" },
         });
       },
@@ -289,19 +289,19 @@ test("--project rejects every canonical Agent field drift with project and Agent
 
   for (const mutation of mutations) {
     await withProject({ agents: partialRoleNames }, async (fixture) => {
-      const agent = fixture.agents.get("senior-dev-luna")!;
+      const agent = fixture.agents.get("senior-dev-luna-max")!;
       await mutation.apply(fixture);
       const result = verify(fixture.id);
       assert.notEqual(result.status, 0, `${mutation.name}: ${result.output}`);
       assert.match(result.output, projectErrorPattern(fixture), mutation.name);
-      assert.match(result.output, new RegExp(`senior-dev-luna \\(${agent.id}\\)`, "u"), mutation.name);
+      assert.match(result.output, new RegExp(`senior-dev-luna-max \\(${agent.id}\\)`, "u"), mutation.name);
     });
   }
 });
 
 test("--project applies the canonical runtime override treatment", async () => {
   await withProject({ agents: partialRoleNames }, async (fixture) => {
-    const agent = fixture.agents.get("senior-dev-luna")!;
+    const agent = fixture.agents.get("senior-dev-luna-max")!;
     await prisma.agent.update({
       where: { id: agent.id },
       data: { model: "gpt-5.6-luna:high", runnerPreference: RunnerPreference.CODEX, runtimeConfigCustomized: true },
@@ -311,7 +311,7 @@ test("--project applies the canonical runtime override treatment", async () => {
   });
 
   await withProject({ agents: partialRoleNames }, async (fixture) => {
-    const agent = fixture.agents.get("senior-dev-luna")!;
+    const agent = fixture.agents.get("senior-dev-luna-max")!;
     await prisma.agent.update({
       where: { id: agent.id },
       data: { model: "gpt-5.6-luna:high", runnerPreference: RunnerPreference.CODEX, runtimeConfigCustomized: false },
@@ -319,11 +319,11 @@ test("--project applies the canonical runtime override treatment", async () => {
     const uncustomized = verify(fixture.id);
     assert.notEqual(uncustomized.status, 0, uncustomized.output);
     assert.match(uncustomized.output, projectErrorPattern(fixture));
-    assert.match(uncustomized.output, new RegExp(`senior-dev-luna \\(${agent.id}\\)`, "u"));
+    assert.match(uncustomized.output, new RegExp(`senior-dev-luna-max \\(${agent.id}\\)`, "u"));
   });
 
   await withProject({ agents: partialRoleNames }, async (fixture) => {
-    const agent = fixture.agents.get("senior-dev-luna")!;
+    const agent = fixture.agents.get("senior-dev-luna-max")!;
     await prisma.agent.update({
       where: { id: agent.id },
       data: { model: "gpt-5.6-luna:max", runnerPreference: RunnerPreference.CLAUDE, runtimeConfigCustomized: true },
@@ -331,7 +331,7 @@ test("--project applies the canonical runtime override treatment", async () => {
     const incompatible = verify(fixture.id);
     assert.notEqual(incompatible.status, 0, incompatible.output);
     assert.match(incompatible.output, projectErrorPattern(fixture));
-    assert.match(incompatible.output, new RegExp(`senior-dev-luna \\(${agent.id}\\)`, "u"));
+    assert.match(incompatible.output, new RegExp(`senior-dev-luna-max \\(${agent.id}\\)`, "u"));
   });
 });
 
@@ -593,6 +593,47 @@ test("default verification runs compound and direct special checks", async () =>
       data: { approvalGate: false },
     });
   }
+});
+
+test("the compound implementation root is verified as a Codex gpt-* capability", async () => {
+  const canonical = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  const root = await prisma.taskTemplateStep.findFirstOrThrow({
+    where: {
+      taskTemplate: { projectId: canonical.id, name: "compound-engineer-workflow" },
+      outputKind: "implementation",
+    },
+    select: { assigneeAgentId: true },
+  });
+  const agent = await prisma.agent.findUniqueOrThrow({ where: { id: root.assigneeAgentId! } });
+  assert.equal(agent.runnerPreference, RunnerPreference.CODEX);
+  assert.ok(agent.model.startsWith("gpt-"), agent.model);
+
+  // An operator override is what the verifier tolerates elsewhere, so the
+  // refusal has to come from the capability rule and not from runtime drift.
+  await prisma.agent.update({
+    where: { id: agent.id },
+    data: {
+      model: "claude-opus-5:medium",
+      runnerPreference: RunnerPreference.CLAUDE,
+      runtimeConfigCustomized: true,
+    },
+  });
+  try {
+    const refused = verify();
+    assert.notEqual(refused.status, 0, refused.output);
+    assert.match(refused.output, /must bind a Codex gpt-\* Agent/u);
+  } finally {
+    await prisma.agent.update({
+      where: { id: agent.id },
+      data: {
+        model: agent.model,
+        runnerPreference: agent.runnerPreference,
+        runtimeConfigCustomized: agent.runtimeConfigCustomized,
+      },
+    });
+  }
+  const restored = verify();
+  assert.equal(restored.status, 0, restored.output);
 });
 
 test("unknown --project id refuses with only the requested id", async () => {

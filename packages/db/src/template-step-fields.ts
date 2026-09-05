@@ -15,6 +15,26 @@ import type { AssigneeType, Prisma } from "@prisma/client";
 import type { PersistedTemplateStepStructure, TemplateStepSource } from "./template-sources.js";
 
 /**
+ * The Agent bound to a persisted step, as identity is read from it.
+ *
+ * `canonicalRole` is the role file name and is the Agent's canonical identity;
+ * `name` is an operator-editable label that follows canonical until it is
+ * edited. Reading identity through one accessor keeps the two apart in one
+ * place: a row whose Agent predates the column still compares by name, and
+ * every reader moves to the column the moment it carries a value.
+ */
+export type PersistedStepAgentIdentity = Readonly<{ name: string; canonicalRole?: string | null }>;
+
+/**
+ * The canonical identity of the Agent bound to a persisted step: its
+ * `canonicalRole` when it has one, its `name` otherwise, and null when the step
+ * binds no Agent.
+ */
+export const persistedStepAgentIdentity = (
+  agent: PersistedStepAgentIdentity | null | undefined,
+): string | null => (agent === null || agent === undefined ? null : agent.canonicalRole ?? agent.name);
+
+/**
  * One step of a retired canonical graph, as `canonical-template-transition.ts`
  * registers it. A generation states what its deployed rows carried; a field it
  * omits takes the default documented on that field and nothing else. No value
@@ -22,7 +42,6 @@ import type { PersistedTemplateStepStructure, TemplateStepSource } from "./templ
  */
 export type LegacyStepRecord = Readonly<{
   name: string;
-  agentName: string | null;
   assigneeType: AssigneeType;
   layer: number;
   approvalGate: boolean;
@@ -60,7 +79,10 @@ type TemplateStepField = Readonly<{
   fromSource: (expected: TemplateStepSource) => unknown;
   /**
    * The value a retired generation's record states, or null when the field
-   * cannot identify a generation. `priorOutputKinds` is the only such field:
+   * cannot identify a generation. Two fields are such. `agent` is one: a
+   * binding is staffing rather than structure, and a generation that differs
+   * from its successor only by one would match the current graph forever.
+   * `priorOutputKinds` is the other:
    * the whitelist migration rewrote it independently of any graph transition,
    * so rows of one retired generation legitimately carry either the whitelist
    * or the retired all-outputs marker that `canonical-step-adoption.ts`
@@ -92,11 +114,20 @@ const TEMPLATE_STEP_FIELDS: readonly TemplateStepField[] = [
     fromRetiredShape: (expected) => expected.name,
   },
   {
+    /**
+     * The canonical role bound to the step, against the role name the source
+     * frontmatter states.
+     *
+     * `fromRetiredShape` is null: which Agent a step binds is staffing, not
+     * structure, so it cannot identify a retired generation. A generation that
+     * differed from its successor only by a binding would otherwise keep
+     * matching the current graph, and every sync would plan a rollover.
+     */
     field: "agent",
     frontmatterKey: "agent",
-    persisted: (actual) => actual.assigneeAgent?.name ?? null,
+    persisted: (actual) => persistedStepAgentIdentity(actual.assigneeAgent),
     fromSource: (expected) => expected.agentName,
-    fromRetiredShape: (expected) => expected.agentName,
+    fromRetiredShape: null,
   },
   {
     field: "assigneeType",
