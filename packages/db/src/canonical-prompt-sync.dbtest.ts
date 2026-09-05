@@ -1613,8 +1613,10 @@ test("sync rolls model-neutral review names across all canonical templates and c
     });
   }
 
+  const instantiatedBefore = await snapshotInstantiatedTasks(taskIds);
   const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
   assert.equal(synced.status, 0, synced.output);
+  assert.equal(await snapshotInstantiatedTasks(taskIds), instantiatedBefore);
   const summary = parseCanonicalSyncSummary(synced.output);
   assert.deepEqual(summary.refused, {});
   assert.equal(summary.projects[project.slug]?.createdCanonicalTemplates, 3, synced.output);
