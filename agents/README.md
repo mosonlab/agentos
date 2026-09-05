@@ -11,6 +11,34 @@ and full-tail readiness contract are maintained in the
 [Tier 0 / Tier 1 onboarding runbook](../docs/runbooks/add-a-project.md).
 Follow its Tier 1 checklist when onboarding another Project.
 
+## Changing a canonical prompt
+
+Editing any file under `templates/` retires the prompt generation every
+deployment is running. Canonical sync installs the source tree's prompts, and
+the rows it finds carry whatever generation the last deploy installed; it can
+only replace them when the registry says which retired generation they are.
+Three edits belong in the same change.
+
+1. Edit the Markdown.
+2. Re-pin the source generation. `npm run db:template-digest` prints one digest
+   per template; copy the changed one into
+   `CANONICAL_SOURCE_PROMPT_GENERATIONS` in
+   `packages/db/src/canonical-template-transition.ts`.
+3. Publish the new generation and register the one it replaces. Append the new
+   digest to `PUBLISHED_PROMPT_GENERATIONS` in
+   `packages/db/src/canonical-published-generations.ts` — append, never rewrite
+   the last element, which names a generation already deployed — and add an
+   entry to the retired-generation registry in
+   `canonical-template-transition.ts` carrying a marker that names what
+   changed, the shape those rows hold, and `promptDigest` set to the digest the
+   published list held before this change. A change that also changes the shape
+   is identified by its shape instead: register it without a `promptDigest` and
+   name its marker as `retiredByShape` on the published entry.
+
+`packages/db/src/canonical-published-generations.test.ts` refuses in the merge
+gate until all three are done, so a generation nothing can transition from
+stops the change rather than the deploy that installs it.
+
 ## Layout
 
 - `foundational.md` — the shared foundational prompt. Body maps to `Agent.foundationalPrompt` for every agent.

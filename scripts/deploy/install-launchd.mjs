@@ -26,6 +26,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { resolveServicePlatform } from "./service-platform.mjs";
+import { SYSTEMCTL_PATH, SYSTEMD_CONTROL_VERBS, systemdControlArgv } from "./service-control.mjs";
 import { DEFAULT_DEPLOY_ROLE, resolveDeployRole } from "./deploy-role.mjs";
 
 export { DEFAULT_DEPLOY_ROLE, resolveDeployRole };
@@ -866,23 +867,22 @@ const systemdCommandPath = (name, configured, execute = execFileSync) => {
   }
 };
 
-export const renderSystemdSudoers = ({
-  serviceUser,
-  inventory,
-  systemctlPath = "/bin/systemctl",
-} = {}) => {
+/**
+ * Grant the service user exactly the commands `service-control.mjs` issues:
+ * one line per unit and control verb, rendered from that module's description
+ * of the verbs. Nothing else is granted, and a verb the deployment issues
+ * cannot be missing from the grant.
+ */
+export const renderSystemdSudoers = ({ serviceUser, inventory } = {}) => {
   if (!validAccountName(serviceUser) || serviceUser === "root") throw new Error("systemd-service-user-invalid");
   if (!isGeneratedServiceInventory(inventory) || inventory.entries.length === 0) {
     throw new Error("systemd-service-inventory-invalid");
   }
-  if (typeof systemctlPath !== "string" || systemctlPath === "" || !systemctlPath.startsWith("/")) {
-    throw new Error("systemd-command-not-absolute:systemctl");
-  }
   const rules = [];
   for (const { unitName } of inventory.entries) {
-    rules.push(`${systemctlPath} restart ${unitName}`);
-    rules.push(`${systemctlPath} show -p ExecStart --value ${unitName}`);
-    rules.push(`${systemctlPath} is-active ${unitName}`);
+    for (const verb of SYSTEMD_CONTROL_VERBS) {
+      rules.push([SYSTEMCTL_PATH, ...systemdControlArgv(verb, unitName)].join(" "));
+    }
   }
   return `${serviceUser} ALL=(root) NOPASSWD: ${rules.join(", ")}\n`;
 };
@@ -1119,7 +1119,7 @@ const readStageEntries = ({
   if (manifest.schemaVersion !== 1 || manifest.platform !== "linux"
       || manifest.repositoryRoot !== resolve(root) || manifest.stagingRoot !== stageRoot
       || manifest.unitDirectory !== unitDirectory || manifest.sudoersPath !== sudoersPath
-      || manifest.systemctlPath !== "/bin/systemctl"
+      || manifest.systemctlPath !== SYSTEMCTL_PATH
       || (manifest.reloadPending !== undefined && manifest.reloadPending !== true)
       || manifest.entries.length !== inventory.entries.length + 1) {
     invalidManifest(reason, manifestPath);
@@ -1237,11 +1237,9 @@ const readStageEntries = ({
     }
   }
   const sudoersEntry = manifest.auxiliaryEntries.find((entry) => entry.kind === "sudoers");
-  if (readFileSync(sudoersEntry.stagedPath, "utf8") !== renderSystemdSudoers({
-    serviceUser: account,
-    inventory,
-    systemctlPath: manifest.systemctlPath,
-  })) throw new Error("systemd-staged-sudoers-invalid");
+  if (readFileSync(sudoersEntry.stagedPath, "utf8") !== renderSystemdSudoers({ serviceUser: account, inventory })) {
+    throw new Error("systemd-staged-sudoers-invalid");
+  }
   for (const entry of manifest.auxiliaryEntries.filter((candidate) => candidate.kind === "drop-in")) validateDropIn(entry, inventory);
   const retiredEntries = manifest.retiredEntries ?? [];
   if (!Array.isArray(retiredEntries)) throw new Error("systemd-service-manifest-invalid");
@@ -1690,7 +1688,7 @@ const systemdStagePlan = ({
       && fileDigest(wrapper) !== wrapperManifestEntry.installedSha256 && !replaceExisting) {
     throw new Error(`launchd-service-wrapper-conflict:${wrapper}`);
   }
-  const sudoers = renderSystemdSudoers({ serviceUser: account, inventory, systemctlPath: "/bin/systemctl" });
+  const sudoers = renderSystemdSudoers({ serviceUser: account, inventory });
   const sudoersStaged = stageSystemdDefinition({
     stagingRoot: stageRoot,
     relativePath: "sudoers/anneal-service-control",
@@ -1730,7 +1728,7 @@ const systemdStagePlan = ({
     stagingRoot: stageRoot,
     unitDirectory: resolvedUnitDirectory,
     sudoersPath: resolvedSudoersPath,
-    systemctlPath: "/bin/systemctl",
+    systemctlPath: SYSTEMCTL_PATH,
     renderInputs: {
       nodeBinary: resolvedNode,
       path: controlledPath,

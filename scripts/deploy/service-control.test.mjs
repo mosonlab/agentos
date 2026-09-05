@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { renderSystemdSudoers } from "./install-launchd.mjs";
 import { DeployFailure } from "./quiet-window-lib.mjs";
 import { generateServiceInventory, resolveServiceInventory } from "./service-inventory.mjs";
 import {
@@ -55,15 +56,15 @@ test("runner role service control accepts only the local runner inventory", asyn
   });
   await control.restart("com.agentos.runner-2");
   assert.deepEqual(recorder.calls.map(({ program, args }) => [program, args]), [
-    ["systemctl", ["restart", "com.agentos.runner-2.service"]],
+    ["/bin/systemctl", ["restart", "com.agentos.runner-2.service"]],
   ]);
-  assert.throws(() => control.restart("com.agentos.api"), /service-control-label-invalid/u);
+  await assert.rejects(control.restart("com.agentos.api"), /service-control-label-invalid/u);
 });
 
-test("Linux root control uses bare systemctl verbs and the stable ExecStart query", async () => {
+test("Linux root control runs the granted systemctl program and the stable ExecStart query", async () => {
   const recorder = runRecorder({
-    "systemctl is-active com.agentos.api.service": { code: 0, stdout: "active\n", stderr: "" },
-    "systemctl show -p ExecStart --value com.agentos.api.service": {
+    "/bin/systemctl is-active com.agentos.api.service": { code: 0, stdout: "active\n", stderr: "" },
+    "/bin/systemctl show -p ExecStart --value com.agentos.api.service": {
       code: 0,
       stdout: "/usr/bin/node /srv/shared/bin/agentos-service-wrapper.mjs com.agentos.api\n",
       stderr: "",
@@ -75,26 +76,26 @@ test("Linux root control uses bare systemctl verbs and the stable ExecStart quer
   assert.equal(await control.isRunning("com.agentos.api"), true);
   assert.match(await control.describe("com.agentos.api"), /agentos-service-wrapper\.mjs/u);
   assert.deepEqual(recorder.calls.map(({ program, args }) => [program, args]), [
-    ["systemctl", ["restart", "com.agentos.api.service"]],
-    ["systemctl", ["is-active", "com.agentos.api.service"]],
-    ["systemctl", ["show", "-p", "ExecStart", "--value", "com.agentos.api.service"]],
+    ["/bin/systemctl", ["restart", "com.agentos.api.service"]],
+    ["/bin/systemctl", ["is-active", "com.agentos.api.service"]],
+    ["/bin/systemctl", ["show", "-p", "ExecStart", "--value", "com.agentos.api.service"]],
   ]);
 });
 test("Linux non-root control prefixes sudo -n and an inactive unit is not running", async () => {
   const recorder = runRecorder({
-    "sudo -n systemctl is-active com.agentos.web.service": { code: 3, stdout: "inactive\n", stderr: "" },
+    "sudo -n /bin/systemctl is-active com.agentos.web.service": { code: 3, stdout: "inactive\n", stderr: "" },
   });
   const control = createServiceControl({ inventory: DEFAULT_INVENTORY, platform: "linux", euid: 1000, run: recorder.run });
 
   assert.equal(await control.isRunning("com.agentos.web"), false);
   assert.deepEqual(recorder.calls.map(({ program, args }) => [program, args]), [
-    ["sudo", ["-n", "systemctl", "is-active", "com.agentos.web.service"]],
+    ["sudo", ["-n", "/bin/systemctl", "is-active", "com.agentos.web.service"]],
   ]);
 });
 
 test("a denied Linux control command fails with the unit named", async () => {
   const recorder = runRecorder({
-    "sudo -n systemctl restart com.agentos.api.service": {
+    "sudo -n /bin/systemctl restart com.agentos.api.service": {
       code: 1,
       stdout: "",
       stderr: "sudo: a password is required\n",
@@ -113,7 +114,7 @@ test("a denied Linux control command fails with the unit named", async () => {
 
 test("a systemctl failure is distinct from sudo denial and retains diagnostics", async () => {
   const recorder = runRecorder({
-    "sudo -n systemctl restart com.agentos.api.service": {
+    "sudo -n /bin/systemctl restart com.agentos.api.service": {
       code: 1,
       stdout: "",
       stderr: "Job for com.agentos.api.service failed; inspect the journal\n",
@@ -170,9 +171,9 @@ test("every Linux inventory label uses the restart, liveness, and boundary argv"
   }
 
   assert.deepEqual(calls.map(({ program, args }) => [program, args]), SERVICE_LABELS.flatMap((label) => [
-    ["systemctl", ["restart", `${label}.service`]],
-    ["systemctl", ["is-active", `${label}.service`]],
-    ["systemctl", ["show", "-p", "ExecStart", "--value", `${label}.service`]],
+    ["/bin/systemctl", ["restart", `${label}.service`]],
+    ["/bin/systemctl", ["is-active", `${label}.service`]],
+    ["/bin/systemctl", ["show", "-p", "ExecStart", "--value", `${label}.service`]],
   ]));
 });
 
@@ -203,6 +204,39 @@ test("every Darwin inventory label keeps the launchctl command sequence", async 
     ["/bin/launchctl", ["print", `gui/501/${label}`]],
     ["/bin/launchctl", ["print", `gui/501/${label}`]],
   ]));
+});
+
+test("the sudoers grant is exactly the set of commands service control can issue", async () => {
+  const serviceUser = "anneal-test";
+  const issueEveryCommand = async (euid) => {
+    const issued = [];
+    const run = async (program, args) => {
+      issued.push([program, ...args].join(" "));
+      return { code: 0, stdout: "active\n", stderr: "" };
+    };
+    const control = createServiceControl({ inventory: DEFAULT_INVENTORY, platform: "linux", euid, run });
+    for (const label of SERVICE_LABELS) {
+      await control.restart(label);
+      assert.equal(await control.isRunning(label), true);
+      await control.describe(label);
+    }
+    return issued;
+  };
+
+  const asRoot = await issueEveryCommand(0);
+  const asServiceUser = (await issueEveryCommand(1000)).map((command) => {
+    assert.equal(command.startsWith("sudo -n "), true, command);
+    return command.slice("sudo -n ".length);
+  });
+  assert.deepEqual(asServiceUser, asRoot);
+  assert.equal(asRoot.length, SERVICE_LABELS.length * 3);
+
+  const prefix = `${serviceUser} ALL=(root) NOPASSWD: `;
+  const grant = renderSystemdSudoers({ serviceUser, inventory: DEFAULT_INVENTORY }).trim();
+  assert.equal(grant.startsWith(prefix), true, grant);
+  const granted = grant.slice(prefix.length).split(", ");
+  assert.equal(granted.length, new Set(granted).size, "the grant repeats a command");
+  assert.deepEqual([...new Set(granted)].sort(), [...new Set(asServiceUser)].sort());
 });
 
 test("wrapper-boundary proof requires both the stable wrapper and label", () => {

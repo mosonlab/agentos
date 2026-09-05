@@ -686,11 +686,7 @@ test("the real service CLI enforces the Linux root boundary and sudo -n policy",
         assert.equal(ownership.some((change) => change.path === entry.path && change.uid === 0 && change.gid === 0), true, entry.path);
       }
       const sudoers = readFileSync(sudoersPath, "utf8");
-      assert.equal(sudoers, renderSystemdSudoers({
-        serviceUser: "anneal-test",
-        inventory: DEFAULT_INVENTORY,
-        systemctlPath: "/bin/systemctl",
-      }));
+      assert.equal(sudoers, renderSystemdSudoers({ serviceUser: "anneal-test", inventory: DEFAULT_INVENTORY }));
       assert.match(sudoers, /systemctl show -p ExecStart --value com\.agentos\.api\.service/u);
       assert.doesNotMatch(sudoers, /\b(?:enable|disable|daemon-reload)\b/u);
       const sudo = writeSudoPolicyStub(root);
