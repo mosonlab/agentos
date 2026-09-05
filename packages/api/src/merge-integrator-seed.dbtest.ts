@@ -190,6 +190,16 @@ const agentSnapshot = async (projectIds: string[]) => db.agent.findMany({
 
 /* ------------------------------------------------------ the fresh-seed negative */
 
+/** Every registered legacy generation still bound its review-fix step to
+ * senior-dev; a fixture that rebuilds one from current rows restores that. */
+const rebindFixStepToRetiredSeniorDev = async (projectId: string, templateId: string): Promise<void> => {
+  const seniorDev = await db.agent.findUniqueOrThrow({ where: { projectId_name: { projectId, name: "senior-dev" } } });
+  await db.taskTemplateStep.updateMany({
+    where: { taskTemplateId: templateId, outputKind: "fixed-implementation" },
+    data: { assigneeAgentId: seniorDev.id },
+  });
+};
+
 test("a fresh seed writes the twelve-step, eight-step, and four-step canonical templates", async () => {
   const seeded = await seed();
   assert.equal(seeded.code, 0, seeded.output);
@@ -342,6 +352,7 @@ test("canonical sync installs the reviewed PR prompt generation while instantiat
     data: { provisionDependencies: true },
   });
   await db.taskTemplateStep.update({ where: { id: fixed.id }, data: { prompt: reviewedPrompt } });
+  await rebindFixStepToRetiredSeniorDev(project.id, template.id);
   const reviewedSteps = await db.taskTemplateStep.findMany({
     where: { taskTemplateId: template.id },
     include: { assigneeAgent: true },
@@ -477,6 +488,7 @@ test("canonical sync rolls quiescent adjudication-era graphs only after active R
         orderBy: { stepIndex: "asc" },
       });
     }
+    await rebindFixStepToRetiredSeniorDev(template.projectId, template.id);
     const blind = historicalSteps.find((step) => step.outputKind === "blind-findings")!;
     // The adjudicator role is archived, so the seed no longer creates its
     // Agent row; production still carries the row the old node was bound to.

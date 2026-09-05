@@ -119,6 +119,16 @@ const ADJUDICATION_STEPS = {
  * optional review omission, not just the older Regression script path. The
  * generation digest authenticates the whole template.
  */
+/** Every registered legacy generation still bound its review-fix step to
+ * senior-dev; a fixture that rebuilds one from current rows restores that. */
+const rebindFixStepToRetiredSeniorDev = async (projectId: string, templateId: string): Promise<void> => {
+  const seniorDev = await prisma.agent.findUniqueOrThrow({ where: { projectId_name: { projectId, name: "senior-dev" } } });
+  await prisma.taskTemplateStep.updateMany({
+    where: { taskTemplateId: templateId, outputKind: "fixed-implementation" },
+    data: { assigneeAgentId: seniorDev.id },
+  });
+};
+
 const restorePreOptionalReviewPrompt = (prompt: string): string => prompt
   .replace(
     "Read the immutable `sol-findings` review output and, when present, the immutable `blind-findings` output through their Anneal step outputs. The blind review may be absent when its optional step was omitted; when it is absent, the Sol report is the sole report. Verify that every present report's reviewed head is the HEAD you are about to fix. When both reports are present, also verify that they report the same reviewed base and the same reviewed head.",
@@ -312,6 +322,7 @@ test("sync rolls the checkout Regression prompt generation once and preserves ch
       where: { taskTemplateId: template.id },
       data: { provisionDependencies: true, optional: false },
     });
+    await rebindFixStepToRetiredSeniorDev(project.id, template.id);
     const regression = template.steps.find(({ outputKind }) => outputKind === "regression-verification-v2");
     assert.ok(regression);
     assert.equal(regression.prompt.split(runnerResolver).length - 1, 3);
@@ -434,6 +445,7 @@ test("sync rolls the deployed pre-optional-review prompt generation once", async
       where: { taskTemplateId: template.id },
       data: { optional: false },
     });
+    await rebindFixStepToRetiredSeniorDev(project.id, template.id);
     const fix = template.steps.find(({ outputKind }) => outputKind === "fixed-implementation");
     const regression = template.steps.find(({ outputKind }) => outputKind === "regression-verification-v2");
     assert.ok(fix);
@@ -523,6 +535,7 @@ test("sync rolls parked and not-yet-started v1 chains forward without changing t
       where: { taskTemplateId: template.id },
       data: { provisionDependencies: true, optional: false },
     });
+    await rebindFixStepToRetiredSeniorDev(project.id, template.id);
     await prisma.taskTemplateStep.updateMany({
       where: { taskTemplateId: template.id, outputKind: "regression-verification-v2" },
       data: { outputKind: "regression-verification", prompt: oldPrompt },
@@ -650,6 +663,7 @@ test("sync rolls the exact adjudication-era graphs forward without touching inst
       where: { taskTemplateId: template.id },
       data: { provisionDependencies: true, optional: false },
     });
+    await rebindFixStepToRetiredSeniorDev(project.id, template.id);
     // Walk down so the (template, stepIndex) unique never collides while the
     // hole opens; every step the adjudication node preceded also sat one layer
     // later than it does now.
@@ -790,6 +804,7 @@ test("sync rolls the pre-zero-gate compound graph forward and leaves the direct 
     where: { taskTemplateId: full.id },
     data: { provisionDependencies: true, optional: false },
   });
+  await rebindFixStepToRetiredSeniorDev(project.id, full.id);
   await prisma.taskTemplateStep.updateMany({
     where: { taskTemplateId: full.id, stepIndex: { in: [1, 4] } },
     data: { approvalGate: true },
