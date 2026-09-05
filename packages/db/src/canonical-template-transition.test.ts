@@ -61,11 +61,36 @@ const asPersisted = (steps: readonly TemplateStepSource[]): PersistedTransitionS
     prompt: step.prompt,
   }));
 
+/** The rows a registered shape describes, each field at the value it states. */
+const shapeAsPersisted = (shape: readonly LegacyStepRecord[]): PersistedTransitionStep[] => shape.map((step, index) => ({
+  id: `shape-${String(index + 1)}`,
+  taskTemplateId: "template",
+  stepIndex: index + 1,
+  name: step.name,
+  assigneeAgent: step.assigneeType === "AGENT" ? SOME_AGENT : null,
+  assigneeType: step.assigneeType,
+  layer: step.layer,
+  approvalGate: step.approvalGate,
+  optional: step.optional ?? false,
+  outputKind: step.outputKind,
+  attachmentsFromPrevious: step.attachmentsFromPrevious,
+  priorOutputKinds: [],
+  opensPullRequest: step.opensPullRequest,
+  requiresCommit: step.requiresCommit ?? false,
+  provisionDependencies: step.provisionDependencies ?? true,
+  baseFromStepIndex: step.baseFromStepIndex,
+  spawnPolicy: step.spawnPolicy,
+  prompt: "retired",
+}));
+
 const generationOf = (templateName: CanonicalTemplateRegistryName, marker: string) => {
   const generation = LEGACY_TEMPLATE_GENERATIONS[templateName]?.find((candidate) => candidate.marker === marker);
   assert.ok(generation, `${templateName} must register ${marker}`);
   return generation;
 };
+
+/** Whatever a retired row was staffed with, the fingerprint does not read it. */
+const SOME_AGENT = { name: "some-staffed-agent" };
 
 const persistedGeneration = (
   generation: ReturnType<typeof generationOf>,
@@ -75,7 +100,7 @@ const persistedGeneration = (
   taskTemplateId: "template",
   stepIndex: index + 1,
   name: step.name,
-  assigneeAgent: step.agentName === null ? null : { name: step.agentName },
+  assigneeAgent: step.assigneeType === "AGENT" ? SOME_AGENT : null,
   assigneeType: step.assigneeType,
   layer: step.layer,
   approvalGate: step.approvalGate,
@@ -94,7 +119,6 @@ const persistedGeneration = (
 /** One source step as the registry would record it: every field stated as data. */
 const asLegacyRecord = (step: TemplateStepSource): LegacyStepRecord => ({
   name: step.name,
-  agentName: step.agentName,
   assigneeType: (step.agentName === null ? "HUMAN" : "AGENT") as LegacyStepRecord["assigneeType"],
   layer: step.layer,
   approvalGate: step.approvalGate,
@@ -206,7 +230,6 @@ test("a structure-identical generation is decided by its prompt digest alone", (
   // registered prompt generation. This is the case a shape can never express.
   const shape = [{
     name: "Implementation",
-    agentName: "senior-dev",
     assigneeType: "AGENT",
     approvalGate: false,
     outputKind: "implementation",
@@ -219,7 +242,7 @@ test("a structure-identical generation is decided by its prompt digest alone", (
   }] as const;
   const stepsWith = (prompt: string): PersistedTransitionStep[] => [{
     id: "step-1", taskTemplateId: "template", stepIndex: 1, name: "Implementation",
-    assigneeAgent: { name: "senior-dev" }, assigneeType: "AGENT", layer: 1,
+    assigneeAgent: SOME_AGENT, assigneeType: "AGENT", layer: 1,
     approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false,
     optional: false,
     priorOutputKinds: [],
@@ -370,26 +393,7 @@ test("bound direct revalidation is a registered structural rollover", async () =
   });
   assert.equal(generation.successorStepOrdinals?.implementation, 2);
   assert.equal(
-    matchedLegacyGeneration("direct-engineer-workflow", generation.shape.map((step, index) => ({
-      id: `legacy-${String(index + 1)}`,
-      taskTemplateId: "template",
-      stepIndex: index + 1,
-      name: step.name,
-      assigneeAgent: step.agentName === null ? null : { name: step.agentName },
-      assigneeType: step.assigneeType,
-      layer: step.layer,
-      approvalGate: step.approvalGate,
-      optional: false,
-      outputKind: step.outputKind,
-      attachmentsFromPrevious: step.attachmentsFromPrevious,
-      opensPullRequest: step.opensPullRequest,
-      requiresCommit: step.requiresCommit ?? false,
-      provisionDependencies: true,
-      baseFromStepIndex: step.baseFromStepIndex,
-      spawnPolicy: step.spawnPolicy,
-      priorOutputKinds: [],
-      prompt: "retired",
-    }))),
+    matchedLegacyGeneration("direct-engineer-workflow", shapeAsPersisted(generation.shape)),
     "pre-revalidate-step",
   );
   assert.equal(matchedLegacyGeneration("direct-engineer-workflow", asPersisted(current)), null);
@@ -404,10 +408,11 @@ test("the pull-request workflow has a registered prompt-only generation and curr
   assert.equal(generation.shape.length, 4);
   // The retired graph against the current one, field by field through the
   // shared table: its review steps predate opting out of dependency
-  // provisioning, and its fix step predates the Astra-low review-fix Agent.
+  // provisioning. The fix step moved to another Agent in the meantime, which
+  // the retired shape does not read, so it is not a structural difference.
   assert.deepEqual(
     asPersisted(current).map((step, index) => retiredStepShapeDifferences(step, generation.shape[index]!)),
-    [[], ["provisionDependencies"], ["provisionDependencies"], ["agent"]],
+    [[], ["provisionDependencies"], ["provisionDependencies"], []],
   );
   assert.equal(templatePromptGenerationDigest(current), CANONICAL_SOURCE_PROMPT_GENERATIONS[PR_TEMPLATE_NAME]);
   assert.equal(matchedLegacyGeneration(PR_TEMPLATE_NAME, asPersisted(current)), null);
@@ -490,23 +495,25 @@ test("optional review omission is a registered prompt-only rollover in both temp
     assert.notEqual(generation.promptDigest, templatePromptGenerationDigest(current));
     assert.equal(matchedLegacyGeneration(templateName, asPersisted(current)), null);
     // The rows that generation retired carried the outgoing prompts on its
-    // shape: no optional steps, the review steps opting out of dependency
-    // provisioning as the source does, and the fix step still on senior-dev.
+    // shape: no optional steps, and the review steps opting out of dependency
+    // provisioning as the source does. Those rows were staffed differently at
+    // the fix step, which the shape no longer reads either way.
     assert.equal(
       legacyGenerationMatches(
         { marker: generation.marker, shape: generation.shape },
-        asPersisted(current).map((step) => ({
-          ...step,
-          optional: false,
-          assigneeAgent: step.outputKind === "fixed-implementation" ? { name: "senior-dev" } : step.assigneeAgent,
-        })),
+        asPersisted(current).map((step) => ({ ...step, optional: false })),
       ),
       true,
     );
   }
 });
 
-test("the Astra-low review-fix rebinding is a registered structural rollover in every template", async () => {
+test("the Astra-low review-fix generation is kept on record and retired from matching", async () => {
+  // PR #490 registered a generation whose only difference from its successor
+  // was the Agent bound at the fix step. Under a fingerprint that no longer
+  // reads bindings it states the current graph, so it is flagged rather than
+  // deleted: the generation was published, and rows already renamed under its
+  // marker still resolve their identity and Step ordinals through it.
   const sources = await loadAllTemplateStepSources();
   for (const templateName of Object.keys(LEGACY_TEMPLATE_GENERATIONS) as CanonicalTemplateRegistryName[]) {
     const current = sources.get(templateName);
@@ -514,25 +521,84 @@ test("the Astra-low review-fix rebinding is a registered structural rollover in 
     const generation = LEGACY_TEMPLATE_GENERATIONS[templateName].at(-1);
     assert.ok(generation);
     assert.equal(generation.marker, "pre-astra-low-review-fix");
+    assert.equal(generation.retiredByBinding, true, templateName);
     assert.equal(generation.promptDigest, undefined, templateName);
     assert.deepEqual(generation.successorStepOrdinals, canonicalStepOrdinals(templateName, null), templateName);
     const fixIndex = current.findIndex((step) => step.outputKind === "fixed-implementation");
     assert.equal(current[fixIndex]!.agentName, "senior-dev-astra-low", templateName);
+
+    // Every step of the current graph is structurally the retired shape: the
+    // rebinding left no other trace, which is the whole reason for the flag.
     assert.deepEqual(
       asPersisted(current).map((step, index) => retiredStepShapeDifferences(step, generation.shape[index]!)),
-      current.map((_step, index) => (index === fixIndex ? ["agent"] : [])),
+      current.map(() => []),
       templateName,
     );
-    // The deployed rows carry the current prompts on the retired binding, so
-    // the structural entry matches them regardless of prompt digest.
-    assert.equal(
-      matchedLegacyGeneration(templateName, asPersisted(current).map((step) => (
-        step.outputKind === "fixed-implementation" ? { ...step, assigneeAgent: { name: "senior-dev" } } : step
-      ))),
-      "pre-astra-low-review-fix",
-      templateName,
-    );
+    assert.equal(legacyGenerationMatches(generation, asPersisted(current)), false, templateName);
     assert.equal(matchedLegacyGeneration(templateName, asPersisted(current)), null, templateName);
+
+    assert.deepEqual(
+      canonicalTemplateIdentity(legacyTemplateName(templateName, generation.marker, "template-row")),
+      { canonicalName: templateName, generation: generation.marker },
+      templateName,
+    );
+    assert.deepEqual(
+      canonicalStepOrdinals(templateName, generation.marker),
+      generation.successorStepOrdinals,
+      templateName,
+    );
+  }
+});
+
+test("no registered generation matches the current source graph of its template", async () => {
+  // The invariant a binding in the fingerprint used to break: an entry that
+  // matches the graph the source tree holds makes the installer plan a
+  // rollover on every sync, and refuse the whole deploy under any active Run.
+  const sources = await loadAllTemplateStepSources();
+  for (const templateName of Object.keys(LEGACY_TEMPLATE_GENERATIONS) as CanonicalTemplateRegistryName[]) {
+    const current = sources.get(templateName);
+    assert.ok(current, `${templateName} must load from source`);
+    const rows = asPersisted(current);
+    for (const generation of LEGACY_TEMPLATE_GENERATIONS[templateName]) {
+      assert.equal(
+        legacyGenerationMatches(generation, rows),
+        false,
+        `${templateName}:${generation.marker} matches the current source graph`,
+      );
+    }
+    assert.equal(matchedLegacyGeneration(templateName, rows), null, templateName);
+  }
+});
+
+test("two registered generations of one template are never both structural on one graph", () => {
+  // A structural entry -- one with no prompt digest -- claims every row of its
+  // graph. Two of them on one graph, which is what a pair differing only by an
+  // Agent binding now is, cannot be told apart: the second could never match,
+  // and the marker a row rolls over under would be whichever the registry
+  // happens to list first. A digest entry may share a graph with a structural
+  // one, and does: it is the more specific claim, so it is listed ahead of the
+  // structural catch-all for that shape and matches its own rows first.
+  for (const templateName of Object.keys(LEGACY_TEMPLATE_GENERATIONS) as CanonicalTemplateRegistryName[]) {
+    const generations = LEGACY_TEMPLATE_GENERATIONS[templateName]
+      .filter((generation) => generation.retiredByBinding !== true);
+    for (const [index, generation] of generations.entries()) {
+      const rows = shapeAsPersisted(generation.shape);
+      const sameGraph = (other: (typeof generations)[number]): boolean => (
+        generation.shape.length === other.shape.length
+          && rows.every((row, stepIndex) => retiredStepShapeDifferences(row, other.shape[stepIndex]!).length === 0)
+      );
+      for (const other of generations.slice(index + 1)) {
+        if (!sameGraph(other)) continue;
+        assert.ok(
+          generation.promptDigest !== undefined || other.promptDigest !== undefined,
+          `${templateName}: ${generation.marker} and ${other.marker} are both structural on one graph`,
+        );
+        assert.ok(
+          other.promptDigest === undefined || generation.promptDigest !== undefined,
+          `${templateName}: ${other.marker} states a digest but ${generation.marker} claims its graph first`,
+        );
+      }
+    }
   }
 });
 

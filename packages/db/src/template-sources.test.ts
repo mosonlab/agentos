@@ -648,11 +648,11 @@ test("one field table decides both row-vs-spec comparisons", async () => {
   ]);
 
   // The retired-shape reading of the same table: every field is data on the
-  // record, and the prior-output whitelist is deliberately not read, because
-  // its migration is independent of any graph transition.
+  // record, except the two the retired shape deliberately does not read -- the
+  // prior-output whitelist, whose migration is independent of any graph
+  // transition, and the Agent binding, which is staffing rather than structure.
   const record: LegacyStepRecord = {
     name: expected.name,
-    agentName: expected.agentName,
     assigneeType: "AGENT" as LegacyStepRecord["assigneeType"],
     layer: expected.layer,
     approvalGate: expected.approvalGate,
@@ -667,8 +667,13 @@ test("one field table decides both row-vs-spec comparisons", async () => {
   };
   assert.deepEqual(retiredStepShapeDifferences(persisted, record), []);
   assert.deepEqual(retiredStepShapeDifferences({ ...persisted, priorOutputKinds: ["anything"] }, record), []);
+  // A row staffed by any other Agent is still the same retired graph.
+  assert.deepEqual(
+    retiredStepShapeDifferences({ ...persisted, assigneeAgent: { name: "some-other-agent" } }, record),
+    [],
+  );
   assert.deepEqual(retiredStepShapeDifferences(changed, record), [
-    "name", "agent", "assigneeType", "layer", "approvalGate", "optional", "outputKind",
+    "name", "assigneeType", "layer", "approvalGate", "optional", "outputKind",
     "attachmentsFromPrevious", "opensPullRequest", "requiresCommit",
     "provisionDependencies", "baseFromStepIndex", "spawnPolicy",
   ]);
@@ -676,7 +681,6 @@ test("one field table decides both row-vs-spec comparisons", async () => {
   // An omitted field is the documented default, not an unconstrained one.
   const omitted: LegacyStepRecord = {
     name: record.name,
-    agentName: record.agentName,
     assigneeType: record.assigneeType,
     layer: record.layer,
     approvalGate: record.approvalGate,
