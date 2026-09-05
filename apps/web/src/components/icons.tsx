@@ -24,6 +24,11 @@ export const IconGoals = (): ReactNode => (
 export const IconAgents = (): ReactNode => (
   <Svg><rect x="3" y="5.5" width="10" height="8" rx="2" /><path d="M8 2.2v3.3M5.8 9h.01M10.2 9h.01" /></Svg>
 );
+/** Three nodes on a chain — a workflow is an ordered graph of steps, and the
+ *  page it opens is the staffing of that graph. */
+export const IconWorkflows = (): ReactNode => (
+  <Svg><circle cx="3.6" cy="4.4" r="1.6" /><circle cx="12.4" cy="8" r="1.6" /><circle cx="3.6" cy="11.6" r="1.6" /><path d="M5.2 4.4h3.2a1 1 0 0 1 1 1V7M9.4 9v1.6a1 1 0 0 1-1 1H5.2" /></Svg>
+);
 export const IconProjects = (): ReactNode => (
   <Svg><path d="M2 5.2 8 2l6 3.2-6 3.2z" /><path d="m2 10.8 6 3.2 6-3.2M2 8l6 3.2L14 8" /></Svg>
 );

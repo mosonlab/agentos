@@ -24,6 +24,7 @@ import { SessionDetailPage, SessionsPage } from "./pages/Sessions";
 import { TasksPage } from "./pages/Tasks";
 import { TriggerDetailPage, TriggersPage } from "./pages/Triggers";
 import { TaskDetailPage } from "./pages/TaskDetail";
+import { StaffingProfilePage, WorkflowDetailPage, WorkflowsPage } from "./pages/Workflows";
 
 export const ROUTES: Array<{ pattern: string; render: (params: Record<string, string>) => ReactNode }> = [
   { pattern: "/tasks", render: () => <TasksPage /> },
@@ -39,6 +40,11 @@ export const ROUTES: Array<{ pattern: string; render: (params: Record<string, st
   { pattern: "/costs", render: () => <CostsPage /> },
   { pattern: "/agents", render: () => <AgentsPage /> },
   { pattern: "/agents/:agentId", render: (params) => <AgentDetailPage agentId={params.agentId ?? ""} /> },
+  { pattern: "/workflows", render: () => <WorkflowsPage /> },
+  { pattern: "/workflows/:templateId", render: (params) => <WorkflowDetailPage templateId={params.templateId ?? ""} /> },
+  { pattern: "/workflows/:templateId/profiles/:profileId", render: (params) => (
+    <StaffingProfilePage templateId={params.templateId ?? ""} profileId={params.profileId ?? ""} />
+  ) },
   { pattern: "/inbox", render: () => <InboxPage /> },
   { pattern: "/inbox/:messageId", render: (params) => <InboxThreadPage messageId={params.messageId ?? ""} /> },
   { pattern: "/goals", render: () => <GoalsPage /> },
