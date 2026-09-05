@@ -48,6 +48,7 @@ const template = (id: string, name: string, steps: TaskTemplateStep[]): TaskTemp
   name,
   description: "",
   variables: [],
+  retired: false,
   steps,
 });
 

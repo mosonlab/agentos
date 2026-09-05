@@ -17,4 +17,5 @@ process.stdout.write(`RELEASE-ARTIFACT ${JSON.stringify({
   releaseName: result.releaseName,
   revision: result.revision,
   digest: result.digest,
+  cloneAttempts: result.cloneAttempts,
 })}\n`);
