@@ -1,16 +1,18 @@
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 
 import { compare, denseOrdinals, layerOf } from "@anneal/db/chain-order";
 import { gateToggleRefusal } from "@anneal/db/gate-toggle";
 
 import { sha, titleCase } from "../lib/format";
 import { useT } from "../lib/i18n";
+import { findModel, splitModel } from "../lib/models";
 import { parseRepairCycles, type RepairCycleViewModel } from "../lib/repair-subtimeline";
 import { Link } from "../lib/router";
-import type { Chain, ChainStep, TaskActivity } from "../lib/types";
+import type { Agent, Chain, ChainStep, TaskActivity } from "../lib/types";
 import { IconLock, IconUser } from "./icons";
 import { COUNT, HINT, ROW, ROW_WRAP, AgentChip, Card, ErrorNotice, Pill, TaskPill, Toggle } from "./ui";
 import { Button } from "./ui/button";
+import { Select } from "./ui/select";
 import { cn } from "../lib/utils";
 
 /** E3: a chain long enough to bury the current step is a scrolling problem, not
@@ -143,13 +145,82 @@ export const ExecutionOwnerChip = ({ step }: { step: ChainStep }): ReactNode => 
   if (step.executionOwner === "control-plane" || step.executionOwner === "merge-executor") {
     return <span data-execution-owner={step.executionOwner} className={OWNER_CHIP}>{t(`executionOwner.${step.executionOwner}`)}</span>;
   }
-  return <AgentChip agent={null} {...(step.agent ? { name: step.agent.title } : {})} />;
+  return <AgentChip agent={step.agent} />;
+};
+
+/** The Agent fields a staffing picker needs: who the role is, and what running
+ *  it costs. `ChainStep.agent` and `TaskBase.assigneeAgent` both satisfy it. */
+export type ReassignAgent = Pick<Agent, "id" | "title" | "model">;
+
+/** `title · model effort` — the role and the price of running it, which is the
+ *  pair an operator weighs when restaffing. The model half is resolved through
+ *  the shared catalog so the option reads `Claude Opus 5 high` rather than the
+ *  stored `claude-opus-5:high`. */
+export const agentOptionLabel = (agent: Pick<Agent, "title" | "model">): string => {
+  const parsed = splitModel(agent.model);
+  const model = findModel(parsed.model)?.label ?? parsed.model;
+  return parsed.effort === null ? `${agent.title} · ${model}` : `${agent.title} · ${model} ${parsed.effort}`;
+};
+
+/**
+ * The staffing control for one Task, wherever it is rendered.
+ *
+ * The value is the server's until an operator changes it. `draft` then holds
+ * that choice for exactly the round trip: the poll behind this control keeps
+ * answering with the old assignee until the PATCH lands, and reseeding from it
+ * meanwhile would snap the select back under the operator's finger. A refusal —
+ * the 409 the route answers while a Run is live — drops the draft, so the
+ * control never displays a change the control plane rejected.
+ *
+ * `reassignable` is the server's own fact (`ChainStep.reassignable`), and the
+ * disabled state is a courtesy rather than the guard: the PATCH is what decides.
+ */
+export const ReassignSelect = ({ agents, current, reassignable, pending, label, lockedHint, onReassign }: {
+  agents: readonly Agent[];
+  current: ReassignAgent | null;
+  reassignable: boolean;
+  pending: boolean;
+  label: string;
+  lockedHint: string;
+  onReassign: (assigneeAgentId: string) => Promise<boolean>;
+}): ReactNode => {
+  const t = useT();
+  const [draft, setDraft] = useState<string | null>(null);
+  const settled = current?.id ?? "";
+  useEffect(() => {
+    if (draft !== null && draft === settled) setDraft(null);
+  }, [draft, settled]);
+  // The merge sentinel and archived roles are not assignable; the Agent already
+  // on the Task stays listed whatever it is, or the select would show a blank.
+  const assignable = agents.filter((agent) => agent.archivedAt === null && agent.assignable !== false);
+  const options: ReassignAgent[] = current !== null && !assignable.some((agent) => agent.id === current.id)
+    ? [current, ...assignable]
+    : assignable;
+  const choose = (next: string): void => {
+    if (next === settled) return;
+    setDraft(next);
+    void onReassign(next).then((ok) => { if (!ok) setDraft(null); });
+  };
+  return (
+    <Select
+      data-reassign-select=""
+      className="w-[210px] max-w-full"
+      aria-label={label}
+      title={reassignable ? label : lockedHint}
+      value={draft ?? settled}
+      disabled={pending || !reassignable}
+      onChange={(event) => choose(event.target.value)}
+    >
+      {current === null ? <option value="">{t("ui.chip.unassigned")}</option> : null}
+      {options.map((agent) => <option key={agent.id} value={agent.id}>{agentOptionLabel(agent)}</option>)}
+    </Select>
+  );
 };
 
 export const ChainRow = ({
   step, here, pending, blockedBy, heldLayer, repairCycles = [], repairLoading = false,
   repairError = null, onReloadRepairActivities, onStart,
-  onToggleGate,
+  onToggleGate, agents = [], onReassign,
 }: {
   step: ChainStep;
   here: boolean;
@@ -162,6 +233,8 @@ export const ChainRow = ({
   onReloadRepairActivities?: () => void;
   onStart: (step: ChainStep) => void;
   onToggleGate?: (taskId: string, next: boolean) => void;
+  agents?: readonly Agent[];
+  onReassign?: (taskId: string, assigneeAgentId: string) => Promise<boolean>;
 }): ReactNode => {
   const t = useT();
   const blockedOn = step.blockedOn;
@@ -213,6 +286,21 @@ export const ChainRow = ({
         ) : null}
       </span>
       <ExecutionOwnerChip step={step} />
+      {/* Only agent-owned Steps: a human Step's owner is a person and the merge
+          tail's Steps are bound to the mechanical sentinel, so neither has an
+          Agent an operator may pick. Absent `onReassign` the card stays the
+          read-only projection it was. */}
+      {onReassign === undefined || step.executionOwner !== "agent" ? null : (
+        <ReassignSelect
+          agents={agents}
+          current={step.agent}
+          reassignable={step.reassignable}
+          pending={pending}
+          label={t("chain.reassign.label")}
+          lockedHint={t("chain.reassign.locked")}
+          onReassign={(assigneeAgentId) => onReassign(step.taskId, assigneeAgentId)}
+        />
+      )}
       {isGateSlot ? (
         <Toggle
           on={step.approvalGate}
@@ -252,7 +340,7 @@ export const ChainRow = ({
 export const ChainList = ({
   chain, taskId, pending, regressionTaskId, repairActivities, repairActivitiesLoading = false,
   repairActivitiesError = null, onReloadRepairActivities, onStart, onControl,
-  onToggleGate,
+  onToggleGate, agents = [], onReassign,
 }: {
   chain: Chain;
   taskId: string;
@@ -265,6 +353,8 @@ export const ChainList = ({
   onStart: (step: ChainStep) => void;
   onControl?: () => void;
   onToggleGate?: (taskId: string, next: boolean) => void;
+  agents?: readonly Agent[];
+  onReassign?: (taskId: string, assigneeAgentId: string) => Promise<boolean>;
 }): ReactNode => {
   const [all, setAll] = useState(false);
   const t = useT();
@@ -326,6 +416,8 @@ export const ChainList = ({
               {...(onReloadRepairActivities ? { onReloadRepairActivities } : {})}
               onStart={onStart}
               {...(onToggleGate ? { onToggleGate } : {})}
+              agents={agents}
+              {...(onReassign ? { onReassign } : {})}
             />
           ))}
         </section>
