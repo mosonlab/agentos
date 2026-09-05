@@ -5,9 +5,9 @@ type DbTx = Prisma.TransactionClient;
 /**
  * Instantiation omits template steps for two unrelated reasons and stores
  * neither: the conditional revalidation step applies only to a Chain bound to
- * a predecessor task, and a project may skip every step the template marks
- * optional. An omitted step is the absence of a Task row, so the Chain's own
- * task rows are the only witness of it.
+ * a predecessor task, and the staffing resolved for this instantiation may
+ * exclude a step the template marks optional. An omitted step is the absence
+ * of a Task row, so the Chain's own task rows are the only witness of it.
  *
  * This module owns both sides of that one fact. `templateStepInstantiation`
  * decides the omission; `chainStepPresence` reads it back. Absence stays the
@@ -60,13 +60,18 @@ export const chainStepPresence = async (
 };
 
 /** What instantiation knows that decides whether a step is omitted. */
-export type TemplateStepOmissionRules = {
+export type TemplateStepOmissionRules<Step> = {
   /** The template routes implementation; only that family carries the conditional revalidation step. */
   routesImplementation: boolean;
   /** The Chain dispatches on an existing task's completion (`afterTaskId`). */
   boundToPredecessor: boolean;
-  /** The project skips every step its template marks optional. */
-  skipOptionalSteps: boolean;
+  /**
+   * Whether one optional step is kept, decided by the staffing this
+   * instantiation resolved (step override, then staffing profile entry, then
+   * the step's own presence in the template). Called only for steps the
+   * template marks optional; a required step is never asked about.
+   */
+  includesOptionalStep: (step: Step) => boolean;
 };
 
 export type TemplateStepInstantiation<Step> = {
@@ -82,7 +87,7 @@ export type TemplateStepInstantiation<Step> = {
 
 export const templateStepInstantiation = <Step extends { outputKind: string; optional: boolean }>(
   steps: readonly Step[],
-  rules: TemplateStepOmissionRules,
+  rules: TemplateStepOmissionRules<Step>,
 ): TemplateStepInstantiation<Step> => {
   // Exactly one step is conditional, so exactly one ordinal can be dropped:
   // the offset the caller applies to every retained ordinal is one, and a
@@ -93,7 +98,7 @@ export const templateStepInstantiation = <Step extends { outputKind: string; opt
   return {
     instantiated: steps.filter((step) => {
       if (step === conditionalRevalidation) return false;
-      if (rules.skipOptionalSteps && step.optional) return false;
+      if (step.optional && !rules.includesOptionalStep(step)) return false;
       return true;
     }),
     omittedConditionalRevalidation: conditionalRevalidation !== null,

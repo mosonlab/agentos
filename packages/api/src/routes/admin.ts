@@ -24,12 +24,13 @@ import {
   type RouteDeps,
 } from "./support.js";
 
+// Strict: a retired setting must be answered with 400 rather than silently
+// dropped alongside the keys the body did carry.
 const projectPatch = z.object({
   ...projectFields,
   specGateDefault: z.boolean(),
   mergeGateDefault: z.boolean(),
-  skipOptionalSteps: z.boolean(),
-}).partial().refine((value) => Object.keys(value).length > 0);
+}).strict().partial().refine((value) => Object.keys(value).length > 0);
 
 const environmentFields = {
   name: z.string().trim().min(1).max(120),

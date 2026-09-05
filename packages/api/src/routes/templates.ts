@@ -36,7 +36,10 @@ import {
   type RouteDeps,
 } from "./support.js";
 
-const stepOverrideInput = z.object({ assigneeAgentId: id }).strict();
+const stepOverrideInput = z.object({
+  assigneeAgentId: id.optional(),
+  include: z.boolean().optional(),
+}).strict().refine((value) => Object.keys(value).length > 0, "A step override must set assigneeAgentId, include, or both");
 const stepOverridesInput = z.record(z.string(), stepOverrideInput);
 const gatesInput = z.object({
   spec: z.boolean().optional(),
@@ -53,6 +56,7 @@ const instantiateTemplateInput = z.object({
   description: z.string().max(50_000).optional(),
   stepOverrides: stepOverridesInput.optional(),
   gates: gatesInput.optional(),
+  staffingProfileId: id.optional(),
 }).superRefine((value, context) => {
   const branchName = value.variables.branchName;
   if (branchName !== undefined && !isValidBranchName(branchName)) {

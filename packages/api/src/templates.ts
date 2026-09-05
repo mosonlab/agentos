@@ -30,6 +30,16 @@ import {
 } from "./template-errors.js";
 import { serializable } from "./transaction.js";
 
+/**
+ * One per-instantiation change to a single template step. Both members are
+ * optional and independent: an entry may re-assign an agent, decide whether an
+ * optional step is instantiated, or do both.
+ */
+export type StepOverrideInput = {
+  assigneeAgentId?: string | undefined;
+  include?: boolean | undefined;
+};
+
 export type InstantiateTemplateInput = {
   repoId: string;
   variables: Record<string, string>;
@@ -39,22 +49,22 @@ export type InstantiateTemplateInput = {
   description?: string | undefined;
   /** Existing terminal task whose completion will dispatch this chain. */
   afterTaskId?: string | undefined;
-  /** Per-instantiation assignee changes, keyed by template stepIndex. */
-  stepOverrides?: Record<string, { assigneeAgentId: string }> | undefined;
+  /** Per-instantiation assignee and inclusion changes, keyed by template stepIndex. */
+  stepOverrides?: Record<string, StepOverrideInput> | undefined;
   /** Per-instantiation approval-gate changes for the two configurable slots. */
   gates?: { spec?: boolean | undefined; merge?: boolean | undefined } | undefined;
+  /** Staffing profile of this template to resolve assignees and optional steps from. */
+  staffingProfileId?: string | undefined;
 };
 
 type ProjectInstantiationDefaults = {
   specGateDefault: boolean;
   mergeGateDefault: boolean;
-  skipOptionalSteps: boolean;
 };
 
 const DEFAULT_PROJECT_INSTANTIATION_DEFAULTS: ProjectInstantiationDefaults = {
   specGateDefault: false,
   mergeGateDefault: false,
-  skipOptionalSteps: false,
 };
 
 const resolvedApprovalGate = (
@@ -96,12 +106,122 @@ export const findMalformedRouteLine = (description: string | undefined): string 
   return null;
 };
 
+const staffingProfileLine = /^Staffing: (.+)$/mu;
+
+/** Read the machine-readable staffing selection from a brief description. */
+export const parseStaffingProfileName = (description: string | undefined): string | null => {
+  const value = description?.match(staffingProfileLine)?.[1];
+  if (!value) return null;
+  return value.length <= 120 && value.trim() === value ? value : null;
+};
+
+/**
+ * The `Staffing:` counterpart of {@link findMalformedRouteLine}, and for the
+ * same reason: a near-miss that is silently ignored staffs the whole chain from
+ * the template default while the brief author believes their profile applied.
+ */
+export const findMalformedStaffingLine = (description: string | undefined): string | null => {
+  for (const line of (description ?? "").split("\n")) {
+    if (line.startsWith("Staffing:") && parseStaffingProfileName(line) === null) return line;
+  }
+  return null;
+};
+
+/** One resolved staffing decision for the steps that declare `outputKind`. */
+type StaffingProfileEntry = {
+  outputKind: string;
+  assigneeAgentId: string | null;
+  include: boolean | null;
+};
+
+type StaffingProfile = {
+  id: string;
+  name: string;
+  entries: StaffingProfileEntry[];
+};
+
+type StaffingProfileDelegate = {
+  findFirst(args: {
+    where: Record<string, unknown>;
+    select: Record<string, unknown>;
+  }): Promise<StaffingProfile | null>;
+};
+
+const staffingProfileSelect = {
+  id: true,
+  name: true,
+  entries: { select: { outputKind: true, assigneeAgentId: true, include: true } },
+} as const;
+
+/**
+ * TODO(integrator): replace this body with L1's staffing-profile reader once
+ * the `StaffingProfile` model exists; this lane cannot own `schema.prisma`, so
+ * until then the generated client has no `staffingProfile` delegate and every
+ * chain resolves from its canonical bindings exactly as it did before.
+ *
+ * The read happens inside the Serializable callback, after the template row
+ * mutex is held, so the profile a chain is staffed from is the one that
+ * belonged to the graph this chain snapshots.
+ */
+const readStaffingProfile = async (
+  tx: Prisma.TransactionClient,
+  selection: { templateId: string; profileId: string | null; profileName: string | null },
+): Promise<StaffingProfile | null> => {
+  const delegate = (tx as unknown as { staffingProfile?: StaffingProfileDelegate }).staffingProfile;
+  if (delegate === undefined) {
+    // A caller that named a profile must never be answered with the canonical
+    // staffing it did not ask for.
+    if (selection.profileId !== null || selection.profileName !== null) {
+      throw templateRefusal(
+        "staffing_profile_not_found",
+        `Staffing profile ${selection.profileId ?? selection.profileName} was not found on this template`,
+      );
+    }
+    return null;
+  }
+  const byId = selection.profileId === null ? null : await delegate.findFirst({
+    where: { id: selection.profileId, taskTemplateId: selection.templateId },
+    select: staffingProfileSelect,
+  });
+  if (selection.profileId !== null && !byId) {
+    throw templateRefusal(
+      "staffing_profile_not_found",
+      `Staffing profile ${selection.profileId} was not found on this template`,
+    );
+  }
+  const byName = selection.profileName === null ? null : await delegate.findFirst({
+    where: { taskTemplateId: selection.templateId, name: selection.profileName },
+    select: staffingProfileSelect,
+  });
+  if (selection.profileName !== null && !byName) {
+    throw templateRefusal(
+      "staffing_profile_not_found",
+      `Staffing profile ${JSON.stringify(selection.profileName)} was not found on this template`,
+    );
+  }
+  if (byId && byName && byId.id !== byName.id) {
+    throw templateRefusal(
+      "staffing_profile_conflicts_with_selection",
+      `staffingProfileId ${byId.id} conflicts with the Staffing line naming ${JSON.stringify(byName.name)}`,
+    );
+  }
+  const selected = byId ?? byName;
+  if (selected) return selected;
+  return delegate.findFirst({
+    where: { taskTemplateId: selection.templateId, isDefault: true },
+    select: staffingProfileSelect,
+  });
+};
+
 type OverrideAgent = {
   id: string;
   name: string;
   projectId: string;
   archivedAt: Date | null;
 };
+
+/** Which of the three staffing sources decided a step's assignee (R4). */
+type AssigneeSource = "override" | "profile" | "canonical";
 
 type EffectiveTemplateStep = {
   step: {
@@ -120,7 +240,8 @@ type EffectiveTemplateStep = {
     outputKind: string;
     taskTemplate?: { name: string } | null;
   };
-  override: { assigneeAgentId: string } | undefined;
+  override: StepOverrideInput | undefined;
+  assigneeSource: AssigneeSource;
   assigneeAgentId: string | null;
   assigneeAgent: OverrideAgent | EffectiveTemplateStep["step"]["assigneeAgent"];
   approvalGate: boolean;
@@ -279,7 +400,7 @@ export const instantiateTemplate = async (
       `afterTaskId ${input.afterTaskId} cannot be combined with autoStart=true; a bound chain waits for its predecessor`,
     );
   }
-  const requestedStepOverrides: Record<string, { assigneeAgentId: string }> = {
+  const requestedStepOverrides: Record<string, StepOverrideInput> = {
     ...(input.stepOverrides ?? {}),
   };
   const overrideEntries = Object.entries(requestedStepOverrides);
@@ -372,17 +493,41 @@ export const instantiateTemplate = async (
       }
       assertValidBaseReferences(template.steps);
 
+      const malformedStaffingLine = findMalformedStaffingLine(input.description);
+      if (malformedStaffingLine !== null) {
+        throw templateRefusal(
+          "staffing_profile_line_malformed",
+          `Malformed Staffing line ${JSON.stringify(malformedStaffingLine)}; expected "Staffing: <profile name>"`,
+        );
+      }
+      const staffingProfile = await readStaffingProfile(tx, {
+        templateId: template.id,
+        profileId: input.staffingProfileId ?? null,
+        profileName: parseStaffingProfileName(input.description),
+      });
+      // R2: entries key on the exact outputKind; a normalised kind is only a
+      // rollover fallback and never a lookup key here.
+      const staffingEntryOf = (outputKind: string): StaffingProfileEntry | undefined => (
+        staffingProfile?.entries.find((entry) => entry.outputKind === outputKind)
+      );
+
       const instantiation = templateStepInstantiation(template.steps, {
         routesImplementation: consumesImplementationRoute,
         boundToPredecessor: Boolean(input.afterTaskId),
-        skipOptionalSteps: projectInstantiationDefaults.skipOptionalSteps,
+        // R4 for inclusion: explicit override, then the selected profile, then
+        // the template's own declaration that the step exists.
+        includesOptionalStep: (step) => {
+          const override = requestedStepOverrides[String(step.stepIndex)];
+          if (override?.include !== undefined) return override.include;
+          return staffingEntryOf(step.outputKind)?.include ?? true;
+        },
       });
       const instantiatedTemplateSteps = instantiation.instantiated;
       if (instantiatedTemplateSteps.length === 0) {
         throw templateRefusal("template_has_no_instantiable_steps", "Template has no instantiable steps");
       }
 
-      let effectiveStepOverrides: Record<string, { assigneeAgentId: string }> = {
+      let effectiveStepOverrides: Record<string, StepOverrideInput> = {
         ...requestedStepOverrides,
       };
       let routedImplementationStepIndex: number | null = null;
@@ -393,7 +538,10 @@ export const instantiateTemplate = async (
         }));
         if (implementationStep) {
           const stepKey = String(implementationStep.stepIndex);
-          if (effectiveStepOverrides[stepKey]) {
+          // R4: the Route line conflicts with an explicit assignee override for
+          // that step and with nothing else. An include-only override decides a
+          // different question, and the selected profile always loses to it.
+          if (effectiveStepOverrides[stepKey]?.assigneeAgentId !== undefined) {
             throw templateRefusal(
               "implementation_route_conflicts_with_step_override",
               `Implementation Route conflicts with explicit stepOverrides entry ${stepKey}`,
@@ -408,7 +556,7 @@ export const instantiateTemplate = async (
           }
           effectiveStepOverrides = {
             ...effectiveStepOverrides,
-            [stepKey]: { assigneeAgentId: routeAgent.id },
+            [stepKey]: { ...effectiveStepOverrides[stepKey], assigneeAgentId: routeAgent.id },
           };
           routedImplementationStepIndex = implementationStep.stepIndex;
           if (Object.keys(effectiveStepOverrides).length > 64) {
@@ -422,21 +570,39 @@ export const instantiateTemplate = async (
 
       const overrideEntries = Object.entries(effectiveStepOverrides);
       const templateStepsByIndex = new Map(template.steps.map((step) => [String(step.stepIndex), step]));
-      for (const [stepIndex] of overrideEntries) {
-        if (!templateStepsByIndex.has(stepIndex)) {
+      for (const [stepIndex, override] of overrideEntries) {
+        const overriddenStep = templateStepsByIndex.get(stepIndex);
+        if (!overriddenStep) {
           throw templateRefusal(
             "step_override_unknown_step",
             `Step override names unknown template step ${stepIndex}`,
           );
         }
+        // A step the template requires is always instantiated, so an inclusion
+        // decision about it would be quietly discarded.
+        if (override.include !== undefined && !overriddenStep.optional) {
+          throw templateRefusal(
+            "step_override_include_not_optional",
+            `Step override ${stepIndex} sets include on ${overriddenStep.name}, which the template does not mark optional`,
+          );
+        }
       }
-      const overrideAgentIds = [...new Set(overrideEntries.map(([, override]) => override.assigneeAgentId))].sort();
+      const overrideAgentIds = overrideEntries.flatMap(
+        ([, override]) => (override.assigneeAgentId === undefined ? [] : [override.assigneeAgentId]),
+      );
       const effectiveSteps = instantiatedTemplateSteps.map((step): EffectiveTemplateStep => {
         const override = effectiveStepOverrides[String(step.stepIndex)];
+        // R4: explicit override, then the selected profile, then the canonical
+        // binding the template step carries.
+        const profileAgentId = staffingEntryOf(step.outputKind)?.assigneeAgentId ?? null;
+        const assigneeSource: AssigneeSource = override?.assigneeAgentId !== undefined
+          ? "override"
+          : profileAgentId !== null ? "profile" : "canonical";
         return {
           step,
           override,
-          assigneeAgentId: override?.assigneeAgentId ?? step.assigneeAgentId,
+          assigneeSource,
+          assigneeAgentId: override?.assigneeAgentId ?? profileAgentId ?? step.assigneeAgentId,
           // The relation on the graph read is intentionally not trusted for
           // assignment decisions. It is replaced with the Agent-row-locked
           // value below before any Task is written.
@@ -544,27 +710,55 @@ export const instantiateTemplate = async (
         const canonicalAgentIds = effectiveSteps.flatMap((effective) => (
           effective.step.assigneeAgentId ? [effective.step.assigneeAgentId] : []
         ));
+        // Profile bindings take the same mutex as canonical and overridden
+        // ones: a profile agent archived between the profile read and the
+        // Task inserts must be refused, not written.
+        const profileAgentIds = (staffingProfile?.entries ?? []).flatMap(
+          (entry) => (entry.assigneeAgentId === null ? [] : [entry.assigneeAgentId]),
+        );
         const lockedAgents = await lockAgentRows(
           tx,
-          [...new Set([...canonicalAgentIds, ...overrideAgentIds])].sort(),
+          [...new Set([...canonicalAgentIds, ...overrideAgentIds, ...profileAgentIds])].sort(),
         );
         for (const effective of effectiveSteps) {
-          const { step, override, assigneeAgentId } = effective;
+          const { step, override, assigneeAgentId, assigneeSource } = effective;
+          const overridesAssignee = assigneeSource === "override";
+          const fromProfile = assigneeSource === "profile";
           const lockedAgent = assigneeAgentId ? lockedAgents.get(assigneeAgentId) : undefined;
           const assigneeAgent = lockedAgent && assigneeAgentId && lockedAgent.projectId === projectId
             ? { id: assigneeAgentId, ...lockedAgent }
             : null;
           effective.assigneeAgent = assigneeAgent;
-          if (override && step.assigneeType !== AssigneeType.AGENT) {
+          if (override?.assigneeAgentId !== undefined && step.assigneeType !== AssigneeType.AGENT) {
             throw templateRefusal(
               "step_override_step_not_agent",
               `Step override ${step.stepIndex} targets ${step.name}, whose assigneeType is ${step.assigneeType}; only AGENT steps may be overridden`,
             );
           }
-          if (override && !assigneeAgent) {
+          if (fromProfile && step.assigneeType !== AssigneeType.AGENT) {
+            throw templateRefusal(
+              "staffing_profile_step_not_agent",
+              `Staffing profile ${staffingProfile?.name} binds ${step.name}, whose assigneeType is ${step.assigneeType}; only AGENT steps may be staffed`,
+            );
+          }
+          if (overridesAssignee && !assigneeAgent) {
             throw templateRefusal(
               "step_override_agent_not_found",
-              `Override agent ${override.assigneeAgentId} for step ${step.stepIndex} was not found in this project`,
+              `Override agent ${override?.assigneeAgentId} for step ${step.stepIndex} was not found in this project`,
+            );
+          }
+          if (fromProfile && !assigneeAgent) {
+            // The two failures are distinguishable under the lock and mean
+            // different repairs: delete the entry, or re-point it in project.
+            if (lockedAgent) {
+              throw templateRefusal(
+                "staffing_profile_agent_foreign",
+                `Staffing profile ${staffingProfile?.name} binds step ${step.stepIndex} to agent ${assigneeAgentId}, which belongs to another project`,
+              );
+            }
+            throw templateRefusal(
+              "staffing_profile_agent_not_found",
+              `Staffing profile ${staffingProfile?.name} binds step ${step.stepIndex} to agent ${assigneeAgentId}, which was not found`,
             );
           }
           if (step.assigneeType === AssigneeType.AGENT && !assigneeAgent) {
@@ -580,17 +774,29 @@ export const instantiateTemplate = async (
             taskTemplateName: template.name,
           });
           if (bindingRefusal) {
-            if (override) throw templateRefusal("step_override_integrator_binding", `Template step ${step.name}: ${bindingRefusal}`);
+            if (overridesAssignee) throw templateRefusal("step_override_integrator_binding", `Template step ${step.name}: ${bindingRefusal}`);
+            if (fromProfile) {
+              throw templateRefusal(
+                "staffing_profile_integrator_binding",
+                `Staffing profile ${staffingProfile?.name}, template step ${step.name}: ${bindingRefusal}`,
+              );
+            }
             throw templateRefusal(
               "template_integrator_binding_invalid",
               `Template step ${step.name}: ${bindingRefusal}`,
             );
           }
           if (assigneeAgent?.archivedAt) {
-            if (override) {
+            if (overridesAssignee) {
               throw templateRefusal(
                 "step_override_agent_archived",
                 `Override agent ${assigneeAgent.name} (${assigneeAgent.id}) for step ${step.stepIndex} is archived`,
+              );
+            }
+            if (fromProfile) {
+              throw templateRefusal(
+                "staffing_profile_agent_archived",
+                `Staffing profile ${staffingProfile?.name} agent ${assigneeAgent.name} (${assigneeAgent.id}) for step ${step.stepIndex} is archived`,
               );
             }
             throw templateRefusal(
@@ -613,7 +819,13 @@ export const instantiateTemplate = async (
             { stepIndex: step.stepIndex, outputKind: step.outputKind, taskTemplate: { name: template.name } },
           )) {
             const message = `Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner (step ${step.stepIndex})`;
-            if (override) throw templateRefusal("step_override_compound_implementation", message);
+            if (overridesAssignee) throw templateRefusal("step_override_compound_implementation", message);
+            if (fromProfile) {
+              throw templateRefusal(
+                "staffing_profile_compound_implementation",
+                `Staffing profile ${staffingProfile?.name}: ${message}`,
+              );
+            }
             throw templateRefusal("template_compound_implementation_assignee_invalid", message);
           }
         }
@@ -625,10 +837,16 @@ export const instantiateTemplate = async (
           if (!granted) {
             const effective = effectiveSteps.find((candidate) => candidate.assigneeAgentId === agentId);
             const agentName = effective?.assigneeAgent?.name ?? agentId;
-            if (effective?.override) {
+            if (effective?.assigneeSource === "override") {
               throw templateRefusal(
                 "step_override_missing_repo_grant",
                 `Override agent ${agentName} (${agentId}) for step ${effective.step.stepIndex} has no grant for Repo ${repo.name}`,
+              );
+            }
+            if (effective?.assigneeSource === "profile") {
+              throw templateRefusal(
+                "staffing_profile_missing_repo_grant",
+                `Staffing profile ${staffingProfile?.name} agent ${agentName} (${agentId}) for step ${effective.step.stepIndex} has no grant for Repo ${repo.name}`,
               );
             }
             throw templateRefusal(
@@ -687,6 +905,13 @@ export const instantiateTemplate = async (
           metadata: {
             chainId,
             templateId: template.id,
+            // The chain root carries the staffing provenance: the profile is
+            // read once and snapshotted into the tasks, so this is the only
+            // record of which profile produced these assignees.
+            ...(index === 0 && staffingProfile ? {
+              staffingProfileId: staffingProfile.id,
+              staffingProfileName: staffingProfile.name,
+            } : {}),
             ...(predecessor ? {
               afterTaskId: predecessor.id,
               dispatchAfterTaskId: predecessor.id,

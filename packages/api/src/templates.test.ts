@@ -20,8 +20,10 @@ import {
 import {
   composeTemplateTaskDescription,
   findMalformedRouteLine,
+  findMalformedStaffingLine,
   instantiateTemplate,
   parseImplementationRoute,
+  parseStaffingProfileName,
   triggerInstantiationName,
 } from "./templates.js";
 import { readBrief } from "./task-brief.js";
@@ -92,6 +94,22 @@ test("implementation route parsing accepts the machine-readable name before an o
   assert.equal(findMalformedRouteLine("Route: implementation=senior-dev "), "Route: implementation=senior-dev ");
   assert.equal(findMalformedRouteLine("Build it\nRoute:implementation=senior-dev"), "Route:implementation=senior-dev");
   assert.equal(findMalformedRouteLine(undefined), null);
+});
+
+test("staffing profile selection reads one line and refuses every near-miss of it", () => {
+  assert.equal(parseStaffingProfileName("Build it\nStaffing: Weekend crew\n"), "Weekend crew");
+  assert.equal(parseStaffingProfileName("Staffing: Default"), "Default");
+  assert.equal(parseStaffingProfileName("Staffing: a - b"), "a - b");
+  assert.equal(parseStaffingProfileName("Staffing: "), null);
+  assert.equal(parseStaffingProfileName("Staffing: Weekend crew "), null);
+  assert.equal(parseStaffingProfileName(`Staffing: ${"n".repeat(121)}`), null);
+  assert.equal(parseStaffingProfileName(undefined), null);
+  assert.equal(findMalformedStaffingLine("Build it\nStaffing: Weekend crew\n"), null);
+  assert.equal(findMalformedStaffingLine("Staffing:Weekend crew"), "Staffing:Weekend crew");
+  assert.equal(findMalformedStaffingLine("Staffing: "), "Staffing: ");
+  assert.equal(findMalformedStaffingLine("Staffing: Weekend crew "), "Staffing: Weekend crew ");
+  assert.equal(findMalformedStaffingLine("Build it\nstaffing: Weekend crew"), null);
+  assert.equal(findMalformedStaffingLine(undefined), null);
 });
 
 test("a direct brief ending in the prior-output reminder round-trips without truncation", () => {
@@ -887,7 +905,7 @@ test("instantiation resolves only the two gate slots from overrides then project
     },
   ];
   const template = { id: "template-gates", name: "compound-fixture", variables: [], steps };
-  const projectDefaults = { specGateDefault: false, mergeGateDefault: false, skipOptionalSteps: false };
+  const projectDefaults = { specGateDefault: false, mergeGateDefault: false };
   const created: Array<Record<string, unknown>> = [];
   const tx = {
     $queryRaw: async (query: TemplateStringsArray | Prisma.Sql) => {
@@ -916,15 +934,15 @@ test("instantiation resolves only the two gate slots from overrides then project
   } as unknown as PrismaClient;
 
   const instantiate = async (
-    defaults: { specGateDefault: boolean; mergeGateDefault: boolean; skipOptionalSteps?: boolean },
+    defaults: { specGateDefault: boolean; mergeGateDefault: boolean },
     gates?: { spec?: boolean; merge?: boolean },
+    stepOverrides?: Record<string, { assigneeAgentId?: string; include?: boolean }>,
   ) => {
     projectDefaults.specGateDefault = defaults.specGateDefault;
     projectDefaults.mergeGateDefault = defaults.mergeGateDefault;
-    projectDefaults.skipOptionalSteps = defaults.skipOptionalSteps ?? false;
     created.length = 0;
     return instantiateTemplate(db, "project-1", template.id, {
-      repoId: "repo-1", variables: {}, autoStart: false, name: "gate matrix", gates,
+      repoId: "repo-1", variables: {}, autoStart: false, name: "gate matrix", gates, stepOverrides,
     });
   };
 
@@ -950,11 +968,11 @@ test("instantiation resolves only the two gate slots from overrides then project
     assert.deepEqual(result.tasks.map((task) => task.approvalGate), [specGate, true, true, mergeGate]);
   }
 
-  const sparse = await instantiate({
-    specGateDefault: false,
-    mergeGateDefault: false,
-    skipOptionalSteps: true,
-  });
+  const sparse = await instantiate(
+    { specGateDefault: false, mergeGateDefault: false },
+    undefined,
+    { "2": { include: false } },
+  );
   assert.deepEqual(sparse.tasks.map((task) => task.chainIndex), [1, 3, 4]);
   assert.deepEqual(sparse.tasks.map((task) => task.chainLayer), [1, 3, 4]);
   assert.deepEqual(sparse.tasks.map((task) => task.name), [
@@ -1009,4 +1027,323 @@ test("instantiate refuses absent gate slots before creating any task and checks 
     );
     assert.equal(created.length, 0, `${slot} refusal must not partially materialize a chain`);
   }
+});
+
+/**
+ * The staffing fixture below drives `instantiateTemplate` through a stubbed
+ * transaction. It is the only proof of R4's three-way precedence available in
+ * this lane: `packages/db/prisma/schema.prisma` belongs to the profile-model
+ * lane, so the generated client here has no `StaffingProfile` delegate and
+ * `staffing-precedence.dbtest.ts` cannot run until that model lands.
+ */
+type FixtureProfile = {
+  id: string;
+  name: string;
+  taskTemplateId: string;
+  isDefault: boolean;
+  entries: Array<{ outputKind: string; assigneeAgentId: string | null; include: boolean | null }>;
+};
+
+const staffingFixture = (options: {
+  templateName?: string;
+  profiles?: FixtureProfile[];
+  agentOverrides?: Record<string, Partial<{ projectId: string; archivedAt: Date | null }>>;
+  grantedAgentIds?: string[];
+} = {}) => {
+  const templateId = "template-staffing";
+  const agentRow = (id: string) => ({
+    id,
+    name: id,
+    projectId: "project-1",
+    archivedAt: null as Date | null,
+    model: "gpt-5-codex",
+    runnerPreference: RunnerPreference.CODEX,
+    codexServiceTier: CodexServiceTier.DEFAULT,
+    foundationalPrompt: "foundation",
+    rolePrompt: "role",
+    ...options.agentOverrides?.[id],
+  });
+  const agents = ["agent-canonical", "agent-profile", "agent-override"].map(agentRow);
+  const step = (stepIndex: number, name: string, outputKind: string, optional: boolean) => ({
+    id: `step-${stepIndex}`,
+    stepIndex,
+    name,
+    prompt: `${name} prompt`,
+    outputKind,
+    attachmentsFromPrevious: false,
+    priorOutputKinds: [] as string[],
+    assigneeType: AssigneeType.AGENT,
+    assigneeAgentId: "agent-canonical",
+    assigneeAgent: agents[0],
+    approvalGate: false,
+    opensPullRequest: false,
+    layer: stepIndex,
+    baseFromStepIndex: null,
+    runner: null,
+    optional,
+  });
+  const template = {
+    id: templateId,
+    name: options.templateName ?? "staffing-fixture",
+    variables: [] as string[],
+    steps: [
+      step(1, "Implementation", "implementation", false),
+      step(2, "Blind review", "blind-findings", true),
+      step(3, "Fix", "fixed-implementation", false),
+    ],
+  };
+  const profiles = options.profiles ?? [];
+  const granted = new Set(options.grantedAgentIds ?? agents.map(({ id }) => id));
+  const created: Array<Record<string, unknown>> = [];
+  const activities: Array<Record<string, unknown>> = [];
+  const matches = (profile: FixtureProfile, where: Record<string, unknown>): boolean => (
+    Object.entries(where).every(([key, value]) => (profile as unknown as Record<string, unknown>)[key] === value)
+  );
+  const tx = {
+    $queryRaw: async (query: TemplateStringsArray | Prisma.Sql, ...bound: unknown[]) => {
+      const sql = "sql" in query ? query.sql : query.join(" ");
+      const values = "sql" in query ? query.values as unknown[] : bound;
+      if (sql.includes('"TaskTemplate"')) return [{ id: template.id, projectId: "project-1", name: template.name }];
+      if (sql.includes('"Project"')) return [{ id: "project-1", specGateDefault: false, mergeGateDefault: false }];
+      if (sql.includes('"AgentRepoAccess"')) {
+        const agentId = values[1] as string | undefined;
+        return agentId !== undefined && granted.has(agentId) ? [{ agentId, repoId: "repo-1" }] : [];
+      }
+      if (sql.includes('"Agent"')) {
+        const requested = new Set(values[0] as string[]);
+        return agents.filter(({ id }) => requested.has(id));
+      }
+      return [];
+    },
+    project: {},
+    staffingProfile: {
+      findFirst: async ({ where }: { where: Record<string, unknown> }) => (
+        profiles.find((profile) => matches(profile, where)) ?? null
+      ),
+    },
+    taskTemplate: { findFirst: async () => template },
+    repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
+    agentRepoAccess: { count: async () => 1 },
+    task: {
+      create: async ({ data }: { data: Record<string, unknown> }) => {
+        const task = { id: `task-${created.length + 1}`, ...data };
+        created.push(task);
+        return task;
+      },
+    },
+    taskActivity: {
+      createMany: async ({ data }: { data: Array<Record<string, unknown>> }) => {
+        activities.push(...data);
+        return { count: data.length };
+      },
+    },
+  };
+  const db = {
+    agent: {
+      findFirst: async ({ where }: { where: { name: string } }) => agents.find(({ name }) => name === where.name) ?? null,
+    },
+    $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
+  } as unknown as PrismaClient;
+  const instantiate = (input: Partial<Parameters<typeof instantiateTemplate>[3]> = {}) => {
+    created.length = 0;
+    activities.length = 0;
+    return instantiateTemplate(db, "project-1", templateId, {
+      repoId: "repo-1", variables: {}, name: "staffing chain", ...input,
+    });
+  };
+  return { templateId, instantiate, activities, created };
+};
+
+const defaultProfile = (taskTemplateId: string, entries: FixtureProfile["entries"]): FixtureProfile => ({
+  id: "profile-default", name: "Default", taskTemplateId, isDefault: true, entries,
+});
+
+test("instantiation staffs each step from the override, then the profile, then the canonical binding", async () => {
+  const fixture = staffingFixture({
+    profiles: [defaultProfile("template-staffing", [
+      { outputKind: "implementation", assigneeAgentId: "agent-profile", include: null },
+      { outputKind: "blind-findings", assigneeAgentId: "agent-profile", include: true },
+    ])],
+  });
+
+  const staffed = await fixture.instantiate();
+  assert.deepEqual(staffed.tasks.map((task) => task.assigneeAgentId), [
+    "agent-profile",
+    "agent-profile",
+    "agent-canonical",
+  ]);
+
+  const overridden = await fixture.instantiate({
+    stepOverrides: { "1": { assigneeAgentId: "agent-override" }, "3": { assigneeAgentId: "agent-override" } },
+  });
+  assert.deepEqual(overridden.tasks.map((task) => task.assigneeAgentId), [
+    "agent-override",
+    "agent-profile",
+    "agent-override",
+  ]);
+});
+
+test("optional-step inclusion resolves override, then profile, then the template's own declaration", async () => {
+  const excluding = staffingFixture({
+    profiles: [defaultProfile("template-staffing", [
+      { outputKind: "blind-findings", assigneeAgentId: null, include: false },
+    ])],
+  });
+  const skipped = await excluding.instantiate();
+  assert.deepEqual(skipped.tasks.map((task) => task.chainIndex), [1, 3]);
+
+  const kept = await excluding.instantiate({ stepOverrides: { "2": { include: true } } });
+  assert.deepEqual(kept.tasks.map((task) => task.chainIndex), [1, 2, 3]);
+
+  const unstaffed = staffingFixture();
+  const canonical = await unstaffed.instantiate();
+  assert.deepEqual(canonical.tasks.map((task) => task.chainIndex), [1, 2, 3]);
+  assert.deepEqual(canonical.tasks.map((task) => task.assigneeAgentId), [
+    "agent-canonical",
+    "agent-canonical",
+    "agent-canonical",
+  ]);
+
+  const dropped = await unstaffed.instantiate({ stepOverrides: { "2": { include: false } } });
+  assert.deepEqual(dropped.tasks.map((task) => task.chainIndex), [1, 3]);
+});
+
+test("a template whose profiles were all deleted instantiates from its canonical bindings", async () => {
+  const withoutProfiles = staffingFixture({ profiles: [] });
+  const chain = await withoutProfiles.instantiate();
+  assert.deepEqual(chain.tasks.map((task) => task.assigneeAgentId), [
+    "agent-canonical",
+    "agent-canonical",
+    "agent-canonical",
+  ]);
+  assert.ok(withoutProfiles.activities.every(
+    (activity) => !Object.hasOwn(activity.metadata as Record<string, unknown>, "staffingProfileId"),
+  ));
+});
+
+test("the chain root activity records which staffing profile produced the assignees", async () => {
+  const fixture = staffingFixture({
+    profiles: [defaultProfile("template-staffing", [
+      { outputKind: "implementation", assigneeAgentId: "agent-profile", include: null },
+    ])],
+  });
+  await fixture.instantiate();
+  const metadata = fixture.activities.map((activity) => activity.metadata as Record<string, unknown>);
+  assert.equal(metadata[0]!.staffingProfileId, "profile-default");
+  assert.equal(metadata[0]!.staffingProfileName, "Default");
+  // Every later step reads its staffing from its own Task row; repeating the
+  // provenance there would create a second, divergeable record of it.
+  for (const later of metadata.slice(1)) assert.equal(later.staffingProfileId, undefined);
+});
+
+test("a named staffing profile is selected by id or by the brief line, and a wrong name refuses", async () => {
+  const profiles: FixtureProfile[] = [
+    defaultProfile("template-staffing", [
+      { outputKind: "implementation", assigneeAgentId: "agent-canonical", include: null },
+    ]),
+    {
+      id: "profile-weekend",
+      name: "Weekend crew",
+      taskTemplateId: "template-staffing",
+      isDefault: false,
+      entries: [{ outputKind: "implementation", assigneeAgentId: "agent-profile", include: null }],
+    },
+  ];
+  const fixture = staffingFixture({ profiles });
+
+  const byId = await fixture.instantiate({ staffingProfileId: "profile-weekend" });
+  assert.equal(byId.tasks[0]!.assigneeAgentId, "agent-profile");
+
+  const byLine = await fixture.instantiate({ description: "Do it\nStaffing: Weekend crew\n" });
+  assert.equal(byLine.tasks[0]!.assigneeAgentId, "agent-profile");
+
+  // A profile of another template is not addressable from this one.
+  await assertTemplateRefusal(
+    () => fixture.instantiate({ staffingProfileId: "profile-of-another-template" }),
+    "staffing_profile_not_found",
+  );
+  await assertTemplateRefusal(
+    () => fixture.instantiate({ description: "Staffing: Night crew" }),
+    "staffing_profile_not_found",
+  );
+  await assertTemplateRefusal(
+    () => fixture.instantiate({ description: "Staffing:Weekend crew" }),
+    "staffing_profile_line_malformed",
+  );
+  await assertTemplateRefusal(
+    () => fixture.instantiate({ staffingProfileId: "profile-default", description: "Staffing: Weekend crew" }),
+    "staffing_profile_conflicts_with_selection",
+  );
+});
+
+test("a profile that names an unusable agent refuses with its own code, never the template's", async () => {
+  const entries = [{ outputKind: "implementation", assigneeAgentId: "agent-profile", include: null }];
+  const archived = staffingFixture({
+    profiles: [defaultProfile("template-staffing", entries)],
+    agentOverrides: { "agent-profile": { archivedAt: new Date("2026-09-01T00:00:00.000Z") } },
+  });
+  await assertTemplateRefusal(() => archived.instantiate(), "staffing_profile_agent_archived");
+
+  const foreign = staffingFixture({
+    profiles: [defaultProfile("template-staffing", entries)],
+    agentOverrides: { "agent-profile": { projectId: "project-2" } },
+  });
+  await assertTemplateRefusal(() => foreign.instantiate(), "staffing_profile_agent_foreign");
+
+  const missing = staffingFixture({
+    profiles: [defaultProfile("template-staffing", [
+      { outputKind: "implementation", assigneeAgentId: "agent-deleted", include: null },
+    ])],
+  });
+  await assertTemplateRefusal(() => missing.instantiate(), "staffing_profile_agent_not_found");
+
+  const ungranted = staffingFixture({
+    profiles: [defaultProfile("template-staffing", entries)],
+    grantedAgentIds: ["agent-canonical", "agent-override"],
+  });
+  await assertTemplateRefusal(() => ungranted.instantiate(), "staffing_profile_missing_repo_grant");
+});
+
+test("an inclusion decision about a required step is refused rather than discarded", async () => {
+  const fixture = staffingFixture();
+  await assertTemplateRefusal(
+    () => fixture.instantiate({ stepOverrides: { "1": { include: false } } }),
+    "step_override_include_not_optional",
+  );
+});
+
+test("a Route line coexists with a profile and conflicts only with an explicit assignee override", async () => {
+  const profiles = [defaultProfile("template-staffing", [
+    { outputKind: "implementation", assigneeAgentId: "agent-profile", include: null },
+    { outputKind: "fixed-implementation", assigneeAgentId: "agent-profile", include: null },
+  ])];
+  const fixture = staffingFixture({ templateName: "direct-engineer-workflow", profiles });
+
+  // The Route line beats the profile for the implementation step and leaves
+  // every other step staffed by that same profile.
+  const routed = await fixture.instantiate({ description: "Do it\nRoute: implementation=agent-override" });
+  assert.deepEqual(routed.tasks.map((task) => task.assigneeAgentId), [
+    "agent-override",
+    "agent-canonical",
+    "agent-profile",
+  ]);
+
+  // An include-only override answers a different question, so it does not
+  // conflict with the Route line.
+  const withInclude = await fixture.instantiate({
+    description: "Route: implementation=agent-override",
+    stepOverrides: { "2": { include: false } },
+  });
+  assert.deepEqual(withInclude.tasks.map((task) => task.assigneeAgentId), [
+    "agent-override",
+    "agent-profile",
+  ]);
+
+  await assertTemplateRefusal(
+    () => fixture.instantiate({
+      description: "Route: implementation=agent-override",
+      stepOverrides: { "1": { assigneeAgentId: "agent-profile" } },
+    }),
+    "implementation_route_conflicts_with_step_override",
+  );
 });

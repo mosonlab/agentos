@@ -80,15 +80,24 @@ const coordinates = (tasks: Array<{ chainIndex: number | null; chainLayer: numbe
   layers: tasks.map(({ chainLayer }) => chainLayer),
 });
 
+/** The stepIndex of the one optional step a canonical template declares. */
+const optionalStepIndex = async (taskTemplateId: string): Promise<number> => (
+  (await db.taskTemplateStep.findFirstOrThrow({
+    where: { taskTemplateId, optional: true },
+    select: { stepIndex: true },
+  })).stepIndex
+);
+
 test("direct instantiation snapshots optional omission and preserves sparse template ordinals", async () => {
   const seed = await install();
-  const instantiateDirect = async (skipOptionalSteps: boolean, bound: boolean) => {
-    await db.project.update({ where: { id: seed.project.id }, data: { skipOptionalSteps } });
+  const optionalStep = await optionalStepIndex(seed.direct.id);
+  const instantiateDirect = async (skip: boolean, bound: boolean) => {
     const predecessor = bound ? await predecessorFor(seed.project.id, seed.repo.id) : null;
     return instantiateTemplate(db, seed.project.id, seed.direct.id, {
       repoId: seed.repo.id,
-      variables: variablesFor(seed.direct, `${skipOptionalSteps ? "skip" : "keep"}-${bound ? "bound" : "unbound"}`),
-      name: `direct ${skipOptionalSteps ? "skip" : "keep"} ${bound ? "bound" : "unbound"}`,
+      variables: variablesFor(seed.direct, `${skip ? "skip" : "keep"}-${bound ? "bound" : "unbound"}`),
+      name: `direct ${skip ? "skip" : "keep"} ${bound ? "bound" : "unbound"}`,
+      ...(skip ? { stepOverrides: { [String(optionalStep)]: { include: false } } } : {}),
       ...(predecessor ? { afterTaskId: predecessor.id } : {}),
     });
   };
@@ -136,17 +145,18 @@ test("direct instantiation snapshots optional omission and preserves sparse temp
     layers: [1, 2, 3, 4, 5, 6, 7],
   });
 
-  await db.project.update({ where: { id: seed.project.id }, data: { skipOptionalSteps: false } });
+  // The omission is a snapshot: nothing outside this chain can put the step
+  // back into it, because the absent Task row is the only record of it.
   assert.equal(await db.task.count({ where: { chainId: skippedUnbound.chainId } }), 6);
 });
 
 test("compound omission preserves exact-ordinal merge predecessors and retained base references", async () => {
   const seed = await install();
-  await db.project.update({ where: { id: seed.project.id }, data: { skipOptionalSteps: true } });
   const chain = await instantiateTemplate(db, seed.project.id, seed.compound.id, {
     repoId: seed.repo.id,
     variables: variablesFor(seed.compound, "compound"),
     name: "compound optional omission",
+    stepOverrides: { [String(await optionalStepIndex(seed.compound.id))]: { include: false } },
   });
   assert.equal(chain.tasks.length, 11);
   assert.equal(await db.task.count({

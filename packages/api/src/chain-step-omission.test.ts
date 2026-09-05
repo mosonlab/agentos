@@ -16,11 +16,19 @@ const directSteps = [
 
 const kinds = (steps: Array<{ outputKind: string }>): string[] => steps.map((step) => step.outputKind);
 
+/** Staffing that keeps every optional step, the shape of an unstaffed chain. */
+const keepsEveryOptionalStep = (): boolean => true;
+
+/** Staffing that excludes the named optional kinds and keeps the rest. */
+const excluding = (...outputKinds: string[]) => (step: { outputKind: string }): boolean => (
+  !outputKinds.includes(step.outputKind)
+);
+
 test("instantiation omits the conditional revalidation step only when the chain is unbound", () => {
   const unbound = templateStepInstantiation(directSteps, {
     routesImplementation: true,
     boundToPredecessor: false,
-    skipOptionalSteps: false,
+    includesOptionalStep: keepsEveryOptionalStep,
   });
   assert.equal(unbound.omittedConditionalRevalidation, true);
   assert.deepEqual(kinds(unbound.instantiated), [
@@ -34,7 +42,7 @@ test("instantiation omits the conditional revalidation step only when the chain 
   const bound = templateStepInstantiation(directSteps, {
     routesImplementation: true,
     boundToPredecessor: true,
-    skipOptionalSteps: false,
+    includesOptionalStep: keepsEveryOptionalStep,
   });
   assert.equal(bound.omittedConditionalRevalidation, false);
   assert.deepEqual(kinds(bound.instantiated), kinds(directSteps));
@@ -44,7 +52,7 @@ test("instantiation omits the conditional revalidation step only when the chain 
   const otherFamily = templateStepInstantiation(directSteps, {
     routesImplementation: false,
     boundToPredecessor: false,
-    skipOptionalSteps: false,
+    includesOptionalStep: keepsEveryOptionalStep,
   });
   assert.equal(otherFamily.omittedConditionalRevalidation, false);
   assert.deepEqual(kinds(otherFamily.instantiated), kinds(directSteps));
@@ -61,7 +69,7 @@ test("the conditional rule drops exactly one ordinal", () => {
   const instantiation = templateStepInstantiation(twoRevalidations, {
     routesImplementation: true,
     boundToPredecessor: false,
-    skipOptionalSteps: false,
+    includesOptionalStep: keepsEveryOptionalStep,
   });
   assert.equal(instantiation.omittedConditionalRevalidation, true);
   assert.deepEqual(kinds(instantiation.instantiated), ["revalidation-v2", "implementation"]);
@@ -71,7 +79,7 @@ test("instantiation omits optional steps independently of the conditional rule",
   const both = templateStepInstantiation(directSteps, {
     routesImplementation: true,
     boundToPredecessor: false,
-    skipOptionalSteps: true,
+    includesOptionalStep: excluding("blind-findings"),
   });
   assert.equal(both.omittedConditionalRevalidation, true);
   assert.deepEqual(kinds(both.instantiated), [
@@ -84,10 +92,32 @@ test("instantiation omits optional steps independently of the conditional rule",
   const optionalOnly = templateStepInstantiation(directSteps, {
     routesImplementation: true,
     boundToPredecessor: true,
-    skipOptionalSteps: true,
+    includesOptionalStep: excluding("blind-findings"),
   });
   assert.equal(optionalOnly.omittedConditionalRevalidation, false);
   assert.deepEqual(kinds(optionalOnly.instantiated), [
+    "revalidation",
+    "implementation",
+    "sol-findings",
+    "fixed-implementation",
+    "regression-verification-v2",
+  ]);
+});
+
+test("inclusion is asked about optional steps only, and a refusing answer never drops a required one", () => {
+  const asked: string[] = [];
+  const instantiation = templateStepInstantiation(directSteps, {
+    routesImplementation: false,
+    boundToPredecessor: true,
+    includesOptionalStep: (step) => {
+      asked.push(step.outputKind);
+      return false;
+    },
+  });
+  // A staffing that excludes everything it is allowed to exclude still leaves
+  // every required step: inclusion decides optional steps and nothing else.
+  assert.deepEqual(asked, ["blind-findings"]);
+  assert.deepEqual(kinds(instantiation.instantiated), [
     "revalidation",
     "implementation",
     "sol-findings",
