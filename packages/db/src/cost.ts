@@ -38,6 +38,9 @@ export type CostableSession = {
 
 export type CostableRun = {
   model: string;
+  /** `nativeChildUsed` is carried but deliberately never priced: see
+   * `sessionUsageCost` on why an observed native child cannot change the
+   * rate. Keeping it on the row is what lets a test prove that. */
   session: (CostableSession & { nativeChildUsed: boolean }) | null;
 };
 
@@ -53,12 +56,6 @@ export type UsageCost = {
 };
 
 const MILLION = new Prisma.Decimal(1_000_000);
-
-/** Native implementation children are pinned to this model by the workflow
- * contract. A Run with native children currently stores one aggregate Session,
- * so this is the safe read-time rate when the provider gives no per-thread
- * breakdown. */
-const NATIVE_CHILD_PRICING_MODEL = "gpt-5.6-luna";
 
 export const modelNameForPricing = (model: string): string => {
   const suffix = model.lastIndexOf(":");
@@ -76,7 +73,6 @@ const hasTokens = (session: CostableSession): boolean =>
 export const sessionUsageCost = (
   model: string,
   session: CostableSession,
-  options: { mixedModels?: boolean } = {},
 ): UsageCost => {
   const tokens = {
     inputTokens: session.inputTokens,
@@ -88,15 +84,22 @@ export const sessionUsageCost = (
     return { costUsd: new Prisma.Decimal(session.costUsd), estimated: false, ...tokens };
   }
   if (!hasTokens(session)) return { costUsd: null, estimated: false, ...tokens };
-  // Codex reports aggregate session tokens without a per-model breakdown for
-  // native children. The child model is platform-pinned to Luna max, so price
-  // an unsplit aggregate at Luna rather than at the root model's rate. This is
-  // an estimate because it is derived from the persisted token triple. A
-  // clean root/child split is represented by separate cost items and keeps the
-  // root's model here; `sumUsageCosts` combines those items without losing the
-  // distinction.
-  const pricingModel = options.mixedModels ? NATIVE_CHILD_PRICING_MODEL : model;
-  const prices = MODEL_TOKEN_PRICES[modelNameForPricing(pricingModel)];
+  // USAGE PROVENANCE (checked 2026-09-05): the Codex adapter persists
+  // `turn.completed` events as FINAL_OUTPUT; `recomputeSessionUsage` extracts
+  // their flat usage into session token columns. No per-thread or per-model
+  // split reaches this pricing function. See the `turn.completed` branch of
+  // packages/runner/src/adapters/codex.ts and packages/db/src/usage.ts.
+  // The capture spikes/cli-capabilities/samples/codex-gpt-5.6-luna-max-20260828.stdout
+  // confirms flat usage for a session without native children only. Open
+  // question: a real native-child stream is needed to establish whether Codex
+  // reports separable child usage and whether its flat total includes children.
+  //
+  // With no persisted split, price the available aggregate at the root model.
+  // A session is never priced at a model that did not run its root. The result
+  // stays `estimated`: child usage, if included, receives the root rate.
+  // A genuine per-model split is expressed as separate cost items that
+  // `sumUsageCosts` combines, each keeping its own model here.
+  const prices = MODEL_TOKEN_PRICES[modelNameForPricing(model)];
   // Every component is required for a complete estimate. Persisted null means
   // the provider did not report that component, not that it was zero. Codex
   // reports cached input as a subset of input, so inconsistent rows also fall
@@ -127,12 +130,12 @@ export const sessionUsageCost = (
   return { costUsd, estimated: true, ...tokens };
 };
 
-/** Price one persisted Run from observed usage provenance. The immutable
- * subagent launch snapshot is deliberately absent: permission to spawn a child
- * says nothing about whether the aggregate contains child tokens. */
+/** Price one persisted Run at its own model. Neither the subagent launch
+ * snapshot nor `Session.nativeChildUsed` changes the rate: with no per-thread
+ * usage to split, the root model is the only model known to have run. */
 export const runSessionUsageCost = (run: CostableRun): UsageCost | null => run.session === null
   ? null
-  : sessionUsageCost(run.model, run.session, { mixedModels: run.session.nativeChildUsed });
+  : sessionUsageCost(run.model, run.session);
 
 export const sumUsageCosts = (items: UsageCost[]): UsageCost | null => {
   if (items.length === 0) return null;
