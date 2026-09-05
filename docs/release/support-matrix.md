@@ -25,16 +25,16 @@ has never walked.
 
 | Platform | Status | Evidence boundary |
 | --- | --- | --- |
-| macOS on Apple Silicon | **Target platform** | The only platform this release targets. The install shape is in [`developer-preview.md`](developer-preview.md). |
+| macOS on Apple Silicon | **Target platform** | The install shape is in [`developer-preview.md`](developer-preview.md). |
 | macOS on Intel | **Unverified** | The portable design and locked `darwin-x64` dependencies make this path expected to work, but nothing has been run there. |
-| Linux | **Unverified** | The POSIX design, explicit Linux command branches and locked Linux dependencies make this path expected to work, but no release install or Run has been exercised there. |
+| Linux | **Maintainer-verified** | Ubuntu 24.04 LTS on x86_64, Node.js 26.8.1, Codex CLI 0.153.4: the maintainer's own installation runs the API, web console, PostgreSQL, release migrations, sixteen Codex and Pi runners and the merge executor there. Other distributions are **Unverified**. |
 | Windows | **Unsupported** | The runner relies on POSIX process-group, path and command behaviour. This is a design position, not a gap waiting to be filled. |
 
 ## Runtime prerequisites
 
 | Requirement | Status | Evidence boundary |
 | --- | --- | --- |
-| Node.js `22.17.0` | **Target version** | Recorded in `.nvmrc` and used by the corrected install instructions. |
+| Node.js `22.17.0` | **Target version** | Recorded in `.nvmrc` and used by the corrected install instructions. The maintainer's Linux installation runs 26.8.1, inside the enforced range below. |
 | Node.js `^20.19.0 \|\| ^22.13.0 \|\| >=24` | **Enforced** | Root engines, `engine-strict`, setup validation, the lockfile, and the Linux compatibility matrix carry the range required by the locked toolchain. Node 22.12.x and 23 are refused. |
 | npm 10.9.2 or newer | **Verified** | The npm generation floor recorded for this release. Use it with Node.js 22.17.0. |
 | Docker with Docker Compose | **Verified** | For the PostgreSQL service `docker-compose.yml` defines, published on `127.0.0.1:5432` only. |
@@ -73,11 +73,11 @@ the CLI vendor.
 | Git delivery: branch push | **Verified** | Requires non-interactive clone/push authentication and a configured Git author identity for the runner account. |
 | Automatic GitHub pull request | **Optional** | Requires the `gh` CLI installed and authenticated as the runner account. A run required to open a pull request fails after preserving its pushed branch when `gh` cannot record one; a non-GitHub remote instead returns manual PR instructions because automatic creation is impossible by design. |
 | Local repository merge gate | **Maintainer-verified** | `scripts/merge-gate.sh` judges one exact clean commit and provisions its own throwaway PostgreSQL. It needs Docker and the repository toolchain, but no remote gate worker. |
-| Remote gate-worker profile | **Unverified** | The public provisioning and dispatch path requires operator-owned SSH-reachable Ubuntu capacity configured explicitly. The repository provides no worker, hostname, credential or automatic topology. |
+| Remote gate-worker profile | **Maintainer-verified** | The maintainer dispatches every merge gate to an Ubuntu 24.04 worker over SSH through the published provisioning and dispatch path. It requires operator-owned SSH-reachable Ubuntu capacity configured explicitly; the repository provides no worker, hostname, credential or automatic topology. |
 | Direct workflow | **Maintainer-verified** | The canonical workflow additionally requires its configured Codex, Claude Code and Pi roles, authenticated GitHub PR delivery, an operator-provided gate worker, read-only GitHub evidence credentials and the self-hosted merge executor. None is silently substituted when absent. |
 | Full Assurance workflow | **Maintainer-verified** | The canonical workflow has the same advanced delivery prerequisites as Direct plus its planning roles. Provider accounts, model entitlement and every delivery service are supplied by the operator. |
-| Autonomous merge tail | **Unverified** | Public self-hosting requires an installation-local private GitHub App and an isolated `@anneal/merge-executor`; the Quickstart does not configure either. Missing evidence, authority or executor identity stops the chain. |
-| Self-hosted merge executor | **Unverified** | The public runbook documents GitHub App permissions, OS-principal isolation and service profiles. Those profiles are procedures, not independently reproduced support evidence. |
+| Autonomous merge tail | **Maintainer-verified** | The maintainer's installation merges its chains this way daily. Public self-hosting requires an installation-local private GitHub App and an isolated `@anneal/merge-executor`; the Quickstart does not configure either. Missing evidence, authority or executor identity stops the chain. |
+| Self-hosted merge executor | **Maintainer-verified** | The maintainer runs the executor as the runbook's systemd unit on Ubuntu 24.04 with a dedicated service identity. The macOS LaunchDaemon profile is a documented procedure that nobody has run: **Unverified**. |
 | Quiet-window appliance deployment | **Unsupported** | The maintainer appliance profile is published for auditability and reproducibility. It is not the Developer Preview installation shape or a production-support commitment. |
 | Repository and filesystem grants | **Verified as a control-plane boundary** | They authorize and audit Anneal's own APIs. They are not host containment, and the repository access level does not gate delivery's push. |
 | Stored secrets (AES-256-GCM) | **Verified** | Neither plaintext nor ciphertext appears in the API's secret representations. There is no rotation command. |
@@ -88,6 +88,7 @@ the CLI vendor.
 | Repository command-line interface | **Retired** | This release ships no repository CLI. v0.1.0 and v0.2.0 contained a help-only interface; v0.3.0 retires it rather than carrying it forward without operational command families. |
 | Feishu / Lark integration | **Experimental** | A maintainer's own integration, published because it is in the tree rather than because it is offered. Not part of the quickstart sequence and not part of the committed surface. |
 | launchd service definitions | **Unsupported** | Outside the supported install shape. |
+| Runners on a second machine | **Experimental** | The runner machine forwards the control plane's loopback port over its own SSH tunnel; see [`install.md`](../install.md). The maintainer runs Claude Code runners this way. The tunnel adds no identity, so the row below stands. |
 | Remote access of any kind | **Unsupported** | There is no remote authentication design — no login, no per-user identity, no session model for anyone but the machine's own operator. A tunnel or a reverse proxy does not add one. |
 
 ## Data and operations

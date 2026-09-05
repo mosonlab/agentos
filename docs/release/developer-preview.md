@@ -8,10 +8,10 @@
 > release tag remains immutable; use this corrected page when installing it.
 
 > **One verified path, one shape of install.** This page is the supported
-> sequence for macOS on Apple Silicon, run by the machine's own operator, on
+> sequence for macOS on Apple Silicon and Linux, run by the machine's own operator, on
 > loopback, against repositories you are willing to have an agent write to.
-> Linux and macOS on Intel are expected to work but are not yet release-verified;
-> Windows is unsupported.
+> macOS on Intel is expected to work but is not yet release-verified; Windows is
+> unsupported.
 > [`support-matrix.md`](support-matrix.md) states what is supported
 > and on what evidence; anything not in it is not supported.
 
@@ -30,12 +30,12 @@ fresh install.
 
 | Requirement | Exact expectation |
 | --- | --- |
-| Machine | The verified path uses an Apple Silicon Mac running macOS. Keep the checkout, `~/.agentos/control-plane`, and runner workspaces on a local APFS or HFS+ volume. NFS, SMB/CIFS, FUSE, unknown filesystem types, and symlinked control-state path components are refused. Linux and macOS on Intel are expected to work but are not yet release-verified; Windows is unsupported. |
+| Machine | The verified path uses an Apple Silicon Mac running macOS, or Linux (Ubuntu 24.04 LTS, x86_64). Keep the checkout, `~/.agentos/control-plane`, and runner workspaces on a local APFS or HFS+ volume on macOS, or ext4, XFS or Btrfs on Linux. NFS, SMB/CIFS, FUSE, unknown filesystem types, and symlinked control-state path components are refused. macOS on Intel is expected to work but is not yet release-verified; Windows is unsupported. |
 | Node.js | Use `22.17.0`, recorded in `.nvmrc`. Installation is enforced at `^20.19.0 \|\| ^22.13.0 \|\| >=24`, the range shared by the locked toolchain; Node 22.12.x and 23 are refused. |
 | npm | 10.9.2 or newer, the npm generation floor recorded for this release. Use it with Node.js 22.17.0. |
 | Docker | Docker Desktop must be running, with Docker Compose available. The supported local shape needs loopback ports `5432`, `3000`, and `5173` free. |
 | Git | Any recent version, with `user.name` and `user.email` configured for the runner account. The source must be a working clone. |
-| Codex CLI | The official Codex CLI, already installed **and already signed in**, under the same macOS account that will run the Anneal runner. The runner does not inherit your interactive shell's `PATH`; see the preflight below. |
+| Codex CLI | The official Codex CLI, already installed **and already signed in**, under the same user account that will run the Anneal runner. The runner does not inherit your interactive shell's `PATH`; see the preflight below. |
 | GitHub CLI | Optional for branch-only delivery and the deterministic smoke task. `gh` is required for automatic pull-request creation and must be authenticated as the runner account. If a run must open a pull request and `gh` cannot record one, Anneal preserves the pushed branch and fails the run for retry. Manual PR instructions are reserved for non-GitHub remotes, where automatic creation is impossible by design. |
 | GitHub read token | A read-only token exported as `GITHUB_READ_TOKEN` while running setup. Every API process requires it at startup; setup copies it into the mode-0600 `.env` and never prints it. |
 
@@ -132,7 +132,7 @@ Documents enabled, agent writes may be uploaded and dataless placeholders may
 fail to read. Set an absolute `FILES_ROOT` outside synced folders if that matters.
 With the shipped same-user runner, Filesystem Grants authorize and audit
 Anneal's Files API; they do not stop the coding CLI from accessing files the
-macOS user itself can access.
+runner's user account itself can access.
 
 If setup is interrupted, first make sure no other setup process is running, then
 inspect for abandoned credential files without printing their contents:
