@@ -474,7 +474,7 @@ test("the task-detail Chain card reflects a completed held layer on the next pol
     assert.equal(resumes.length, 1, JSON.stringify(mutations));
     assert.match(JSON.parse(resumes[0]!.body).requestId, /^[0-9a-f]{8}-[0-9a-f-]{27}$/u);
 
-    const stop = [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("Stop after current layer"));
+    const stop = [...container.querySelectorAll("button")].find((button) => button.textContent?.includes("Hold Chain"));
     assert.ok(stop);
     await act(async () => {
       stop!.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true }));

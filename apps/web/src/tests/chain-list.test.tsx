@@ -335,7 +335,7 @@ test("Viewed here and Current execution are independent facts", () => {
 
 test("an unheld Chain offers Hold and no held badge", () => {
   const markup = render(chain([step(1)], { control: null }), "t1");
-  assert.match(markup, new RegExp(`>${en("chain.stopAfterLayer")}<`));
+  assert.match(markup, new RegExp(`>${en("chain.hold")}<`));
   assert.doesNotMatch(markup, /data-chain-held-badge=/u);
   assert.doesNotMatch(markup, /data-chain-hold-reason=/u);
 });

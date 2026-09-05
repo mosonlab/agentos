@@ -10,7 +10,7 @@
  * them is a second thing to get wrong.
  */
 
-import { legacyTemplateName } from "./canonical-template-transition.js";
+import type { CanonicalTemplateRegistryName } from "./canonical-template-transition.js";
 import { stepRole } from "./step-role.js";
 
 export { stepGeneration, stepRole, type StepRole, type TemplateStepLike } from "./step-role.js";
@@ -48,29 +48,10 @@ export const LEGACY_INTEGRATOR_STEP_INDEX = 12;
 export const LEGACY_DIRECT_INTEGRATOR_STEP_INDEX = 7;
 export const INTEGRATOR_OUTPUT_KIND = "merge-result";
 export const INTEGRATOR_AGENT_NAME = "merge-integrator";
-export const INTEGRATOR_TEMPLATE_NAME = "compound-engineer-workflow";
+export const INTEGRATOR_TEMPLATE_NAME = "compound-engineer-workflow" satisfies CanonicalTemplateRegistryName;
 export const DIRECT_INTEGRATOR_TEMPLATE_NAME = "direct-engineer-workflow";
-export const LEGACY_INTEGRATOR_TEMPLATE_NAME = `${INTEGRATOR_TEMPLATE_NAME}-legacy-v1`;
-export const LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME = `${DIRECT_INTEGRATOR_TEMPLATE_NAME}-legacy-v1`;
 /** Sentinel model. `catalogRunnerForModel` returns null for it, so no runner/model assertion fires. */
 export const INTEGRATOR_SENTINEL_MODEL = "mechanical/merge-executor-v1";
-
-/**
- * Seed rollover keeps the historical template row and its step ids intact so
- * already-materialized tasks retain their runtime contract. The template id in
- * this marker makes the rename deterministic and collision-free on retries.
- */
-export const legacyTenStepTemplateName = (templateId: string): string =>
-  legacyTemplateName(INTEGRATOR_TEMPLATE_NAME, "10", templateId);
-
-export const legacyNineStepTemplateName = (templateId: string): string =>
-  legacyTemplateName(INTEGRATOR_TEMPLATE_NAME, "9", templateId);
-
-export const legacyHumanTwelveStepTemplateName = (templateId: string): string =>
-  legacyTemplateName(INTEGRATOR_TEMPLATE_NAME, "human-12", templateId);
-
-export const legacyRegressionFirstThirteenStepTemplateName = (templateId: string): string =>
-  legacyTemplateName(INTEGRATOR_TEMPLATE_NAME, "regression-first-13", templateId);
 
 // ---------------------------------------------------------------------------
 // §D-P4 — the bidirectional binding invariant

@@ -14,12 +14,20 @@ import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { after, before, test } from "node:test";
 
-import { Prisma, PrismaClient, RepoPermission, RunnerPreference, TaskStatus } from "@prisma/client";
+import { AssigneeType, Prisma, PrismaClient, RepoPermission, RunnerPreference, TaskStatus } from "@prisma/client";
 
 import { loadAgentSources } from "./agent-sources.js";
 import { parseCanonicalSyncSummary } from "./canonical-sync-report.js";
 import { isMergeReadinessStep } from "./merge-tail.js";
 import { isIntegratorStep } from "./merge-integrator.js";
+import {
+  canonicalTemplateIdentity,
+  legacyHumanSixStepTemplateName,
+  legacyHumanTwelveStepTemplateName,
+  legacyNineStepTemplateName,
+  legacyRegressionFirstThirteenStepTemplateName,
+  legacyTenStepTemplateName,
+} from "./canonical-template-transition.js";
 
 const packageRoot = fileURLToPath(new URL("../", import.meta.url)).replace(/\/+$/u, "");
 
@@ -1521,4 +1529,317 @@ test("a renamed canonical Agent keeps its bindings and a same-named custom Agent
     select: { id: true, name: true },
   });
   assert.deepEqual(afterSeed, { id: canonical.id, name: "house-implementer" });
+});
+
+test("seed and sync preserve every seed-era legacy template identity", async () => {
+  const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  const templateNames = ["direct-engineer-workflow", "compound-engineer-workflow"] as const;
+  type CanonicalTemplateName = (typeof templateNames)[number];
+  const loadCanonicalTemplate = async (name: CanonicalTemplateName) => prisma.taskTemplate.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name } },
+    include: { steps: { orderBy: { stepIndex: "asc" } } },
+  });
+  type CanonicalTemplate = Awaited<ReturnType<typeof loadCanonicalTemplate>>;
+  const stepAt = (template: CanonicalTemplate, stepIndex: number) => {
+    const step = template.steps.find(({ stepIndex: index }) => index === stepIndex);
+    assert.ok(step, `${template.name} must contain step ${stepIndex}`);
+    return step;
+  };
+  const agentId = async (name: string): Promise<string> => (
+    await prisma.agent.findUniqueOrThrow({ where: { projectId_name: { projectId: project.id, name } } })
+  ).id;
+  const [coordinatorId, integratorId, librarianId, regressionVerifierId, seniorDevId] = await Promise.all([
+    agentId("review-coordinator-astra-medium"),
+    agentId("merge-integrator"),
+    agentId("librarian-luna-xhigh"),
+    agentId("regression-verifier-luna-xhigh"),
+    agentId("senior-dev-astra-medium"),
+  ]);
+
+  const legacyRows: Array<{
+    canonicalName: CanonicalTemplateName;
+    marker: string;
+    legacyName: string;
+    templateId: string;
+    taskId: string;
+    templateStepId: string;
+  }> = [];
+
+  const seedHistoricalRow = async (
+    canonicalName: CanonicalTemplateName,
+    marker: string,
+    nameForTemplateId: (templateId: string) => string,
+    prepare: (template: CanonicalTemplate) => Promise<void>,
+  ): Promise<void> => {
+    const template = await loadCanonicalTemplate(canonicalName);
+    const firstStep = stepAt(template, 1);
+    await prepare(template);
+    const task = await prisma.task.create({ data: {
+      projectId: project.id,
+      templateId: template.id,
+      templateStepId: firstStep.id,
+      name: `seed-legacy-${canonicalName}-${marker}`,
+      description: "seed-era legacy template identity fixture",
+      assigneeAgentId: firstStep.assigneeAgentId,
+      assigneeType: firstStep.assigneeType,
+      status: TaskStatus.DONE,
+      chainId: `seed-legacy-${canonicalName}-${marker}-${randomBytes(4).toString("hex")}`,
+      chainIndex: firstStep.stepIndex,
+      chainLayer: firstStep.layer,
+    } });
+    const legacyName = nameForTemplateId(template.id);
+    const seeded = command(["tsx", "prisma/seed.ts"]);
+    assert.equal(seeded.status, 0, seeded.output);
+
+    const legacy = await prisma.taskTemplate.findUniqueOrThrow({
+      where: { projectId_name: { projectId: project.id, name: legacyName } },
+    });
+    assert.equal(legacy.id, template.id);
+    assert.deepEqual(canonicalTemplateIdentity(legacy.name), { canonicalName, generation: marker });
+    const current = await prisma.taskTemplate.findUniqueOrThrow({
+      where: { projectId_name: { projectId: project.id, name: canonicalName } },
+    });
+    assert.notEqual(current.id, template.id);
+    assert.deepEqual(await prisma.task.findUniqueOrThrow({
+      where: { id: task.id },
+      select: { templateId: true, templateStepId: true, status: true, chainId: true },
+    }), {
+      templateId: template.id,
+      templateStepId: firstStep.id,
+      status: TaskStatus.DONE,
+      chainId: task.chainId,
+    });
+    legacyRows.push({
+      canonicalName,
+      marker,
+      legacyName,
+      templateId: template.id,
+      taskId: task.id,
+      templateStepId: firstStep.id,
+    });
+  };
+
+  await seedHistoricalRow(
+    "compound-engineer-workflow",
+    "10",
+    legacyTenStepTemplateName,
+    async (template) => {
+      const integrator = stepAt(template, 10);
+      await prisma.taskTemplateStep.deleteMany({
+        where: { taskTemplateId: template.id, stepIndex: { in: [11, 12] } },
+      });
+      await prisma.taskTemplateStep.update({
+        where: { id: integrator.id },
+        data: {
+          name: "Merge execution",
+          assigneeAgentId: integratorId,
+          assigneeType: AssigneeType.AGENT,
+          outputKind: "merge-result",
+          approvalGate: false,
+        },
+      });
+    },
+  );
+
+  await seedHistoricalRow(
+    "compound-engineer-workflow",
+    "9",
+    legacyNineStepTemplateName,
+    async (template) => {
+      await prisma.taskTemplateStep.deleteMany({
+        where: { taskTemplateId: template.id, stepIndex: { in: [10, 11, 12] } },
+      });
+      await prisma.taskTemplateStep.update({
+        where: { id: stepAt(template, 1).id },
+        data: { approvalGate: true },
+      });
+      await prisma.taskTemplateStep.update({
+        where: { id: stepAt(template, 4).id },
+        data: { approvalGate: true },
+      });
+      await prisma.taskTemplateStep.update({
+        where: { id: stepAt(template, 6).id },
+        data: {
+          name: "Code review",
+          assigneeAgentId: coordinatorId,
+          assigneeType: AssigneeType.AGENT,
+          outputKind: "code-review",
+        },
+      });
+      await prisma.taskTemplateStep.update({
+        where: { id: stepAt(template, 7).id },
+        data: {
+          name: "Apply review fixes",
+          assigneeAgentId: seniorDevId,
+          assigneeType: AssigneeType.AGENT,
+          outputKind: "fixed-implementation",
+          approvalGate: false,
+        },
+      });
+      await prisma.taskTemplateStep.update({
+        where: { id: stepAt(template, 8).id },
+        data: {
+          name: "Librarian",
+          assigneeAgentId: librarianId,
+          assigneeType: AssigneeType.AGENT,
+          outputKind: "documentation",
+          approvalGate: false,
+        },
+      });
+      await prisma.taskTemplateStep.update({
+        where: { id: stepAt(template, 9).id },
+        data: {
+          name: "Approval",
+          assigneeAgentId: null,
+          assigneeType: AssigneeType.HUMAN,
+          outputKind: "approval",
+          approvalGate: true,
+        },
+      });
+    },
+  );
+
+  await seedHistoricalRow(
+    "compound-engineer-workflow",
+    "human-12",
+    legacyHumanTwelveStepTemplateName,
+    async (template) => {
+      await prisma.taskTemplateStep.update({
+        where: { id: stepAt(template, 11).id },
+        data: {
+          name: "Approval",
+          assigneeAgentId: null,
+          assigneeType: AssigneeType.HUMAN,
+          outputKind: "approval",
+          approvalGate: true,
+        },
+      });
+    },
+  );
+
+  await seedHistoricalRow(
+    "compound-engineer-workflow",
+    "regression-first-13",
+    legacyRegressionFirstThirteenStepTemplateName,
+    async (template) => {
+      const readiness = stepAt(template, 11);
+      const integrator = stepAt(template, 12);
+      await prisma.taskTemplateStep.update({
+        where: { id: integrator.id },
+        data: { stepIndex: 13, layer: 12 },
+      });
+      await prisma.taskTemplateStep.update({
+        where: { id: stepAt(template, 10).id },
+        data: {
+          assigneeAgentId: regressionVerifierId,
+          assigneeType: AssigneeType.AGENT,
+          outputKind: "regression-verification",
+          name: "Regression verification",
+        },
+      });
+      await prisma.taskTemplateStep.update({
+        where: { id: readiness.id },
+        data: {
+          name: "Librarian",
+          assigneeAgentId: librarianId,
+          assigneeType: AssigneeType.AGENT,
+          outputKind: "documentation",
+          approvalGate: false,
+          layer: 10,
+        },
+      });
+      await prisma.taskTemplateStep.create({ data: {
+        taskTemplateId: template.id,
+        stepIndex: 12,
+        layer: 11,
+        name: "Merge authorization",
+        assigneeAgentId: readiness.assigneeAgentId,
+        assigneeType: readiness.assigneeType,
+        runner: readiness.runner,
+        approvalGate: false,
+        optional: readiness.optional,
+        outputKind: "merge-authorization",
+        prompt: readiness.prompt,
+        opensPullRequest: readiness.opensPullRequest,
+        requiresCommit: readiness.requiresCommit,
+        attachmentsFromPrevious: readiness.attachmentsFromPrevious,
+        priorOutputKinds: readiness.priorOutputKinds,
+        baseFromStepIndex: readiness.baseFromStepIndex,
+        spawnPolicy: readiness.spawnPolicy ?? Prisma.JsonNull,
+        provisionDependencies: readiness.provisionDependencies,
+      } });
+    },
+  );
+
+  await seedHistoricalRow(
+    "direct-engineer-workflow",
+    "human-6",
+    legacyHumanSixStepTemplateName,
+    async (template) => {
+      await prisma.taskTemplateStep.deleteMany({
+        where: { taskTemplateId: template.id, stepIndex: { in: [7, 8] } },
+      });
+      await prisma.taskTemplateStep.update({
+        where: { id: stepAt(template, 6).id },
+        data: {
+          name: "Approval",
+          assigneeAgentId: null,
+          assigneeType: AssigneeType.HUMAN,
+          outputKind: "approval",
+          approvalGate: true,
+        },
+      });
+    },
+  );
+
+  const legacyBeforeSync = await Promise.all(legacyRows.map(async ({ templateId, taskId, templateStepId }) => ({
+    templateId,
+    taskId,
+    templateStepId,
+    template: await prisma.taskTemplate.findUniqueOrThrow({
+      where: { id: templateId },
+      include: { steps: { orderBy: { stepIndex: "asc" } } },
+    }),
+    task: await prisma.task.findUniqueOrThrow({
+      where: { id: taskId },
+      select: { templateId: true, templateStepId: true, status: true, chainId: true },
+    }),
+  })));
+  const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(synced.status, 0, synced.output);
+  for (const [index, legacyRow] of legacyRows.entries()) {
+    const persisted = await prisma.taskTemplate.findUniqueOrThrow({
+      where: { id: legacyRow.templateId },
+      include: { steps: { orderBy: { stepIndex: "asc" } } },
+    });
+    assert.equal(persisted.name, legacyRow.legacyName);
+    assert.deepEqual(persisted.steps, legacyBeforeSync[index]!.template.steps);
+    assert.deepEqual(canonicalTemplateIdentity(persisted.name), {
+      canonicalName: legacyRow.canonicalName,
+      generation: legacyRow.marker,
+    });
+    assert.deepEqual(await prisma.task.findUniqueOrThrow({
+      where: { id: legacyRow.taskId },
+      select: { templateId: true, templateStepId: true, status: true, chainId: true },
+    }), legacyBeforeSync[index]!.task);
+    assert.equal(await prisma.taskTemplate.count({
+      where: { projectId: project.id, name: legacyRow.legacyName },
+    }), 1);
+  }
+
+  const reseeded = command(["tsx", "prisma/seed.ts"]);
+  assert.equal(reseeded.status, 0, reseeded.output);
+  const resynced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(resynced.status, 0, resynced.output);
+  for (const legacyRow of legacyRows) {
+    const persisted = await prisma.taskTemplate.findUniqueOrThrow({
+      where: { id: legacyRow.templateId },
+      include: { steps: { orderBy: { stepIndex: "asc" } } },
+    });
+    assert.equal(persisted.name, legacyRow.legacyName);
+    assert.deepEqual(persisted.steps, legacyBeforeSync.find(({ templateId }) => templateId === legacyRow.templateId)!.template.steps);
+    assert.equal(await prisma.taskTemplate.count({
+      where: { projectId: project.id, name: legacyRow.canonicalName },
+    }), 1);
+  }
 });
