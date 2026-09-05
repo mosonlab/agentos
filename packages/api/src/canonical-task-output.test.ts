@@ -85,6 +85,11 @@ const persistFixedOutput = async (input: {
   reviewTasks: ReviewTask[];
   successfulSiblingRuns?: Array<{ taskId: string; headSha: string }>;
   body?: string;
+  /**
+   * The chain's own witness of which review steps it instantiated. Defaults to
+   * exactly the steps the review layer carries, which is the ordinary chain.
+   */
+  chainReviewSteps?: Array<{ outputKind: ReviewKind; instantiated: boolean }>;
 }) => {
   const fixTask = {
     id: "fix-task",
@@ -96,9 +101,16 @@ const persistFixedOutput = async (input: {
     templateStep: {
       stepIndex: 5,
       outputKind: "fixed-implementation",
+      taskTemplateId: "direct-template",
       taskTemplate: { name: "direct-engineer-workflow" },
     },
   };
+  const chainReviewSteps = input.chainReviewSteps ?? (["sol-findings", "blind-findings"] as const).map(
+    (outputKind) => ({
+      outputKind,
+      instantiated: input.reviewTasks.some((task) => task.templateStep.outputKind === outputKind),
+    }),
+  );
   const tx = {
     $queryRaw: async () => [{ id: "locked" }],
     run: {
@@ -115,6 +127,12 @@ const persistFixedOutput = async (input: {
     task: {
       findFirst: async () => ({ chainLayer: 2 }),
       findMany: async () => input.reviewTasks,
+    },
+    taskTemplateStep: {
+      findMany: async () => chainReviewSteps.map(({ outputKind, instantiated }) => ({
+        outputKind,
+        tasks: instantiated ? [{ id: `${outputKind}-task` }] : [],
+      })),
     },
     taskStepOutput: {
       findUnique: async () => null,
@@ -358,6 +376,21 @@ test("a present blind review sibling without output keeps its exact refusal", as
     reviewTasks: [
       reviewTask("sol-task", "sol-findings"),
       reviewTask("blind-task", "blind-findings", null),
+    ],
+  });
+
+  assert.equal(
+    persistenceRefusal(result),
+    "fixed-implementation requires exactly one immutable blind-findings sibling output",
+  );
+});
+
+test("a review step this chain instantiated is owed at the review boundary", async () => {
+  const result = await persistFixedOutput({
+    reviewTasks: [reviewTask("sol-task", "sol-findings")],
+    chainReviewSteps: [
+      { outputKind: "sol-findings", instantiated: true },
+      { outputKind: "blind-findings", instantiated: true },
     ],
   });
 
