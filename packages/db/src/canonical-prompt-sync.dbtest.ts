@@ -130,6 +130,18 @@ const rebindFixStepToRetiredSeniorDev = async (projectId: string, templateId: st
   });
 };
 
+/** Historical rollover fixtures describe the deployed model-specific labels. */
+const restoreRetiredReviewStepNames = async (templateId: string): Promise<void> => {
+  await prisma.taskTemplateStep.updateMany({
+    where: { taskTemplateId: templateId, outputKind: "sol-findings" },
+    data: { name: "Code review (Sol)" },
+  });
+  await prisma.taskTemplateStep.updateMany({
+    where: { taskTemplateId: templateId, outputKind: "blind-findings" },
+    data: { name: "Code review (Opus blind)" },
+  });
+};
+
 const restorePreOptionalReviewPrompt = (prompt: string): string => prompt
   .replace(
     "Read the immutable `sol-findings` review output and, when present, the immutable `blind-findings` output through their Anneal step outputs. The blind review may be absent when its optional step was omitted; when it is absent, the Sol report is the sole report. Verify that every present report's reviewed head is the HEAD you are about to fix. When both reports are present, also verify that they report the same reviewed base and the same reviewed head.",
@@ -323,6 +335,7 @@ test("sync rolls the checkout Regression prompt generation once and preserves ch
       where: { taskTemplateId: template.id },
       data: { provisionDependencies: true, optional: false },
     });
+    await restoreRetiredReviewStepNames(template.id);
     await rebindFixStepToRetiredSeniorDev(project.id, template.id);
     const regression = template.steps.find(({ outputKind }) => outputKind === "regression-verification-v2");
     assert.ok(regression);
@@ -446,6 +459,7 @@ test("sync rolls the deployed pre-optional-review prompt generation once", async
       where: { taskTemplateId: template.id },
       data: { optional: false },
     });
+    await restoreRetiredReviewStepNames(template.id);
     await rebindFixStepToRetiredSeniorDev(project.id, template.id);
     const fix = template.steps.find(({ outputKind }) => outputKind === "fixed-implementation");
     const regression = template.steps.find(({ outputKind }) => outputKind === "regression-verification-v2");
@@ -536,6 +550,7 @@ test("sync rolls parked and not-yet-started v1 chains forward without changing t
       where: { taskTemplateId: template.id },
       data: { provisionDependencies: true, optional: false },
     });
+    await restoreRetiredReviewStepNames(template.id);
     await rebindFixStepToRetiredSeniorDev(project.id, template.id);
     await prisma.taskTemplateStep.updateMany({
       where: { taskTemplateId: template.id, outputKind: "regression-verification-v2" },
@@ -664,6 +679,7 @@ test("sync rolls the exact adjudication-era graphs forward without touching inst
       where: { taskTemplateId: template.id },
       data: { provisionDependencies: true, optional: false },
     });
+    await restoreRetiredReviewStepNames(template.id);
     await rebindFixStepToRetiredSeniorDev(project.id, template.id);
     // Walk down so the (template, stepIndex) unique never collides while the
     // hole opens; every step the adjudication node preceded also sat one layer
@@ -805,6 +821,7 @@ test("sync rolls the pre-zero-gate compound graph forward and leaves the direct 
     where: { taskTemplateId: full.id },
     data: { provisionDependencies: true, optional: false },
   });
+  await restoreRetiredReviewStepNames(full.id);
   await rebindFixStepToRetiredSeniorDev(project.id, full.id);
   await prisma.taskTemplateStep.updateMany({
     where: { taskTemplateId: full.id, stepIndex: { in: [1, 4] } },
@@ -1515,4 +1532,133 @@ test("a renamed canonical Agent keeps its bindings and a same-named custom Agent
     select: { id: true, name: true },
   });
   assert.deepEqual(afterSeed, { id: canonical.id, name: "house-implementer" });
+});
+
+test("sync rolls model-neutral review names across all canonical templates and carries staffing", async (t) => {
+  const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
+  const templateNames = ["compound-engineer-workflow", "direct-engineer-workflow", "pr-engineer-workflow"] as const;
+  const staffedAgent = await prisma.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: project.id, name: "code-reviewer-sol-high" } },
+    select: { id: true },
+  });
+  const templates = await prisma.taskTemplate.findMany({
+    where: { projectId: project.id, name: { in: [...templateNames] } },
+    include: { steps: { orderBy: { stepIndex: "asc" } } },
+    orderBy: { name: "asc" },
+  });
+  assert.equal(templates.length, templateNames.length);
+
+  const taskIds: string[] = [];
+  const legacyTemplateIds: string[] = [];
+  const fixtures = new Map<string, {
+    templateId: string;
+    profileId: string;
+    taskId: string;
+    blindPrompt: string;
+  }>();
+  t.after(async () => {
+    await prisma.task.deleteMany({ where: { id: { in: taskIds } } });
+    await prisma.taskTemplate.deleteMany({ where: { id: { in: legacyTemplateIds } } });
+  });
+
+  for (const template of templates) {
+    const sol = template.steps.find(({ outputKind }) => outputKind === "sol-findings");
+    const blind = template.steps.find(({ outputKind }) => outputKind === "blind-findings");
+    assert.ok(sol);
+    assert.ok(blind);
+
+    // Seed has the new source labels on the parent branch. These two updates
+    // reconstruct the shape deployed before the staffing-neutral rename.
+    await restoreRetiredReviewStepNames(template.id);
+
+    const profile = await prisma.staffingProfile.create({
+      data: {
+        projectId: project.id,
+        taskTemplateId: template.id,
+        name: "Operator review staffing",
+        isDefault: true,
+        entries: {
+          create: [
+            { outputKind: "sol-findings", assigneeAgentId: staffedAgent.id, include: null },
+            { outputKind: "blind-findings", assigneeAgentId: staffedAgent.id, include: true },
+          ],
+        },
+      },
+      select: { id: true },
+    });
+    const task = await prisma.task.create({
+      data: {
+        projectId: project.id,
+        templateId: template.id,
+        templateStepId: blind.id,
+        name: `retired review evidence ${template.name}`,
+        description: "instantiated task must retain the retired review label and prompt",
+        assigneeAgentId: blind.assigneeAgentId,
+        assigneeType: blind.assigneeType,
+        status: TaskStatus.DONE,
+        chainId: `model-neutral-review-${template.id}`,
+        chainIndex: blind.stepIndex,
+        chainLayer: blind.layer,
+      },
+      select: { id: true },
+    });
+    taskIds.push(task.id);
+    fixtures.set(template.name, {
+      templateId: template.id,
+      profileId: profile.id,
+      taskId: task.id,
+      blindPrompt: blind.prompt,
+    });
+  }
+
+  const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(synced.status, 0, synced.output);
+  const summary = parseCanonicalSyncSummary(synced.output);
+  assert.deepEqual(summary.refused, {});
+  assert.equal(summary.projects[project.slug]?.createdCanonicalTemplates, 3, synced.output);
+  assert.equal(summary.totals.createdCanonicalTemplates, 3, synced.output);
+
+  for (const templateName of templateNames) {
+    const fixture = fixtures.get(templateName)!;
+    const legacyName = `${templateName}-legacy-model-neutral-review-step-names-${fixture.templateId}`;
+    const legacy = await prisma.taskTemplate.findUniqueOrThrow({
+      where: { projectId_name: { projectId: project.id, name: legacyName } },
+      include: { steps: { orderBy: { stepIndex: "asc" } } },
+    });
+    assert.equal(legacy.id, fixture.templateId);
+    legacyTemplateIds.push(legacy.id);
+    assert.equal(legacy.steps.find(({ outputKind }) => outputKind === "sol-findings")?.name, "Code review (Sol)");
+    assert.equal(legacy.steps.find(({ outputKind }) => outputKind === "blind-findings")?.name, "Code review (Opus blind)");
+
+    const current = await prisma.taskTemplate.findUniqueOrThrow({
+      where: { projectId_name: { projectId: project.id, name: templateName } },
+      include: { steps: { orderBy: { stepIndex: "asc" } }, staffingProfiles: { include: { entries: { orderBy: { outputKind: "asc" } } } } },
+    });
+    assert.notEqual(current.id, fixture.templateId);
+    assert.equal(current.steps.find(({ outputKind }) => outputKind === "sol-findings")?.name, "Code review");
+    assert.equal(current.steps.find(({ outputKind }) => outputKind === "blind-findings")?.name, "Blind code review");
+
+    const carried = current.staffingProfiles.find(({ id }) => id !== fixture.profileId);
+    assert.ok(carried);
+    assert.equal(carried.name, "Operator review staffing");
+    assert.deepEqual(
+      carried.entries.map(({ outputKind, assigneeAgentId, include }) => ({ outputKind, assigneeAgentId, include })),
+      [
+        { outputKind: "blind-findings", assigneeAgentId: staffedAgent.id, include: true },
+        { outputKind: "sol-findings", assigneeAgentId: staffedAgent.id, include: null },
+      ],
+    );
+
+    const task = await prisma.task.findUniqueOrThrow({
+      where: { id: fixture.taskId },
+      include: { templateStep: true },
+    });
+    assert.equal(task.templateId, fixture.templateId);
+    assert.equal(task.templateStep?.name, "Code review (Opus blind)");
+    assert.equal(task.templateStep?.prompt, fixture.blindPrompt);
+  }
+
+  const second = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(second.status, 0, second.output);
+  assert.equal(parseCanonicalSyncSummary(second.output).totals.createdCanonicalTemplates, 0, second.output);
 });
