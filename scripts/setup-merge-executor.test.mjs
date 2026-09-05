@@ -208,8 +208,8 @@ test("health and platform claims match the implemented and evidenced surfaces", 
   assert.match(runbook, /`workspaceRoot: null` and `diskFreeBytes: null`/u);
   assert.match(runbook, /Run record[^.]*`adapterVersion`\s+and `cliVersion`[^.]*`merge-executor-v1`/u);
   assert.doesNotMatch(runbook, /Find the exact `MERGE_EXECUTOR_RUNNER_ID`, the `merge-executor-v1` adapter\/CLI identity/u);
-  assert.match(installDoc, /documented but unverified macOS\s+LaunchDaemon and Linux systemd profiles/u);
-  assert.match(runbook, /documented but unverified/u);
+  assert.match(installDoc, /maintainer-verified Linux\s+systemd profile and an unverified macOS LaunchDaemon profile/u);
+  assert.match(runbook, /macOS LaunchDaemon profile nobody has run/u);
 });
 
 test("the wizard links official concepts and ends with exact non-secret next commands", () => {
