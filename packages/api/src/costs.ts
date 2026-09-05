@@ -287,12 +287,11 @@ const cacheSplit = (run: CostsRunRow): CacheSplit | null => {
   };
 };
 
-const effectivePricingModel = (run: CostsRunRow): string => (
-  run.session?.nativeChildUsed === true ? "gpt-5.6-luna" : run.model
-);
-
+/** The efficiency view prices uncached input at the Run's own model, the same
+ * model `runSessionUsageCost` charges the whole aggregate at. Codex reports no
+ * per-thread usage, so a native-child Run has no second rate to apply here. */
 const uncachedInputUsd = (run: CostsRunRow, split: CacheSplit): Prisma.Decimal | null => {
-  const prices = MODEL_TOKEN_PRICES[modelNameForPricing(effectivePricingModel(run))];
+  const prices = MODEL_TOKEN_PRICES[modelNameForPricing(run.model)];
   return prices === undefined
     ? null
     : new Prisma.Decimal(split.uncachedInputTokens).times(prices.inputPerMillionUsd).dividedBy(1_000_000);
@@ -532,7 +531,8 @@ export const aggregateCosts = (
           cachePricingKnown: agentTotal.cachePricingKnown && uncachedInputUsd(run, split) !== null,
         }
       : { ...agentTotal, cacheUnknownRuns: agentTotal.cacheUnknownRuns + 1 };
-    const model = run.session?.nativeChildUsed === true ? "mixed" : run.model;
+    // Attribute native-child estimates to the root model used to price them.
+    const model = run.model;
     const modelTotal = perModel.get(model) ?? { model, usd: ZERO, runs: 0, costUnavailableRuns: 0 };
     const isWasted = run.status !== RunStatus.SUCCEEDED;
     const isOperatorCancelled = isWasted && run.cancelRequestId !== null && run.cancelRequestId !== undefined;

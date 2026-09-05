@@ -29,6 +29,7 @@ const template: TaskTemplate = {
   name: "Optional workflow",
   description: "",
   variables: [],
+  retired: false,
   steps: [step(1, "Required step", false), step(2, "Optional step", true), step(3, "Another required step", false)],
 };
 

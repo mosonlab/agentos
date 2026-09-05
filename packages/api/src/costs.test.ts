@@ -47,7 +47,7 @@ test("timezone windows start at the first valid instant when local midnight is s
   assert.equal(costsWindowEnd(now, "America/Santiago").toISOString(), "2020-09-07T03:00:00.000Z");
 });
 
-test("aggregateCosts preserves model identity, isolates mixed runs, and reconciles spend", () => {
+test("aggregateCosts preserves root model identity for native-child runs and reconciles spend", () => {
   const runs = [
     row({
       id: "success", model: "openai-codex/gpt-5.6-luna:max", status: RunStatus.SUCCEEDED,
@@ -71,6 +71,13 @@ test("aggregateCosts preserves model identity, isolates mixed runs, and reconcil
       },
     }),
     row({
+      id: "mixed-astra", model: "openai-codex/gpt-6-astra:high", status: RunStatus.SUCCEEDED,
+      session: {
+        nativeChildUsed: true, costUsd: null,
+        inputTokens: 1_000_000, cachedInputTokens: 250_000, cacheCreationInputTokens: 0, outputTokens: 100_000,
+      },
+    }),
+    row({
       id: "unpriced", model: "openai-codex/gpt-5.6-luna:max", status: RunStatus.LOST,
       agent: { id: "review-id", name: "reviewer" },
       session: {
@@ -86,12 +93,14 @@ test("aggregateCosts preserves model identity, isolates mixed runs, and reconcil
   assert.deepEqual(report.byModel.map(({ model, usd, runs, costUnavailableRuns }) => ({
     model, usd: usd.toString(), runs, costUnavailableRuns,
   })), [
+    // Astra: 750k * $10/M + 250k * $1/M + 100k * $50/M = $12.75.
+    { model: "openai-codex/gpt-6-astra:high", usd: "12.75", runs: 1, costUnavailableRuns: 0 },
     { model: "openai-codex/gpt-5.6-luna:max", usd: "5", runs: 2, costUnavailableRuns: 1 },
-    { model: "mixed", usd: "3", runs: 1, costUnavailableRuns: 0 },
+    { model: "openai-codex/gpt-5.6-sol:max", usd: "3", runs: 1, costUnavailableRuns: 0 },
     { model: "claude-opus-5:high", usd: "2", runs: 1, costUnavailableRuns: 0 },
   ]);
   assert.equal(report.byModel.reduce((sum, entry) => sum + Number(entry.usd), 0), Number(report.totalUsd));
-  assert.ok(!report.byModel.some((entry) => entry.model === "openai-codex/gpt-5.6-sol:max"));
+  assert.equal(report.totalUsd.toString(), "22.75");
 
   const dev = report.byAgent.find((entry) => entry.agent === "dev");
   const reviewer = report.byAgent.find((entry) => entry.agent === "reviewer");

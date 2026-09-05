@@ -73,6 +73,11 @@ export type TaskTemplate<DateTime = string> = {
   name: string;
   description: string;
   variables: string[];
+  /** Whether this row is a retired canonical generation, kept only so the
+   *  chains instantiated under it keep their history. Derived by the reader
+   *  from the row's name, never stored; a current canonical template and an
+   *  operator's own clone are both false. */
+  retired: boolean;
   steps: TaskTemplateStep<DateTime>[];
 };
 

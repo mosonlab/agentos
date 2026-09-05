@@ -225,6 +225,8 @@ curl -X DELETE "$BASE_URL/projects/$PROJECT_ID" -H "Authorization: Bearer $OPERA
 - The response retains the aggregate totals, daily series, model totals, agent
   totals, and top runs. Agent rows additionally report cached-read percentage,
   unknown-split run count, and known uncached-input tokens and spend.
+- Model totals retain each Run's root model, including native-child Runs whose
+  unsplit token usage is estimated at that root model's rates.
 - `waste` partitions `wastedUsd` exactly into operator-cancelled and failed
   spend; failed spend is further partitioned by failure class.
 - `chains` contains terminal chains whose last run ended in the window, with
@@ -1023,6 +1025,13 @@ unreadable read-back, body mismatch, failed cleanup, or retained tracked
 ### GET `/projects/:projectId/task-templates`
 
 - Required path parameter: `projectId`.
+- Rows are ordered by `createdAt` ascending.
+- Every row carries `retired`: true when the row is a retired canonical
+  generation, which canonical sync renamed to
+  `<name>-legacy-<marker>-<id>` so the chains instantiated under it keep their
+  history. A current canonical template and an operator's own clone are both
+  false. The field is derived from the row's name at read time and never
+  stored.
 
 ```sh
 curl "$BASE_URL/projects/$PROJECT_ID/task-templates" -H "Authorization: Bearer $OPERATOR_TOKEN"
@@ -1106,6 +1115,8 @@ curl -X PUT "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/steps" \
 ### GET `/task-templates/:templateId`
 
 - Required path parameter: `templateId`.
+- Carries the same derived `retired` field as
+  `GET /projects/:projectId/task-templates`.
 
 ```sh
 curl "$BASE_URL/task-templates/$TEMPLATE_ID" -H "Authorization: Bearer $OPERATOR_TOKEN"

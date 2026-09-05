@@ -176,10 +176,11 @@ test("a codex session without a reported amount is counted apart, never as zero"
     agentId: dev.id, model: "openai-codex/gpt-5.6-luna", runner: "CODEX", startedAt: daysAgo(1),
     session: { costUsd: null, inputTokens: 1_000 },
   });
-  // A native-child run has one unsplit aggregate. It must be priced at the
-  // platform-pinned Luna rate rather than at the root model's rate.
+  // An Astra executioner with native children has one unsplit aggregate. Codex
+  // reports no per-thread usage, so the whole aggregate is priced at the root
+  // model rather than at the platform-pinned child model.
   await seedRun(project.id, repo.id, "Mixed", {
-    agentId: dev.id, model: "openai-codex/gpt-5.6-sol", runner: "CODEX", startedAt: daysAgo(2),
+    agentId: dev.id, model: "openai-codex/gpt-6-astra", runner: "CODEX", startedAt: daysAgo(2),
     subagentModel: true,
     session: { nativeChildUsed: true, costUsd: null, inputTokens: 1_000, cachedInputTokens: 100, outputTokens: 50 },
   });
@@ -192,15 +193,21 @@ test("a codex session without a reported amount is counted apart, never as zero"
   assert.equal(body.runCount, 4);
   assert.equal(body.costUnavailableRuns, 2);
   // The mixed aggregate has 900 uncached + 100 cached input and 50 output
-  // tokens; Luna pricing yields $0.000242.
-  assert.equal(Number(body.totalUsd), 2.000242);
+  // tokens; Astra pricing yields 0.009 + 0.0001 + 0.0025 = $0.0116.
+  assert.equal(Number(body.totalUsd), 2.0116);
   // The average is over the two runs that have a cost, not over all four.
-  assert.equal(Number(body.avgUsd), 1.000121);
+  assert.equal(Number(body.avgUsd), 1.0058);
   assert.equal(body.byAgent.length, 1);
   assert.equal(body.byAgent[0].runs, 4);
   assert.equal(body.byAgent[0].costUnavailableRuns, 2);
-  assert.equal(Number(body.byAgent[0].usd), 2.000242);
-  assert.equal(Number(body.byAgent[0].avgUsd), 1.000121);
+  assert.equal(Number(body.byAgent[0].usd), 2.0116);
+  assert.equal(Number(body.byAgent[0].avgUsd), 1.0058);
+  // The Run row itself is priced, not dropped: an estimate at the model that
+  // ran its root thread.
+  const mixed = body.topRuns.find((run: { taskName: string | null }) => run.taskName === "Mixed");
+  assert.equal(Number(mixed.usd), 0.0116);
+  assert.equal(mixed.estimated, true);
+  assert.equal(mixed.model, "openai-codex/gpt-6-astra");
 });
 
 test("a complete codex token set is priced and labelled as an estimate", async () => {

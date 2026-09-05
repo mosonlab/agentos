@@ -82,6 +82,7 @@ const TEMPLATE: TaskTemplate = {
   name: "Direct engineering",
   description: "Seven steps without a spec phase",
   variables: [],
+  retired: false,
   steps: [
     step({ stepIndex: 1, name: "Implementation", outputKind: "implementation", assigneeAgentId: SENIOR.id, assigneeAgent: SENIOR }),
     step({ stepIndex: 2, name: "Blind review", outputKind: "blind-findings", optional: true }),
@@ -175,6 +176,93 @@ test("the three Workflows routes are registered and the list renders its templat
     await page.dispose();
   }
 });
+
+const listed = (id: string, name: string, retired: boolean): TaskTemplate => ({
+  ...TEMPLATE, id, name, retired, description: "",
+});
+
+const CURRENT = [listed("t-pr", "pr-engineer-workflow", false), listed("t-direct", "compound-engineer-workflow", false)];
+const RETIRED_GENERATIONS = [
+  listed("t-legacy-1", "direct-engineer-workflow-legacy-pre-adjudication-t1", true),
+  listed("t-legacy-2", "direct-engineer-workflow-legacy-pre-zero-gate-t2", true),
+  listed("t-legacy-3", "compound-engineer-workflow-legacy-pre-adjudication-t3", true),
+];
+
+const listRoutes = (templates: TaskTemplate[]): PageRoutes => ({
+  [`/projects/${PROJECT.id}/task-templates`]: templates,
+});
+
+const rowNames = (page: PageHarness): string[] =>
+  [...page.container.querySelectorAll("[data-template-row] a")].map((node) => node.textContent ?? "");
+
+test("the list ranks current templates by name and folds retired generations into one collapsed group", async () => {
+  // The control plane lists by createdAt, retired rows first; the page does not.
+  const page = await mountRoute("/workflows", listRoutes([...RETIRED_GENERATIONS, ...CURRENT]));
+  try {
+    assert.deepEqual(rowNames(page), ["compound-engineer-workflow", "pr-engineer-workflow"]);
+    const toggle = page.container.querySelector<HTMLButtonElement>("[data-retired-toggle]");
+    assert.ok(toggle, "the retired group should have a header");
+    assert.equal(toggle.textContent, t("en", "workflows.retired.group", { n: 3 }));
+    assert.equal(toggle.getAttribute("aria-expanded"), "false");
+
+    await act(async () => toggle.dispatchEvent(new page.dom.window.MouseEvent("click", { bubbles: true })));
+    await page.settle();
+    assert.deepEqual(rowNames(page), [
+      "compound-engineer-workflow",
+      "pr-engineer-workflow",
+      ...RETIRED_GENERATIONS.map((template) => template.name),
+    ]);
+    assert.equal(toggle.getAttribute("aria-expanded"), "true");
+    for (const template of RETIRED_GENERATIONS) {
+      assert.ok(page.container.querySelector(`a[href="#/workflows/${template.id}"]`), `${template.name} should stay navigable`);
+    }
+  } finally {
+    await page.dispose();
+  }
+});
+
+test("a project with no retired generation renders no group at all", async () => {
+  const page = await mountRoute("/workflows", listRoutes(CURRENT));
+  try {
+    assert.equal(page.container.querySelector("[data-retired-toggle]"), null);
+    assert.ok(!(page.container.textContent ?? "").includes("Retired"), page.container.textContent ?? "");
+    assert.equal(rowNames(page).length, 2);
+  } finally {
+    await page.dispose();
+  }
+});
+
+test("a template list of an unexpected shape is an error on screen, not an empty list", async () => {
+  const page = await mountRoute("/workflows", { [`/projects/${PROJECT.id}/task-templates`]: [{ id: "t-1", name: "No retirement field" }] });
+  try {
+    assert.match(page.container.textContent ?? "", new RegExp(t("en", "workflows.error.shape")));
+    assert.equal(page.container.querySelector("table"), null);
+    assert.ok(!(page.container.textContent ?? "").includes(t("en", "workflows.templates.empty")));
+  } finally {
+    await page.dispose();
+  }
+});
+
+for (const [label, body] of [
+  ["object description", [{ ...TEMPLATE, description: { bad: true } }]],
+  ["missing description", [{ ...TEMPLATE, description: undefined }]],
+  ["invalid variables", [{ ...TEMPLATE, variables: [123] }]],
+  ["invalid step", [{ ...TEMPLATE, steps: [null] }]],
+  ["null body", null],
+  ["empty body", new Response(null, { status: 200 })],
+  ["malformed step fields", [{ ...TEMPLATE, steps: [{ ...TEMPLATE.steps[0], priorOutputKinds: [123] }] }]],
+] as const) {
+  test(`the template list rejects ${label} with a localized error`, async () => {
+    const page = await mountRoute("/workflows", { [`/projects/${PROJECT.id}/task-templates`]: body });
+    try {
+      assert.ok((page.container.textContent ?? "").includes(t("en", "workflows.error.shape")));
+      assert.equal(page.container.querySelector("table"), null);
+      assert.ok(!(page.container.textContent ?? "").includes(t("en", "workflows.templates.empty")));
+    } finally {
+      await page.dispose();
+    }
+  });
+}
 
 test("the profile list shows the default badge and refuses to delete the default while others exist", async () => {
   const page = await mountRoute("/workflows/template-1", templateRoutes([FAST_LANE, CAREFUL]));
