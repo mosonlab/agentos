@@ -14,7 +14,7 @@ import { PR_TEMPLATE_NAME, type RunOutputEvidence, type RunOutputSatisfaction } 
 import { ControlPlaneError, type ClaimedTask } from "./api.js";
 import { adapters, type CliAdapter, type ExitEvidence, type RuntimeHandle } from "./adapters.js";
 import { parseClaudeTranscript } from "./adapters/claude.js";
-import { parseCodexTranscript } from "./adapters/codex.js";
+import { initialCodexState, parseCodexTranscript } from "./adapters/codex.js";
 import { parsePiTranscript } from "./adapters/pi.js";
 import type { RunnerConfig } from "./config.js";
 import { RUNNER_EXCEPTION_REASON, summarizeEvidence } from "./envelope.js";
@@ -394,8 +394,6 @@ const resumeQualifiedExit: ExitEvidence = {
   terminationReason: null,
   finalOutput: null,
   providerError: "Reconnecting... 3/5 (stream disconnected before completion: tls handshake eof)",
-  sawNonReconnectProviderError: false,
-  firstNonReconnectProviderError: null,
   stdout: "",
   stderr: "",
 };
@@ -420,9 +418,7 @@ const syntheticRuntimeHandle = (
     terminationReason: evidence.terminationReason,
     sawError: false,
     providerError: evidence.providerError,
-    sawNonReconnectProviderError: evidence.sawNonReconnectProviderError,
-    firstNonReconnectProviderError: evidence.firstNonReconnectProviderError,
-    providerState: null,
+    providerState: initialCodexState(),
     finalOutput: evidence.finalOutput,
     stdout: evidence.stdout,
     stderr: evidence.stderr,
@@ -1179,8 +1175,6 @@ test("the original Run budget continues through remediation", async () => {
               terminationReason: null,
               finalOutput: null,
               providerError: remediationSetupState,
-              sawNonReconnectProviderError: false,
-              firstNonReconnectProviderError: null,
               stdout: "",
               stderr: remediationSetupState,
             });
@@ -1209,8 +1203,6 @@ test("the original Run budget continues through remediation", async () => {
           terminationReason: reason,
           finalOutput: null,
           providerError: null,
-          sawNonReconnectProviderError: false,
-          firstNonReconnectProviderError: null,
           stdout: "",
           stderr: "",
         });

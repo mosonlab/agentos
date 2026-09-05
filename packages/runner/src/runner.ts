@@ -57,6 +57,12 @@ import {
   summarizeEvidence,
 } from "./envelope.js";
 import { transientBackoff } from "./network-retry.js";
+import {
+  decideProviderRelaunch,
+  PROVIDER_RESUME_MAX_ATTEMPTS,
+  providerRelaunchRefusalSummary,
+  type ProviderRelaunchLeaseFacts,
+} from "./provider-relaunch.js";
 import { createRunLease, deliverUnderLease, type RunLease, type RunLeaseClock } from "./run-lease.js";
 import { openSessionConfig, type SessionConfigLease } from "./session-config-lease.js";
 import { readRegressionOutputHandoff, type RegressionOutputHandoffBlock } from "./regression-output-handoff.js";
@@ -107,11 +113,6 @@ const missingOutputRemediationInput = (outputKind: string): string => [
   `Using the work and evidence already produced in this conversation, call task_output with kind '${outputKind}' and a body that satisfies the task's exact output contract and current HEAD binding.`,
   "If the write is rejected, correct the body and retry. Then call task_status and finish only after its outputEvidence reports satisfaction case 'delivered' for this Run.",
 ].join("\n");
-
-export const PROVIDER_RESUME_MAX_ATTEMPTS = 3;
-export const PROVIDER_RESUME_MIN_LEASE_TTL_MS = 15_000;
-export const PROVIDER_RESUME_MIN_WALLTIME_MS = 15_000;
-export const PROVIDER_RESUME_BACKOFF_CEILING_MS = 7_000;
 
 export const providerDisconnectResumeInput = (): string => [
   "The provider stream dropped before the task reached its terminal event.",
@@ -200,8 +201,6 @@ const preflightEvidence = (message: string): ExitEvidence => ({
   terminalSuccess: false,
   finalOutput: null,
   providerError: null,
-  sawNonReconnectProviderError: false,
-  firstNonReconnectProviderError: null,
   terminationReason: null,
   stdout: "",
   stderr: message,
@@ -581,77 +580,76 @@ export const executeClaim = async (
     producedOutput = outputTail(evidence);
     let providerResumeAttempts = 0;
     const resumeBackoff = dependencies.providerResumeBackoff ?? transientBackoff;
+    const renewLease = async (): Promise<ProviderRelaunchLeaseFacts> => {
+      const renewal = await runLease.renewNow();
+      return {
+        accepted: renewal.accepted,
+        authorityHeld: renewal.authority.held,
+        leaseHeadroomMs: renewal.leaseHeadroomMs,
+      };
+    };
     while (true) {
-      if (handle.lastProgressEventAt > handle.startedAt
-        && handle.lastProgressEventAt > executionLastProgressEventAt) {
-        executionLastProgressEventAt = handle.lastProgressEventAt;
+      const deadHandle = handle;
+      if (deadHandle.lastProgressEventAt > deadHandle.startedAt
+        && deadHandle.lastProgressEventAt > executionLastProgressEventAt) {
+        executionLastProgressEventAt = deadHandle.lastProgressEventAt;
       }
       const deadProviderConversationId = rememberProviderConversationId();
-      if (!adapter.isInRunResumeCandidate?.(evidence, deadProviderConversationId)
-        || deadProviderConversationId === null) break;
-      if (providerResumeAttempts >= PROVIDER_RESUME_MAX_ATTEMPTS) {
-        sink({
-          source: "RUNNER",
-          type: "PROVIDER_RESUME_EXHAUSTED",
-          payload: {
-            attempt: providerResumeAttempts + 1,
-            cap: PROVIDER_RESUME_MAX_ATTEMPTS,
-            providerConversationId: deadProviderConversationId,
-            backoffMs: 0,
-            evidence: exitEvidencePayload(evidence),
-          },
-        });
+      const relaunch = await decideProviderRelaunch({
+        purpose: "resume-disconnect",
+        providerConversationId: deadProviderConversationId,
+        exitResumable: adapter.isInRunResumeCandidate?.(
+          evidence,
+          deadProviderConversationId,
+          deadHandle.providerState,
+        ) ?? false,
+        attempts: providerResumeAttempts,
+        authorityHeld: () => runLease.authority.held,
+        budgetRefused: () => budget.refusal !== null,
+        remainingWalltimeMs: () => executionStartedAt.getTime() + claim.run.maxDurationMin * 60_000 - now(),
+        probeDurableTerminalProduct,
+        renewLease,
+        backoff: async (attempt) => {
+          const backoffStartedAt = now();
+          await resumeBackoff(attempt);
+          return Math.max(0, now() - backoffStartedAt);
+        },
+      });
+      if (!relaunch.allowed) {
+        if (relaunch.reason === "attempt-cap-reached") {
+          sink({
+            source: "RUNNER",
+            type: "PROVIDER_RESUME_EXHAUSTED",
+            payload: {
+              attempt: providerResumeAttempts + 1,
+              cap: PROVIDER_RESUME_MAX_ATTEMPTS,
+              providerConversationId: deadProviderConversationId,
+              backoffMs: 0,
+              evidence: exitEvidencePayload(evidence),
+            },
+          });
+        }
         break;
       }
-      // A non-held authority here was already adopted from an acknowledged
-      // heartbeat. It cannot authorize a relaunch, so do not spend backoff
-      // time merely to ask the same stopped lease again.
-      if (!runLease.authority.held || budget.refusal !== null) break;
-      if (providerResumeAttempts === 0) {
-        const productProbe = await probeDurableTerminalProduct();
-        if (productProbe !== "absent") break;
-      }
-
-      const attempt = providerResumeAttempts + 1;
-      const backoffStartedAt = now();
-      let backoffMs = 0;
-      const [renewal] = await Promise.all([
-        runLease.renewNow(),
-        (async () => {
-          await resumeBackoff(attempt);
-          backoffMs = Math.max(0, now() - backoffStartedAt);
-        })(),
-      ]);
-      const authority = await runLease.checkpoint();
-      const remainingLeaseMs = renewal.remainingLeaseMs - Math.max(0, now() - renewal.observedAt);
-      const remainingWalltimeMs = executionStartedAt.getTime()
-        + claim.run.maxDurationMin * 60_000
-        - now();
-      if (!renewal.accepted
-        || !renewal.authority.held
-        || !authority.held
-        || remainingLeaseMs <= PROVIDER_RESUME_MIN_LEASE_TTL_MS
-        || remainingWalltimeMs <= PROVIDER_RESUME_MIN_WALLTIME_MS
-        || budget.refusal !== null) break;
 
       sink({
         source: "RUNNER",
         type: "PROVIDER_RESUME_STARTED",
         payload: {
-          attempt,
+          attempt: relaunch.attempt,
           cap: PROVIDER_RESUME_MAX_ATTEMPTS,
-          providerConversationId: deadProviderConversationId,
-          backoffMs,
+          providerConversationId: relaunch.providerConversationId,
+          backoffMs: relaunch.backoffMs,
           evidence: exitEvidencePayload(evidence),
         },
       });
       const resumedHandle = await runLease.launch(() => adapter.resume({
         ...spec,
-        providerConversationId: deadProviderConversationId,
+        providerConversationId: relaunch.providerConversationId,
         input: providerDisconnectResumeInput(),
       }, sink));
       if (!resumedHandle) break;
-      providerResumeAttempts = attempt;
+      providerResumeAttempts = relaunch.attempt;
       handle = resumedHandle;
       evidence = await resumedHandle.exit;
       producedOutput = outputTail(evidence);
@@ -721,7 +719,17 @@ export const executeClaim = async (
       } else if (satisfaction?.case === "absent") {
         const { outputKind } = satisfaction;
         const providerConversationId = rememberProviderConversationId();
-        if (!satisfaction.remediable) {
+        // Only a remediable kind reaches the relaunch question at all: the
+        // mechanical verdict below is not a repair this gate could authorize.
+        const relaunch = satisfaction.remediable
+          ? await decideProviderRelaunch({
+            purpose: "remediate-missing-output",
+            providerConversationId,
+            authorityHeld: () => runLease.held,
+            budgetRefused: () => budget.refusal !== null,
+          })
+          : null;
+        if (relaunch === null) {
           // Only a mechanical verdict is undeliverable by asking again, and
           // the control plane says so; the runner does not re-test the kind.
           terminalFailureReason = regressionHandoffBlock
@@ -739,7 +747,7 @@ export const executeClaim = async (
                 : { reason: regressionHandoffPersisted ? "mechanical-output-not-visible" : "mechanical-handoff-absent" }),
             },
           });
-        } else if (providerConversationId && runLease.held) {
+        } else if (relaunch.allowed) {
           const beforeRemediation = await captureWorkspaceSnapshot(config, workspace);
           // Snapshotting is asynchronous. Cancellation may have been ACKed
           // against the already-closed first launch while it ran, so no second
@@ -752,7 +760,7 @@ export const executeClaim = async (
             });
             const remediationHandle = await runLease.launch(() => adapter.resume({
               ...spec,
-              providerConversationId,
+              providerConversationId: relaunch.providerConversationId,
               input: missingOutputRemediationInput(outputKind),
             }, sink));
             if (remediationHandle) {
@@ -803,7 +811,7 @@ export const executeClaim = async (
           }
         } else {
           terminalFailureReason = `Task output remediation unavailable for Run ${claim.run.id}: ${
-            providerConversationId ? "the Run no longer holds its lease" : "provider conversation id is unavailable"
+            providerRelaunchRefusalSummary(relaunch.reason)
           }`;
           sink({
             source: "RUNNER",
@@ -812,6 +820,7 @@ export const executeClaim = async (
               outputKind,
               outputRemediationAllowed: true,
               providerConversationIdAvailable: providerConversationId !== null,
+              reason: relaunch.reason,
             },
           });
         }

@@ -12,15 +12,16 @@ import type { RunOutcome, RunOutputEvidence } from "@anneal/db";
 import {
   adapters, buildPrompt, RUNNER_KINDS, type AdapterEvent, type CliAdapter, type ExitEvidence, type RuntimeHandle,
 } from "./adapters.js";
+import { initialCodexState, type CodexProviderState } from "./adapters/codex.js";
 import type { ClaimedTask, ControlPlane } from "./api.js";
 import type { RunnerConfig } from "./config.js";
 import {
-  cliAvailabilityHeartbeatSchedule,
-  executeClaim as executeClaimProduction,
   PROVIDER_RESUME_BACKOFF_CEILING_MS,
   PROVIDER_RESUME_MAX_ATTEMPTS,
-  PROVIDER_RESUME_MIN_LEASE_TTL_MS,
-  PROVIDER_RESUME_MIN_WALLTIME_MS,
+} from "./provider-relaunch.js";
+import {
+  cliAvailabilityHeartbeatSchedule,
+  executeClaim as executeClaimProduction,
   providerDisconnectResumeInput,
   reportCliAvailabilityHeartbeat as reportCliAvailabilityHeartbeatProduction,
   runStartupPreflight as runStartupPreflightProduction,
@@ -341,8 +342,6 @@ test("a review step records the dependency skip before fake adapter preflight an
           terminationReason: null,
           sawError: false,
           providerError: null,
-          sawNonReconnectProviderError: false,
-          firstNonReconnectProviderError: null,
           providerState: null,
           finalOutput: null,
           stdout: "",
@@ -355,8 +354,6 @@ test("a review step records the dependency skip before fake adapter preflight an
             terminationReason: null,
             finalOutput: null,
             providerError: null,
-            sawNonReconnectProviderError: false,
-            firstNonReconnectProviderError: null,
             stdout: "",
             stderr: "",
           }),
@@ -451,8 +448,6 @@ test("an implementation step provisions dependencies without recording the revie
           terminationReason: null,
           sawError: false,
           providerError: null,
-          sawNonReconnectProviderError: false,
-          firstNonReconnectProviderError: null,
           providerState: null,
           finalOutput: null,
           stdout: "",
@@ -465,8 +460,6 @@ test("an implementation step provisions dependencies without recording the revie
             terminationReason: null,
             finalOutput: null,
             providerError: null,
-            sawNonReconnectProviderError: false,
-            firstNonReconnectProviderError: null,
             stdout: "",
             stderr: "",
           }),
@@ -872,8 +865,6 @@ const regressionBlockAdapter = async (
     terminationReason: null,
     sawError: false,
     providerError: null,
-    sawNonReconnectProviderError: false,
-    firstNonReconnectProviderError: null,
     providerState: null,
     finalOutput: null,
     stdout: "",
@@ -886,8 +877,6 @@ const regressionBlockAdapter = async (
       terminationReason: null,
       finalOutput: null,
       providerError: null,
-      sawNonReconnectProviderError: false,
-      firstNonReconnectProviderError: null,
       stdout: "",
       stderr: "",
     }),
@@ -983,8 +972,6 @@ test("a Regression missing-output refusal without a block record keeps its exist
           terminationReason: null,
           sawError: false,
           providerError: null,
-          sawNonReconnectProviderError: false,
-          firstNonReconnectProviderError: null,
           providerState: null,
           finalOutput: null,
           stdout: "",
@@ -997,8 +984,6 @@ test("a Regression missing-output refusal without a block record keeps its exist
             terminationReason: null,
             finalOutput: null,
             providerError: null,
-            sawNonReconnectProviderError: false,
-            firstNonReconnectProviderError: null,
             stdout: "",
             stderr: "",
           }),
@@ -1378,8 +1363,6 @@ const reconnectEvidence = (overrides: Partial<ExitEvidence> = {}): ExitEvidence 
   terminationReason: null,
   finalOutput: null,
   providerError: "Reconnecting... 3/5 (stream disconnected before completion: tls handshake eof)",
-  sawNonReconnectProviderError: false,
-  firstNonReconnectProviderError: null,
   stdout: "",
   stderr: "",
   ...overrides,
@@ -1393,8 +1376,6 @@ const successfulResumeEvidence = (overrides: Partial<ExitEvidence> = {}): ExitEv
   terminationReason: null,
   finalOutput: "resumed output",
   providerError: null,
-  sawNonReconnectProviderError: false,
-  firstNonReconnectProviderError: null,
   stdout: "",
   stderr: "",
   ...overrides,
@@ -1403,6 +1384,8 @@ const successfulResumeEvidence = (overrides: Partial<ExitEvidence> = {}): ExitEv
 type PlannedResumeChild = {
   evidence: ExitEvidence;
   providerConversationId: string | null;
+  /** The Codex adapter's own record of the child, when a case needs one. */
+  providerState?: CodexProviderState;
   startedAt?: Date;
   event?: AdapterEvent;
   exit?: Promise<ExitEvidence>;
@@ -1433,9 +1416,7 @@ const fakeRuntimeHandle = (
     terminationReason: child.evidence.terminationReason,
     sawError: child.evidence.providerError !== null,
     providerError: child.evidence.providerError,
-    sawNonReconnectProviderError: child.evidence.sawNonReconnectProviderError ?? false,
-    firstNonReconnectProviderError: child.evidence.firstNonReconnectProviderError ?? null,
-    providerState: null,
+    providerState: child.providerState ?? initialCodexState(),
     finalOutput: child.evidence.finalOutput,
     stdout: child.evidence.stdout,
     stderr: child.evidence.stderr,
@@ -1658,23 +1639,10 @@ type NoResumeCase = {
   withoutCapability?: boolean;
 };
 
+// The exit shapes a Codex disconnect is disqualified by are the adapter's own
+// question, proven in adapters.test.ts. These two cases prove the wiring: a
+// refusal from the relaunch gate stops the loop before any second child.
 const noResumeCases: NoResumeCase[] = [
-  {
-    name: "an authentication failure",
-    evidence: reconnectEvidence({ exitCode: 1, providerError: "not logged in" }),
-  },
-  {
-    name: "a missing binary exit",
-    evidence: reconnectEvidence({ exitCode: 127, stderr: "codex: command not found" }),
-  },
-  {
-    name: "a terminal event",
-    evidence: reconnectEvidence({ terminalEventSeen: true, terminalSuccess: false }),
-  },
-  {
-    name: "a runner termination reason",
-    evidence: reconnectEvidence({ terminationReason: "walltime budget exceeded" }),
-  },
   {
     name: "a missing provider conversation id",
     evidence: reconnectEvidence(),
@@ -1764,7 +1732,9 @@ test("Codex resume backoff uses attempts one, two, and three within the seven-se
   }
 });
 
-test("a lease with fifteen seconds remaining does not relaunch a disconnected provider", async () => {
+// The lease floor is the one gate fact the backoff itself can invalidate, so
+// it is proven end to end: the wait consumes the lease this Run is holding.
+test("a lease the backoff consumes down to the floor does not relaunch a disconnected provider", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-codex-in-run-resume-ttl-floor-"));
   const clock = new ResumeFakeClock();
   try {
@@ -1775,38 +1745,6 @@ test("a lease with fifteen seconds remaining does not relaunch a disconnected pr
     }], {
       runLeaseClock: clock,
       providerResumeBackoff: async () => { await clock.advanceBy(45_000); },
-    });
-
-    assert.equal(resumeCalls.length, 0);
-    assert.equal(
-      controlPlane.eventBatches.flat().some(({ type }) => type === "PROVIDER_RESUME_STARTED"),
-      false,
-    );
-    assert.equal(controlPlane.completions.at(-1)?.outcome.case, "provider-failure");
-    assert.ok(PROVIDER_RESUME_MIN_LEASE_TTL_MS > 0);
-  } finally {
-    await cleanupTestSession(root);
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("an execute budget with only the minimum attempt window remaining does not relaunch", async () => {
-  const root = await mkdtemp(join(tmpdir(), "runner-codex-in-run-resume-walltime-floor-"));
-  const clock = new ResumeFakeClock();
-  try {
-    const remote = await seedRemote(root);
-    const claim = codexResumeClaim(remote, root);
-    const startedAt = new Date(
-      clock.now() - claim.run.maxDurationMin * 60_000 + PROVIDER_RESUME_MIN_WALLTIME_MS,
-    );
-    const { controlPlane, resumeCalls } = await executeCodexResumeScenario(root, remote, [{
-      evidence: reconnectEvidence(),
-      providerConversationId: "thread-resume",
-      startedAt,
-    }], {
-      claim,
-      runLeaseClock: clock,
-      providerResumeBackoff: async () => undefined,
     });
 
     assert.equal(resumeCalls.length, 0);

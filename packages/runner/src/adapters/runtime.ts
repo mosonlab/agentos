@@ -31,10 +31,6 @@ export type ExitEvidence = {
   terminationReason: string | null;
   finalOutput: string | null;
   providerError: string | null;
-  /** Whether this child reported any non-reconnect provider error. */
-  sawNonReconnectProviderError: boolean;
-  /** The first non-reconnect provider error, when one had a message. */
-  firstNonReconnectProviderError: string | null;
   stdout: string;
   stderr: string;
 };
@@ -65,10 +61,7 @@ export type AdapterState = {
   terminationReason: string | null;
   sawError: boolean;
   providerError: string | null;
-  /** A reconnect status is provisional; this flag preserves a real error
-   *  observed earlier in the same provider child. */
-  sawNonReconnectProviderError: boolean;
-  firstNonReconnectProviderError: string | null;
+  /** The provider's own record of this child, owned by its adapter alone. */
   providerState: unknown;
   finalOutput: string | null;
   stdout: string;
@@ -117,8 +110,16 @@ export interface CliAdapter {
   kill(handle: RuntimeHandle, reason: string): Promise<KillResult>;
   heartbeat(handle: RuntimeHandle): Promise<HeartbeatSnapshot>;
   classifyError(evidence: ExitEvidence): ClassifiedFailure;
-  /** Provider-owned qualification for an in-Run resume after a dead child. */
-  isInRunResumeCandidate?(evidence: ExitEvidence, providerConversationId: string | null): boolean;
+  /**
+   * Provider-owned qualification for an in-Run resume after a dead child. The
+   * verdict reads the adapter's own `providerState` from that child, so no
+   * provider-shaped history has to travel on the shared exit record.
+   */
+  isInRunResumeCandidate?(
+    evidence: ExitEvidence,
+    providerConversationId: string | null,
+    providerState: unknown,
+  ): boolean;
 }
 
 export type AdapterEventParser = (
@@ -163,7 +164,11 @@ export type AdapterDeclaration = {
   parseEvent: AdapterEventParser;
   preflight(spec: PreflightSpec): Promise<PreflightResult>;
   /** Optional provider-owned qualification for in-Run resume. */
-  isInRunResumeCandidate?(evidence: ExitEvidence, providerConversationId: string | null): boolean;
+  isInRunResumeCandidate?(
+    evidence: ExitEvidence,
+    providerConversationId: string | null,
+    providerState: unknown,
+  ): boolean;
 };
 
 export const createAdapterState = (
@@ -184,8 +189,6 @@ export const createAdapterState = (
   terminationReason: null,
   sawError: false,
   providerError: null,
-  sawNonReconnectProviderError: false,
-  firstNonReconnectProviderError: null,
   providerState,
   finalOutput: null,
   stdout: "",
@@ -363,8 +366,6 @@ export const spawnAdapterRuntime = (
         terminationReason: handle.terminationReason,
         finalOutput: handle.finalOutput,
         providerError: handle.providerError,
-        sawNonReconnectProviderError: handle.sawNonReconnectProviderError,
-        firstNonReconnectProviderError: handle.firstNonReconnectProviderError,
         stdout: handle.stdout,
         stderr: handle.stderr,
       });

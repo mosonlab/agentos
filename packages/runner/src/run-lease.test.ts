@@ -172,7 +172,7 @@ test("renewNow sends one renewal and keeps dead-window TTL anchored to a live re
     clock.time = 1_000;
     const live = await lease.renewNow();
     assert.deepEqual(live.authority, { held: true });
-    assert.equal(live.remainingLeaseMs, 60_000);
+    assert.equal(live.leaseHeadroomMs, 60_000);
     assert.equal(live.accepted, true);
     assert.equal(observations.length, 1);
     assert.equal(observations[0]?.processAlive, true);
@@ -184,11 +184,48 @@ test("renewNow sends one renewal and keeps dead-window TTL anchored to a live re
     clock.time = 10_000;
     const deadWindow = await lease.renewNow();
     assert.deepEqual(deadWindow.authority, { held: true });
-    assert.equal(deadWindow.remainingLeaseMs, 51_000);
+    assert.equal(deadWindow.leaseHeadroomMs, 51_000);
     assert.equal(deadWindow.accepted, true);
     assert.equal(observations.length, 2);
     assert.equal(observations[1]?.processAlive, false);
   } finally {
+    await lease.close();
+  }
+});
+
+test("renewNow settles a transition another caller started before it answers", async () => {
+  const clock = new FakeClock();
+  const stops: string[] = [];
+  let releaseStop!: () => void;
+  const stopPending = new Promise<void>((resolve) => { releaseStop = resolve; });
+  const lease = createLease(clock, async () => ({ held: true }), {
+    stopProvider: async (provider, reason) => {
+      await stopPending;
+      stops.push(`${provider.id}:${reason}`);
+      return { processAlive: false };
+    },
+  });
+  const provider = await lease.launch(async () => ({ id: "child" }));
+  assert.ok(provider);
+
+  try {
+    // The runner adopts an event-flush rejection without awaiting it. The
+    // relaunch gate must not read an authority whose drain is still running.
+    void lease.adoptError(rejection());
+    await Promise.resolve();
+    let answered = false;
+    const pending = lease.renewNow().then((renewal) => { answered = true; return renewal; });
+    await new Promise<void>((resolve) => { setImmediate(resolve); });
+    assert.equal(answered, false, "renewNow must not answer while a drain it did not start is running");
+    assert.deepEqual(stops, []);
+
+    releaseStop();
+    const renewal = await pending;
+    assert.deepEqual(renewal.authority, { held: false, reason: "revoked" });
+    assert.equal(renewal.accepted, false, "a lost authority sends no renewal");
+    assert.deepEqual(stops, ["child:fencing token rejected"]);
+  } finally {
+    releaseStop();
     await lease.close();
   }
 });
@@ -245,7 +282,7 @@ test("renewNow marks a transport failure as unacknowledged", async () => {
     const renewal = await lease.renewNow();
     assert.deepEqual(renewal.authority, { held: true });
     assert.equal(renewal.accepted, false);
-    assert.equal(renewal.remainingLeaseMs, 50_000);
+    assert.equal(renewal.leaseHeadroomMs, 50_000);
   } finally {
     await lease.close();
   }

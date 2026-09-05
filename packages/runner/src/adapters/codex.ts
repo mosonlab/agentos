@@ -47,23 +47,35 @@ const NON_RESUMABLE_FAILURE_CLASSES = new Set([
   "CANCELLED_OR_TIMED_OUT",
 ]);
 
+/** What the Codex adapter remembers about one child beyond the shared record. */
+export type CodexProviderState = {
+  /** A reconnect status is provisional; this flag preserves a real provider
+   *  error observed earlier in the same child. */
+  sawNonReconnectProviderError: boolean;
+};
+
+export const initialCodexState = (): CodexProviderState => ({ sawNonReconnectProviderError: false });
+
+const codexState = (providerState: unknown): CodexProviderState => providerState as CodexProviderState;
+
 /**
  * Decide whether a dead Codex child can be continued in the same Run.
  *
  * Reconnect progress is reported through Codex's `error` event, but a plain
- * reconnect message is only provisional. The adapter carries the history of
- * non-reconnect provider errors separately so a later reconnect status cannot
+ * reconnect message is only provisional. The adapter's own state carries the
+ * history of non-reconnect provider errors so a later reconnect status cannot
  * hide an earlier terminal provider error.
  */
 export const isCodexInRunResumeCandidate = (
   evidence: ExitEvidence,
   providerConversationId: string | null,
+  providerState: unknown,
 ): boolean => {
   if (evidence.terminalEventSeen
     || evidence.signal !== null
     || evidence.terminationReason !== null
     || providerConversationId === null
-    || evidence.sawNonReconnectProviderError) return false;
+    || codexState(providerState).sawNonReconnectProviderError) return false;
 
   if (NON_RESUMABLE_FAILURE_CLASSES.has(classifyRuntimeError(evidence).failureClass)) return false;
 
@@ -216,10 +228,7 @@ export const parseCodexEvent = (
       state.sawError = true;
       // The final bare disconnect is the resumable terminal form of the
       // reconnect status, not a separate provider rejection.
-      if (!isCodexBareDisconnect(message)) {
-        state.sawNonReconnectProviderError = true;
-        state.firstNonReconnectProviderError ??= message;
-      }
+      if (!isCodexBareDisconnect(message)) codexState(state.providerState).sawNonReconnectProviderError = true;
     }
     state.providerError = message ?? state.providerError;
     emitAdapterEvent(state, sink, "ADAPTER_ERROR", event);
@@ -234,7 +243,7 @@ export const parseCodexTranscript = (
   transcript: readonly unknown[],
   sink: SessionEventSink = () => undefined,
 ): AdapterState => {
-  const state = createAdapterState("CODEX", "transcript");
+  const state = createAdapterState("CODEX", "transcript", initialCodexState());
   for (const value of transcript) processProviderEvent(state, asRecord(value) ?? { value }, sink, parseCodexEvent, () => true);
   return state;
 };
@@ -321,7 +330,7 @@ export const codexDeclaration: AdapterDeclaration = Object.freeze({
   args: codexArgs,
   childEnvironment: codexChildEnvironment,
   provisionSessionConfig: provisionCodexSessionConfig,
-  initialProviderState: () => undefined,
+  initialProviderState: initialCodexState,
   providerEventPersistence: () => true,
   parseEvent: parseCodexEvent,
   preflight,
