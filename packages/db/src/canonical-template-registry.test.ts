@@ -33,6 +33,9 @@ test("the pull-request template has current identity, prompt history, and explic
       marker: "pre-astra-low-review-fix",
       promptDigest: undefined,
     }, {
+      marker: "model-neutral-review-step-names",
+      promptDigest: undefined,
+    }, {
       marker: "pre-salvage-resume",
       promptDigest: "1c1169bf0586f6bb71f4ed34b3eb6b166828802a9b24c6b07844b2f526b5f8a8",
     }],
@@ -72,7 +75,7 @@ test("a matching no-history pull-request row is current, never a rollover", () =
     },
     {
       stepIndex: 2,
-      name: "Code review (Sol)",
+      name: "Code review",
       layer: 2,
       agentName: "code-reviewer-sol-high",
       approvalGate: false,
@@ -89,7 +92,7 @@ test("a matching no-history pull-request row is current, never a rollover", () =
     },
     {
       stepIndex: 3,
-      name: "Code review (Opus blind)",
+      name: "Blind code review",
       layer: 2,
       agentName: "code-reviewer-opus-high",
       approvalGate: false,

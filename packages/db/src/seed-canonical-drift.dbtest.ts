@@ -82,6 +82,9 @@ test("seed rolls a registered canonical generation over inside its installation 
     await prisma.taskTemplateStep.update({
       where: { id: step.id },
       data: {
+        // Historical generations retain their original review labels.
+        name: step.outputKind === "sol-findings" ? "Code review (Sol)"
+          : step.outputKind === "blind-findings" ? "Code review (Opus blind)" : step.name,
         stepIndex: step.stepIndex - 1,
         layer: (step.layer ?? 0) - 1,
         baseFromStepIndex: step.baseFromStepIndex === null ? null : step.baseFromStepIndex - 1,

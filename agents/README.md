@@ -13,27 +13,35 @@ Follow its Tier 1 checklist when onboarding another Project.
 
 ## Changing a canonical prompt
 
-Editing any file under `templates/` retires the prompt generation every
-deployment is running. Canonical sync installs the source tree's prompts, and
-the rows it finds carry whatever generation the last deploy installed; it can
-only replace them when the registry says which retired generation they are.
+Editing any file under `templates/`, or changing a canonical template's
+structure, retires the generation every deployment is running. Canonical sync
+installs the source tree's prompts, and the rows it finds carry whatever
+generation the last deploy installed; it can only replace them when the
+registry says which retired generation they are.
 Three edits belong in the same change.
 
-1. Edit the Markdown.
+1. Edit the Markdown, or make the structural source change.
 2. Re-pin the source generation. `npm run db:template-digest` prints one digest
    per template; copy the changed one into
    `CANONICAL_SOURCE_PROMPT_GENERATIONS` in
-   `packages/db/src/canonical-template-transition.ts`.
-3. Publish the new generation and register the one it replaces. Append the new
-   digest to `PUBLISHED_PROMPT_GENERATIONS` in
+   `packages/db/src/canonical-template-transition.ts`. A shape-only change,
+   such as renaming a step while leaving every prompt file untouched, keeps
+   the existing digest exactly; run the command to verify that fact and do not
+   invent or replace the digest.
+3. Publish the new generation and register the one it replaces. For a
+   prompt-only change, append the new digest to
+   `PUBLISHED_PROMPT_GENERATIONS` in
    `packages/db/src/canonical-published-generations.ts` — append, never rewrite
    the last element, which names a generation already deployed — and add an
    entry to the retired-generation registry in
    `canonical-template-transition.ts` carrying a marker that names what
    changed, the shape those rows hold, and `promptDigest` set to the digest the
-   published list held before this change. A change that also changes the shape
-   is identified by its shape instead: register it without a `promptDigest` and
-   name its marker as `retiredByShape` on the published entry.
+   published list held before this change. For a shape-only change, annotate
+   the outgoing published entry with `retiredByShape` set to its marker, add
+   the retired-generation entry without `promptDigest`, and append the same
+   unchanged digest as the new last entry. That duplicate digest is
+   intentional: the structural marker distinguishes the two generations.
+   Never rewrite a published digest in place or invent one.
 
 `packages/db/src/canonical-published-generations.test.ts` refuses in the merge
 gate until all three are done, so a generation nothing can transition from
@@ -122,12 +130,12 @@ routing contract.
 The seed installs three templates over these roles: the twelve-step Full
 Assurance chain, the eight-step bound-capable direct chain
 (`direct-engineer-workflow`) — revalidation for bound briefs, implementation by
-`senior-dev-luna-max` from the task brief, parallel Sol and blind review siblings
-whose findings the fix step (`senior-dev-astra-low`, the senior developer prompt at
-Astra low) adjudicates itself, exact-head regression,
+`senior-dev-luna-max` from the task brief, parallel code review and blind code
+review siblings whose findings the fix step (`senior-dev-astra-low`, the senior
+developer prompt at Astra low) adjudicates itself, exact-head regression,
 server-side readiness, and mechanical merge — and the four-step pull-request
-chain (`pr-engineer-workflow`), which runs implementation, Sol and blind
-reviews, and review-fix application before ending at an open pull request with
+chain (`pr-engineer-workflow`), which runs implementation, code review and blind
+code review, and review-fix application before ending at an open pull request with
 no regression or merge step. Unbound direct instantiation omits the
 revalidation row and retains the historical seven-step prompts. All three step
 contracts live in their Markdown directories under `templates/`.

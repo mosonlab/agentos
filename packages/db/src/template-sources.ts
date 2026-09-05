@@ -27,8 +27,8 @@ export const CANONICAL_TEMPLATE_SOURCE_SPECS = [
     stepCount: 12,
     layers: [1, 2, 3, 4, 5, 6, 6, 7, 8, 9, 10, 11],
     stepNames: [
-      "Write a spec", "Plan", "Plan review", "Revise plan", "Implementation", "Code review (Sol)",
-      "Code review (Opus blind)", "Apply review fixes", "Librarian",
+      "Write a spec", "Plan", "Plan review", "Revise plan", "Implementation", "Code review",
+      "Blind code review", "Apply review fixes", "Librarian",
       "Regression verification", "Merge authorization", "Merge execution",
     ],
   },
@@ -38,8 +38,8 @@ export const CANONICAL_TEMPLATE_SOURCE_SPECS = [
     stepCount: 8,
     layers: [1, 2, 3, 3, 4, 5, 6, 7],
     stepNames: [
-      "Revalidate specification", "Implementation", "Code review (Sol)",
-      "Code review (Opus blind)", "Apply review fixes", "Regression verification",
+      "Revalidate specification", "Implementation", "Code review",
+      "Blind code review", "Apply review fixes", "Regression verification",
       "Merge authorization", "Merge execution",
     ],
   },
@@ -49,7 +49,7 @@ export const CANONICAL_TEMPLATE_SOURCE_SPECS = [
     stepCount: 4,
     layers: [1, 2, 2, 3],
     stepNames: [
-      "Implementation", "Code review (Sol)", "Code review (Opus blind)", "Apply review fixes",
+      "Implementation", "Code review", "Blind code review", "Apply review fixes",
     ],
   },
 ] as const;

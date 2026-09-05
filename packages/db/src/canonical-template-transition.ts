@@ -48,10 +48,12 @@ import type { PersistedTemplateStepStructure } from "./template-sources.js";
  * `senior-dev-astra-low`. Agent-only in all three templates, so it carries
  * `retiredByBinding` and is a published-generation record rather than a
  * structural match.
+ * `model-neutral-review-step-names`: the graphs whose review labels named
+ * their default models, before staffing-independent display names.
  * `pre-salvage-resume`: the graphs whose review-fix prompts still stopped at
  * every reviewed-head mismatch, before a Run that starts on the `WIP salvage`
  * commit of its own prior failed attempt was told to continue from it.
- * Prompt-only in all three templates.
+ * Prompt-only in all three templates, on top of the renamed review steps.
  */
 export type LegacyTemplateGeneration = Readonly<{
   marker: string;
@@ -274,17 +276,32 @@ const legacyTemplateGenerations = {
       ],
     },
     {
-      // Prompt-only rollover: the review-fix prompt now lets a Run that
-      // starts on the `WIP salvage` commit of its own prior failed attempt
-      // continue from it instead of stopping. The graph is unchanged, so
-      // `promptDigest` authenticates the outgoing generation.
-      marker: "pre-salvage-resume",
-      promptDigest: "8dbdb5fc5348a01eef73bd5908c4e142b4b6ca01bbb063eaf4916173fdc51543",
+      marker: "model-neutral-review-step-names",
+      successorStepOrdinals: { revalidation: 1, implementation: 2, "sol-findings": 3, "blind-findings": 4, "fixed-implementation": 5, regression: 6, readiness: 7, integrator: 8 },
       shape: [
         { name: "Revalidate specification", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revalidation", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Implementation", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
         { name: "Code review (Sol)", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 2, layer: 3, spawnPolicy: null, provisionDependencies: false },
         { name: "Code review (Opus blind)", assigneeType: AssigneeType.AGENT, approvalGate: false, optional: true, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 2, layer: 3, spawnPolicy: null, provisionDependencies: false },
+        { name: "Apply review fixes", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 4, spawnPolicy: null },
+        { name: "Regression verification", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "regression-verification-v2", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
+        { name: "Merge authorization", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-authorization", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 6, spawnPolicy: null },
+        { name: "Merge execution", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-result", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 7, spawnPolicy: null },
+      ],
+    },
+    {
+      // Prompt-only rollover on top of the renamed review steps: the
+      // review-fix prompt now lets a Run that starts on the `WIP salvage`
+      // commit of its own prior failed attempt continue from it instead of
+      // stopping. The graph is unchanged, so `promptDigest` authenticates
+      // the outgoing generation.
+      marker: "pre-salvage-resume",
+      promptDigest: "8dbdb5fc5348a01eef73bd5908c4e142b4b6ca01bbb063eaf4916173fdc51543",
+      shape: [
+        { name: "Revalidate specification", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revalidation", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Implementation", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
+        { name: "Code review", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 2, layer: 3, spawnPolicy: null, provisionDependencies: false },
+        { name: "Blind code review", assigneeType: AssigneeType.AGENT, approvalGate: false, optional: true, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 2, layer: 3, spawnPolicy: null, provisionDependencies: false },
         { name: "Apply review fixes", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 4, spawnPolicy: null },
         { name: "Regression verification", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "regression-verification-v2", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
         { name: "Merge authorization", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-authorization", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 6, spawnPolicy: null },
@@ -481,12 +498,8 @@ const legacyTemplateGenerations = {
       ],
     },
     {
-      // Prompt-only rollover: the review-fix prompt now lets a Run that
-      // starts on the `WIP salvage` commit of its own prior failed attempt
-      // continue from it instead of stopping. The graph is unchanged, so
-      // `promptDigest` authenticates the outgoing generation.
-      marker: "pre-salvage-resume",
-      promptDigest: "e1e95c18a408a0c1847508ed16d4c60ae3978007dfccdbfe50cd793ee8a78fa9",
+      marker: "model-neutral-review-step-names",
+      successorStepOrdinals: { spec: 1, plan: 2, "plan-review": 3, "revised-plan": 4, implementation: 5, "sol-findings": 6, "blind-findings": 7, "fixed-implementation": 8, documentation: 9, regression: 10, readiness: 11, integrator: 12 },
       shape: [
         { name: "Write a spec", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "spec", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, requiresCommit: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
@@ -495,6 +508,29 @@ const legacyTemplateGenerations = {
         { name: "Implementation", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: true, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
         { name: "Code review (Sol)", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null, provisionDependencies: false },
         { name: "Code review (Opus blind)", assigneeType: AssigneeType.AGENT, approvalGate: false, optional: true, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null, provisionDependencies: false },
+        { name: "Apply review fixes", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 7, spawnPolicy: null },
+        { name: "Librarian", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "documentation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 8, spawnPolicy: null },
+        { name: "Regression verification", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "regression-verification-v2", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 9, spawnPolicy: null },
+        { name: "Merge authorization", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-authorization", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 10, spawnPolicy: null },
+        { name: "Merge execution", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-result", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 11, spawnPolicy: null },
+      ],
+    },
+    {
+      // Prompt-only rollover on top of the renamed review steps: the
+      // review-fix prompt now lets a Run that starts on the `WIP salvage`
+      // commit of its own prior failed attempt continue from it instead of
+      // stopping. The graph is unchanged, so `promptDigest` authenticates
+      // the outgoing generation.
+      marker: "pre-salvage-resume",
+      promptDigest: "e1e95c18a408a0c1847508ed16d4c60ae3978007dfccdbfe50cd793ee8a78fa9",
+      shape: [
+        { name: "Write a spec", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "spec", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, requiresCommit: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
+        { name: "Plan review", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan-review", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
+        { name: "Revise plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revised-plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 4, spawnPolicy: null },
+        { name: "Implementation", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: true, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
+        { name: "Code review", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null, provisionDependencies: false },
+        { name: "Blind code review", assigneeType: AssigneeType.AGENT, approvalGate: false, optional: true, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null, provisionDependencies: false },
         { name: "Apply review fixes", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 7, spawnPolicy: null },
         { name: "Librarian", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "documentation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 8, spawnPolicy: null },
         { name: "Regression verification", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "regression-verification-v2", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 9, spawnPolicy: null },
@@ -546,16 +582,27 @@ const legacyTemplateGenerations = {
       ],
     },
     {
-      // Prompt-only rollover: the review-fix prompt now lets a Run that
-      // starts on the `WIP salvage` commit of its own prior failed attempt
-      // continue from it instead of stopping. The graph is unchanged, so
-      // `promptDigest` authenticates the outgoing generation.
-      marker: "pre-salvage-resume",
-      promptDigest: "1c1169bf0586f6bb71f4ed34b3eb6b166828802a9b24c6b07844b2f526b5f8a8",
+      marker: "model-neutral-review-step-names",
+      successorStepOrdinals: { implementation: 1, "sol-findings": 2, "blind-findings": 3, "fixed-implementation": 4 },
       shape: [
         { name: "Implementation", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Code review (Sol)", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null, provisionDependencies: false },
         { name: "Code review (Opus blind)", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null, provisionDependencies: false },
+        { name: "Apply review fixes", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
+      ],
+    },
+    {
+      // Prompt-only rollover on top of the renamed review steps: the
+      // review-fix prompt now lets a Run that starts on the `WIP salvage`
+      // commit of its own prior failed attempt continue from it instead of
+      // stopping. The graph is unchanged, so `promptDigest` authenticates
+      // the outgoing generation.
+      marker: "pre-salvage-resume",
+      promptDigest: "1c1169bf0586f6bb71f4ed34b3eb6b166828802a9b24c6b07844b2f526b5f8a8",
+      shape: [
+        { name: "Implementation", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Code review", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null, provisionDependencies: false },
+        { name: "Blind code review", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null, provisionDependencies: false },
         { name: "Apply review fixes", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
       ],
     },

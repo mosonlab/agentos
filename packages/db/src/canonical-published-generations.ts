@@ -46,20 +46,27 @@ export type PublishedPromptGeneration = Readonly<{
  * already retire them; nothing in the tree records what they were, and
  * inventing digests for them would state facts this repository cannot check.
  *
- * Append -- never rewrite the last element. Rewriting it in place asserts that
- * the generation it named was never published, which for anything already on
+ * A shape-only successor appends the unchanged digest after annotating the
+ * outgoing entry with its structural retirement marker. The digest plus that
+ * marker identifies the published graph; repeated unretired digests refuse.
+ *
+ * Append -- never rewrite the last element's digest. Rewriting it in place
+ * asserts that the generation it named was never published, which for anything already on
  * main is false.
  */
 export const PUBLISHED_PROMPT_GENERATIONS = {
   "direct-engineer-workflow": [
+    { digest: "8dbdb5fc5348a01eef73bd5908c4e142b4b6ca01bbb063eaf4916173fdc51543", retiredByShape: "model-neutral-review-step-names" },
     { digest: "8dbdb5fc5348a01eef73bd5908c4e142b4b6ca01bbb063eaf4916173fdc51543" },
     { digest: "a1a15921c9a4592c05db1e0d6d42f95ab2aa8c0011102bd20bf4d3b67b1bd0a1" },
   ],
   "compound-engineer-workflow": [
+    { digest: "e1e95c18a408a0c1847508ed16d4c60ae3978007dfccdbfe50cd793ee8a78fa9", retiredByShape: "model-neutral-review-step-names" },
     { digest: "e1e95c18a408a0c1847508ed16d4c60ae3978007dfccdbfe50cd793ee8a78fa9" },
     { digest: "be4428549ef4c428fd82ea9e6315bee040bd7874561f2fcc362a49216497bb66" },
   ],
   [PR_TEMPLATE_NAME]: [
+    { digest: "1c1169bf0586f6bb71f4ed34b3eb6b166828802a9b24c6b07844b2f526b5f8a8", retiredByShape: "model-neutral-review-step-names" },
     { digest: "1c1169bf0586f6bb71f4ed34b3eb6b166828802a9b24c6b07844b2f526b5f8a8" },
     { digest: "e1bbe7b7e56d287f1f4e7ea85beeef29bc84ab8c162882f1c4050540ca46f734" },
   ],
@@ -108,7 +115,8 @@ export const publishedGenerationDrift = (
     return `${templateName} publishes no prompt generation at all; ${PUBLISHED_FILE} must name the generation the source tree holds`;
   }
   const duplicate = published.find((entry, index) => (
-    published.findIndex((candidate) => candidate.digest === entry.digest) !== index
+    published.findIndex((candidate) => candidate.digest === entry.digest
+      && candidate.retiredByShape === entry.retiredByShape) !== index
   ));
   if (duplicate) {
     return `${templateName} publishes prompt generation ${duplicate.digest} twice; a generation is published once`;

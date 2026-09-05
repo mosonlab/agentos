@@ -320,7 +320,7 @@ test("direct authority is read from the implementation task and compound authori
   if (compound.status === "ready") assert.equal(new TextDecoder().decode(compound.verification.authoritativeBytes), "approved compound spec");
 });
 
-test("PR review claims prepare identical implementation authority for Sol and blind review", async () => {
+test("PR review claims prepare identical implementation authority for code review and blind code review", async () => {
   const brief = "the PR workflow authoritative brief";
   const implementationDescription = composeTemplateTaskDescription({
     prompt: "Implement the feature below.",
