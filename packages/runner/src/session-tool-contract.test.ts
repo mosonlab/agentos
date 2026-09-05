@@ -12,8 +12,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   manifestLines,
   requestFor,
-  SESSION_TOOL_TRANSPORTS,
-  toolsFor,
+  SESSION_TOOLS,
   type SessionToolName,
   type SessionToolRequest,
 } from "./session-tool-contract.js";
@@ -27,17 +26,12 @@ const toolNameFromManifest = (line: string): string => {
   return match[1]!;
 };
 
-test("each transport manifest is generated from exactly the tools it exposes", () => {
-  for (const transport of SESSION_TOOL_TRANSPORTS) {
-    assert.deepEqual(
-      manifestLines(transport).map(toolNameFromManifest),
-      toolsFor(transport).map((tool) => tool.name),
-      transport,
-    );
-  }
-  assert.equal(toolsFor("mcp-stdio").length, 10);
-  assert.equal(toolsFor("pi-extension").length, 10);
-  assert.deepEqual(toolsFor("script").map((tool) => tool.name), ["task_activity_log", "task_output"]);
+test("the manifest is generated from exactly the tools the contract exposes", () => {
+  assert.deepEqual(
+    manifestLines().map(toolNameFromManifest),
+    SESSION_TOOLS.map((tool) => tool.name),
+  );
+  assert.equal(SESSION_TOOLS.length, 10);
 });
 
 test("requestFor owns every session control-plane request shape", () => {
@@ -166,7 +160,7 @@ test("the dependency-free PI adapter inlines the canonical definitions and reque
 
     assert.deepEqual(
       registered.map(({ name, label, description, parameters }) => ({ name, label, description, parameters })),
-      toolsFor("pi-extension").map(({ name, title, description, inputSchema }) => ({
+      SESSION_TOOLS.map(({ name, title, description, inputSchema }) => ({
         name, label: title, description, parameters: inputSchema,
       })),
     );

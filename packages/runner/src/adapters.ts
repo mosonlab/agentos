@@ -5,7 +5,7 @@ import { stepRole } from "@anneal/db";
 import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
 import { hostProofSlotDirectory } from "./host-proof-slots.js";
-import { manifestLines, toolsFor } from "./session-tool-contract.js";
+import { manifestLines, SESSION_TOOLS } from "./session-tool-contract.js";
 import { gitCredentialHelperTool } from "./runtime-tools.js";
 import type { AgentScratch } from "./workspace.js";
 import { claudeDeclaration, claudePlatformSettingsPath } from "./adapters/claude.js";
@@ -50,7 +50,7 @@ const PROTECTED_SECRET_ENVIRONMENT = new Set([
 const toolManifest = (claim: ClaimedTask): string[] => [
   "",
   RUNNER_DEFINITIONS[claim.runner].toolIntroduction,
-  ...manifestLines(RUNNER_DEFINITIONS[claim.runner].toolTransport),
+  ...manifestLines(),
 ];
 
 export const buildPrompt = (claim: ClaimedTask): string => [
@@ -248,6 +248,6 @@ export const manifestFor = (spec: RunSpec, dispatchedPrompt: string): Record<str
   agentosTools: {
     transport: RUNNER_DEFINITIONS[spec.claim.runner].toolTransport,
     entrypoint: RUNNER_DEFINITIONS[spec.claim.runner].toolEntrypoint(),
-    tools: toolsFor(RUNNER_DEFINITIONS[spec.claim.runner].toolTransport).map((tool) => tool.name),
+    tools: SESSION_TOOLS.map((tool) => tool.name),
   },
 });

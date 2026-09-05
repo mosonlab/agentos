@@ -39,6 +39,7 @@ import {
 } from "../src/template-sources.js";
 
 const SENIOR_DEV_SOL_AGENT_NAME = "senior-dev-sol";
+const SENIOR_DEV_OPUS_AGENT_NAME = "senior-dev-opus";
 
 // Canonical roles that no template step binds, so ordinary synchronization
 // never creates them: each is created once from an active source Agent row.
@@ -50,6 +51,7 @@ const SPECIAL_CANONICAL_AGENTS: readonly {
   { name: REGRESSION_VERIFIER_AGENT_NAME, source: "review-coordinator-sol", permissions: null },
   { name: SPEC_REVALIDATOR_AGENT_NAME, source: "review-coordinator-sol", permissions: RepoPermission.GIT_READ },
   { name: SENIOR_DEV_SOL_AGENT_NAME, source: "senior-dev", permissions: null },
+  { name: SENIOR_DEV_OPUS_AGENT_NAME, source: "senior-dev", permissions: null },
 ];
 
 const runtimeConfigRefusal = (agent: { model: string; runnerPreference: RunnerPreference }): string | null => {

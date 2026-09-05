@@ -1,4 +1,4 @@
-export const SESSION_TOOL_TRANSPORTS = ["mcp-stdio", "pi-extension", "script"] as const;
+export const SESSION_TOOL_TRANSPORTS = ["mcp-stdio", "pi-extension"] as const;
 
 export type SessionToolTransport = typeof SESSION_TOOL_TRANSPORTS[number];
 
@@ -20,7 +20,6 @@ export type SessionToolDefinition = Readonly<{
   description: string;
   inputSchema: Readonly<Record<string, unknown>>;
   manifest: string;
-  transports: readonly SessionToolTransport[];
 }>;
 
 export type SessionToolRequest = Readonly<{
@@ -36,10 +35,7 @@ export type SessionToolRequestCredentials = Readonly<{
   requestIdPrefix?: string;
 }>;
 
-const INTERACTIVE_TRANSPORTS = ["mcp-stdio", "pi-extension"] as const;
-const ALL_TRANSPORTS = [...INTERACTIVE_TRANSPORTS, "script"] as const;
-
-const SESSION_TOOLS: readonly SessionToolDefinition[] = Object.freeze([
+export const SESSION_TOOLS: readonly SessionToolDefinition[] = Object.freeze([
   {
     name: "task_activity_log",
     title: "Append to the task activity log",
@@ -54,7 +50,6 @@ const SESSION_TOOLS: readonly SessionToolDefinition[] = Object.freeze([
       additionalProperties: false,
     },
     manifest: "- task_activity_log(body): record notable progress in the task activity log. Routine channel; never interrupts a human.",
-    transports: ALL_TRANSPORTS,
   },
   {
     name: "task_output",
@@ -71,7 +66,6 @@ const SESSION_TOOLS: readonly SessionToolDefinition[] = Object.freeze([
       additionalProperties: false,
     },
     manifest: "- task_output(kind, body, metadata?): persist this Step's deliverable using the task's exact output contract. Rejected writes change nothing; never submit placeholder probes. Closed final outputs may be immutable.",
-    transports: ALL_TRANSPORTS,
   },
   {
     name: "task_status",
@@ -79,7 +73,6 @@ const SESSION_TOOLS: readonly SessionToolDefinition[] = Object.freeze([
     description: "Read the current Anneal task and Run: name, status, Approval gate, Run number and budget, branch, and whether an output has already been persisted.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     manifest: "- task_status(): read the current task and Run status, budget, branch, and whether an output exists.",
-    transports: INTERACTIVE_TRANSPORTS,
   },
   {
     name: "task_patch",
@@ -94,7 +87,6 @@ const SESSION_TOOLS: readonly SessionToolDefinition[] = Object.freeze([
       additionalProperties: false,
     },
     manifest: "- task_patch(description): replace the current bound chain's implementation brief; the server derives the target and preserves platform-authored instructions.",
-    transports: INTERACTIVE_TRANSPORTS,
   },
   {
     name: "inbox_ask",
@@ -119,7 +111,6 @@ const SESSION_TOOLS: readonly SessionToolDefinition[] = Object.freeze([
       additionalProperties: false,
     },
     manifest: "- inbox_ask(body, choices?): ask the human. Suspends this Session until they answer; the Session resumes in place with the reply.",
-    transports: INTERACTIVE_TRANSPORTS,
   },
   {
     name: "revalidation_cancel",
@@ -127,7 +118,6 @@ const SESSION_TOOLS: readonly SessionToolDefinition[] = Object.freeze([
     description: "Cancel this bound revalidation Run after the operator chose 'cancel this chain' for a collapsed premise. The runner performs cleanup and terminalization; no task ID is accepted.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     manifest: "- revalidation_cancel(): cancel this bound revalidation chain after the operator selected 'cancel this chain'; the owning runner performs cleanup.",
-    transports: INTERACTIVE_TRANSPORTS,
   },
   {
     name: "files_list",
@@ -140,7 +130,6 @@ const SESSION_TOOLS: readonly SessionToolDefinition[] = Object.freeze([
       additionalProperties: false,
     },
     manifest: "- files_list(dir): list one Files Root directory non-recursively. Empty dir means the root. Requires a matching FilesystemGrant or returns 403.",
-    transports: INTERACTIVE_TRANSPORTS,
   },
   {
     name: "files_read",
@@ -153,7 +142,6 @@ const SESSION_TOOLS: readonly SessionToolDefinition[] = Object.freeze([
       additionalProperties: false,
     },
     manifest: "- files_read(path): read one file; binary content comes back with encoding base64. Requires a matching FilesystemGrant or returns 403.",
-    transports: INTERACTIVE_TRANSPORTS,
   },
   {
     name: "files_write",
@@ -170,7 +158,6 @@ const SESSION_TOOLS: readonly SessionToolDefinition[] = Object.freeze([
       additionalProperties: false,
     },
     manifest: "- files_write(path, content, encoding?): write one file, creating parent directories as needed. Requires a matching FilesystemGrant or returns 403.",
-    transports: INTERACTIVE_TRANSPORTS,
   },
   {
     name: "files_delete",
@@ -183,15 +170,10 @@ const SESSION_TOOLS: readonly SessionToolDefinition[] = Object.freeze([
       additionalProperties: false,
     },
     manifest: "- files_delete(path): delete one file or empty directory. Requires a matching FilesystemGrant or returns 403.",
-    transports: INTERACTIVE_TRANSPORTS,
   },
 ]);
 
-export const toolsFor = (transport: SessionToolTransport): readonly SessionToolDefinition[] =>
-  SESSION_TOOLS.filter((tool) => tool.transports.includes(transport));
-
-export const manifestLines = (transport: SessionToolTransport): readonly string[] =>
-  toolsFor(transport).map((tool) => tool.manifest);
+export const manifestLines = (): readonly string[] => SESSION_TOOLS.map((tool) => tool.manifest);
 
 const asRecord = (value: unknown): Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};

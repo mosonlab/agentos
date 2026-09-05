@@ -36,6 +36,31 @@ type Tx = Prisma.TransactionClient;
  * unbounded retry loop. Existing plumbing refunds remain outside this cap. */
 export const EXTERNAL_FAILURE_REFUND_CAP = 3;
 
+/**
+ * The ceiling a task's next attempt is measured against.
+ *
+ * `Task.maxSessionsPerTask` is the configured budget: how many attempts the
+ * agent's own work is allowed to cost, and an operator may change it at any
+ * time through `PATCH /tasks/:id`. `Run.budgetGrants` is what has been granted
+ * on top of it — one per attempt refunded as an external failure, plus any a
+ * human re-authorized — and it is carried forward onto every run a task
+ * creates, so the largest value across a task's runs is the running total.
+ *
+ * The two must stay separate. `Run.maxRunsPerTask` is the *sum* of the two as
+ * of the moment it was written, and a sum cannot be un-added: reading a
+ * historical `maxRunsPerTask` as though it were a grant meant a task whose
+ * budget an operator had just lowered from 5 to 2 still got five attempts,
+ * because two ordinary EXECUTE failures had left `5` on their rows and nothing
+ * could tell that 5 apart from a refund.
+ *
+ * Every budget gate has to read this. Two of them did not (issue #113): `POST
+ * /tasks/:id/start` and `startable` counted run rows against
+ * `Task.maxSessionsPerTask` alone and could not see the refunds, so a task
+ * whose only failures were sub-second clone errors reported "Run budget
+ * exhausted" to the operator while the operator-retry route, reading the very
+ * same refund one route away, would have let it run. A ceiling only half the
+ * system honours is not a ceiling.
+ */
 export const runBudgetCeiling = (
   maxSessionsPerTask: number,
   budgetGrants: number | null | undefined,

@@ -13,7 +13,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-import { requestFor, toolsFor, type SessionToolRequest } from "./session-tool-contract.js";
+import { requestFor, SESSION_TOOLS, type SessionToolRequest } from "./session-tool-contract.js";
 import { writeTaskOutputReceipt } from "./task-output-receipt.js";
 
 type JsonRpcRequest = {
@@ -90,7 +90,7 @@ const asRecord = (value: unknown): Record<string, unknown> =>
 
 const asString = (value: unknown): string | null => typeof value === "string" && value.trim().length > 0 ? value : null;
 
-export const TOOLS = toolsFor("mcp-stdio").map(({ name, title, description, inputSchema }) => ({
+export const TOOLS = SESSION_TOOLS.map(({ name, title, description, inputSchema }) => ({
   name, title, description, inputSchema,
 }));
 

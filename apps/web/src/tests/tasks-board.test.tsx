@@ -107,20 +107,24 @@ const progress = (overrides: Partial<ChainProgress> = {}): ChainProgress => ({
 /** Renders one real column. Everything the board decides per column — the head,
  *  the count, `Archive All`, the drop invitation — is decided in here, so these
  *  assertions read markup rather than the page's source text. */
-const column = (status: TaskStatus, tasks: (BoardEntry | BoardTask)[] = [], loading = false): string => {
+const column = (status: TaskStatus, entries: readonly BoardEntry[] = [], loading = false): string => {
   const found = COLUMNS.find((candidate) => candidate.status === status);
   assert.ok(found, `no ${status} column`);
   return renderToStaticMarkup(
     <BoardColumn
-      column={found} tasks={tasks} loading={loading} dragOver={null}
+      column={found} tasks={entries} loading={loading} dragOver={null}
       onDragOver={noop} onDragLeave={noop} onDrop={noop} onArchiveDone={noop} onActivateAll={noop} actions={ACTIONS}
     />,
   );
 };
 
-const mobile = (tab: TaskStatus, tasks: BoardTask[] = [], all: BoardTask[] = tasks): string => renderToStaticMarkup(
+const mobile = (
+  tab: TaskStatus,
+  entries: readonly BoardEntry[] = [],
+  all: readonly { status: TaskStatus }[] = entries,
+): string => renderToStaticMarkup(
   <MobileTaskList
-    tab={tab} counts={countByStatus(all)} tasks={tasks} loading={false}
+    tab={tab} counts={countByStatus(all)} tasks={entries} loading={false}
     onSelectTab={noop} onArchiveDone={noop} actions={ACTIONS} listRef={{ current: null }}
   />,
 );
@@ -224,7 +228,7 @@ test("drop confirmation decline is inert and a failed POST stays visible in its 
 
 test("a BACKLOG task lands in the first column and nowhere else", () => {
   const parked = task({ status: "BACKLOG", name: "Parked work" });
-  assert.match(column("BACKLOG", [parked]), /Parked work/);
+  assert.match(column("BACKLOG", boardEntries([parked])), /Parked work/);
   assert.doesNotMatch(column("TODO", []), /Parked work/);
 });
 
@@ -233,13 +237,13 @@ test("an empty column still invites a drop, Backlog included (E16)", () => {
     assert.match(column(status), new RegExp(en("tasks.column.drop")));
   }
   assert.match(column("BACKLOG", [], true), new RegExp(en("common.loading")));
-  assert.doesNotMatch(column("BACKLOG", [task({ status: "BACKLOG" })]), new RegExp(en("tasks.column.drop")));
+  assert.doesNotMatch(column("BACKLOG", boardEntries([task({ status: "BACKLOG" })])), new RegExp(en("tasks.column.drop")));
 });
 
 test("Archive All is offered only on a non-empty Done column", () => {
-  assert.match(column("DONE", [task({ status: "DONE" })]), new RegExp(en("tasks.archiveAll")));
+  assert.match(column("DONE", boardEntries([task({ status: "DONE" })])), new RegExp(en("tasks.archiveAll")));
   assert.doesNotMatch(column("DONE", []), new RegExp(en("tasks.archiveAll")));
-  assert.doesNotMatch(column("TODO", [task()]), new RegExp(en("tasks.archiveAll")));
+  assert.doesNotMatch(column("TODO", boardEntries([task()])), new RegExp(en("tasks.archiveAll")));
 });
 
 test("every column head is the same height, whatever it offers", () => {
@@ -247,7 +251,7 @@ test("every column head is the same height, whatever it offers", () => {
   // because `Archive All` is a 28px button, so Done's label sat 4.5px low and
   // its first card started 9px below every other column's.
   const heights = COLUMNS.map(({ status }) => {
-    const markup = column(status, status === "DONE" ? [task({ status: "DONE" })] : []);
+    const markup = column(status, boardEntries(status === "DONE" ? [task({ status: "DONE" })] : []));
     return /class="([^"]*h-\[\d+px\][^"]*)"/.exec(markup)?.[1]?.match(/h-\[\d+px\]/)?.[0];
   });
   assert.equal(new Set(heights).size, 1, `heads disagree: ${JSON.stringify(heights)}`);
@@ -699,14 +703,14 @@ test("the board is one scroll surface, in both directions", () => {
   assert.match(BOARD, /\bflex-1\b/);
   assert.match(BOARD, /\bmin-h-0\b/);
   // And no column may take one back.
-  const markup = column("DONE", [task({ status: "DONE" })]);
+  const markup = column("DONE", boardEntries([task({ status: "DONE" })]));
   assert.doesNotMatch(markup, /overflow-y-auto|overflow-x-hidden|overscroll-contain/);
 });
 
 test("the column heads stay on screen by sticking inside the board", () => {
   // They used to sit outside a per-column scroller, which is what kept
   // `Archive All` reachable. With one shared scroller, `sticky` is what does it.
-  const markup = column("DONE", [task({ status: "DONE" })]);
+  const markup = column("DONE", boardEntries([task({ status: "DONE" })]));
   assert.match(markup, /sticky/);
   assert.match(markup, /top-0/);
   const head = markup.indexOf("Archive All");
@@ -793,7 +797,7 @@ test("a drag scrolls the board only near its edges", () => {
 /* --------------------------------------------------------------- the phone */
 
 test("the phone renders tabs and one list, never the five-column grid", () => {
-  const markup = mobile("TODO", [task()], [task(), task({ id: "t2", status: "DONE" })]);
+  const markup = mobile("TODO", boardEntries([task()]), [task(), task({ id: "t2", status: "DONE" })]);
   assert.match(markup, /role="tablist"/);
   assert.equal((markup.match(/role="tab"/g) ?? []).length, 5);
   assert.match(markup, /role="tabpanel"/);
@@ -802,7 +806,7 @@ test("the phone renders tabs and one list, never the five-column grid", () => {
 
 test("the phone's tabs carry each status's count, selected status included", () => {
   const rows = [task(), task({ id: "t2" }), task({ id: "t3", status: "DONE" })];
-  const markup = mobile("TODO", rows.filter((row) => row.status === "TODO"), rows);
+  const markup = mobile("TODO", boardEntries(rows.filter((row) => row.status === "TODO")), rows);
   assert.match(markup, /Todo<span[^>]*>2<\/span>/);
   assert.match(markup, /Done<span[^>]*>1<\/span>/);
   assert.match(markup, /Backlog<span[^>]*>0<\/span>/);
@@ -816,10 +820,10 @@ test("exactly one phone tab is selected and only it is tabbable", () => {
 
 test("the phone's cards are not draggable, and Archive All follows the Done tab", () => {
   // HTML5 drag does not fire on touch; the menu's `Move to` is the replacement.
-  assert.doesNotMatch(mobile("TODO", [task()]), /draggable="true"/);
-  assert.match(mobile("DONE", [task({ status: "DONE" })]), /Archive All/);
+  assert.doesNotMatch(mobile("TODO", boardEntries([task()])), /draggable="true"/);
+  assert.match(mobile("DONE", boardEntries([task({ status: "DONE" })])), /Archive All/);
   assert.doesNotMatch(mobile("DONE", []), /Archive All/);
-  assert.doesNotMatch(mobile("TODO", [task()]), /Archive All/);
+  assert.doesNotMatch(mobile("TODO", boardEntries([task()])), /Archive All/);
 });
 
 /* --------------------------------------------------------- the render cost */
@@ -938,7 +942,7 @@ test("Activate all is offered only where the Todo column holds a parked chain", 
   // Nothing to activate: an empty column, a card that is not a chain, and a
   // chain the control plane will dispatch itself when its predecessor lands.
   assert.doesNotMatch(column("TODO"), new RegExp(en("tasks.activateAll")));
-  assert.doesNotMatch(column("TODO", [task({ name: "Plain work" })]), new RegExp(en("tasks.activateAll")));
+  assert.doesNotMatch(column("TODO", boardEntries([task({ name: "Plain work" })])), new RegExp(en("tasks.activateAll")));
   const waiting = chainRow({ chainId: "beta", name: "Beta", stepCount: 4, state: "waiting-on-predecessor", activationTaskId: null });
   assert.doesNotMatch(column("TODO", boardEntries([waiting])), new RegExp(en("tasks.activateAll")));
   // Done keeps its own head action and gains nothing.

@@ -46,8 +46,6 @@ const BLOCK_MAX = 8_000;
 /** Auto-scroll only when the reader is already at the bottom (assumption A3). */
 const NEAR_BOTTOM_PX = 100;
 
-export const isLive = isLiveStatus;
-
 /** §4.1.1. Reuses the existing tone vocabulary; no new tones. */
 export const sessionPill = (
   status: SessionExecutionStatus,
@@ -78,7 +76,7 @@ export const lifecycleStat = (
   // merge is neither Done nor Failed, and calling it either of them is a lie.
   const badge = mergeBadge(mergeOutcome);
   if (badge) return { label: formatT(badge.key), tone: badge.tone };
-  return isLive(status) ? { label: formatT("sessions.lifecycle.live"), tone: "green" }
+  return isLiveStatus(status) ? { label: formatT("sessions.lifecycle.live"), tone: "green" }
     : status === "SUCCEEDED" ? { label: formatT("sessions.lifecycle.done"), tone: "green" }
       : { label: formatT("sessions.lifecycle.failed"), tone: "red" };
 };
@@ -108,7 +106,7 @@ export const WaitingNotice = ({ status, messageId }: { status: SessionExecutionS
 };
 
 const resultWord = (session: Session): string =>
-  formatT(isLive(session.executionStatus) ? "sessions.result.inProgress"
+  formatT(isLiveStatus(session.executionStatus) ? "sessions.result.inProgress"
     : session.executionStatus === "SUCCEEDED" ? "sessions.result.success" : "sessions.result.failed");
 
 const SessionStatusPill = ({ status, mergeOutcome }: { status: SessionExecutionStatus; mergeOutcome?: MergeOutcome | null | undefined }): ReactNode => {
@@ -620,7 +618,7 @@ export const SessionDetailPage = ({ sessionId }: { sessionId: string }): ReactNo
   // not sit stale. Only the event stream stops.
   const { data: session, error, reload } = usePoll<Session>(`/sessions/${sessionId}`, POLL_MS);
   const t = useT();
-  const terminal = session ? !isLive(session.executionStatus) : false;
+  const terminal = session ? !isLiveStatus(session.executionStatus) : false;
   const stream = useEventStream(session?.runId ?? null, terminal);
 
   // The list is unmounted by hash navigation, so the detail page is the one

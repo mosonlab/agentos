@@ -1206,22 +1206,23 @@ test("sync recreates a missing spec revalidator with read-only repository covera
   }), [{ mountPath: repo.mountPath, permissions: RepoPermission.GIT_READ }]);
 });
 
-test("sync recreates a missing senior-dev-sol fallback Agent from senior-dev", async (t) => {
+for (const specialName of ["senior-dev-sol", "senior-dev-opus"] as const) {
+test(`sync recreates a missing ${specialName} Agent from senior-dev`, async (t) => {
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
-  const solSource = canonicalRuntime("senior-dev-sol");
+  const specialSource = canonicalRuntime(specialName);
   const source = await prisma.agent.findUniqueOrThrow({
     where: { projectId_name: { projectId: project.id, name: "senior-dev" } },
   });
   const existingSol = await prisma.agent.findUniqueOrThrow({
-    where: { projectId_name: { projectId: project.id, name: "senior-dev-sol" } },
+    where: { projectId_name: { projectId: project.id, name: specialName } },
   });
 
   const repo = await prisma.repo.create({
     data: {
       projectId: project.id,
-      name: `canonical-sync-sol-${randomBytes(4).toString("hex")}`,
-      remoteUrl: "file:///tmp/agentos-canonical-sync-sol.git",
-      mountPath: "/workspace/canonical-sync-sol",
+      name: `canonical-sync-${specialName}-${randomBytes(4).toString("hex")}`,
+      remoteUrl: `file:///tmp/agentos-canonical-sync-${specialName}.git`,
+      mountPath: `/workspace/canonical-sync-${specialName}`,
       dependencyProvisioning: "NONE",
     },
   });
@@ -1246,10 +1247,10 @@ test("sync recreates a missing senior-dev-sol fallback Agent from senior-dev", a
   assert.match(synced.output, /"createdAgentRepoGrants":1/u);
 
   const sol = await prisma.agent.findUniqueOrThrow({
-    where: { projectId_name: { projectId: project.id, name: "senior-dev-sol" } },
+    where: { projectId_name: { projectId: project.id, name: specialName } },
   });
-  assert.equal(sol.model, solSource.model);
-  assert.equal(sol.runnerPreference, solSource.runnerPreference);
+  assert.equal(sol.model, specialSource.model);
+  assert.equal(sol.runnerPreference, specialSource.runnerPreference);
   assert.equal(sol.inboxAccess, true);
   assert.equal(sol.environmentId, source.environmentId);
   assert.equal(sol.runtimeConfigCustomized, false);
@@ -1264,9 +1265,10 @@ test("sync recreates a missing senior-dev-sol fallback Agent from senior-dev", a
   assert.equal(second.status, 0, second.output);
   assert.match(second.output, /"createdAgents":0/u);
   assert.equal(await prisma.agent.count({
-    where: { projectId: project.id, name: "senior-dev-sol" },
+    where: { projectId: project.id, name: specialName },
   }), 1);
 });
+}
 
 test("canonical sync adopts the tolerated differences and refuses every other one before mutating", async () => {
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });

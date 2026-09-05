@@ -5,13 +5,9 @@ import { parseRunOutputEvidence, type FailureEnvelope, type RunOutcome } from "@
 import {
   ControlPlaneError,
   type CancellationRequest,
-  type ClaimedTask,
-  type CliAvailabilityReport,
   type Completion,
   type ControlPlane,
   type PreflightReport,
-  type ReclaimResult,
-  type RunCleanupReport,
   type RunSession,
   type RunSessionClaim,
   type RunStartSnapshot,
@@ -51,12 +47,8 @@ export type ControlPlaneDouble = {
   activities: Array<{ body: string; metadata: Record<string, unknown> }>;
   taskOutputs: SessionTaskOutput[];
   publishedBranches: string[];
-  leaseIndependentCleanups: RunCleanupReport[];
-  reclaimReports: ReclaimResult[][];
   reclaimPublications: string[];
   preflightReports: Array<{ runner: RunnerKind; result: PreflightReport }>;
-  availabilityReports: CliAvailabilityReport[];
-  heartbeatCount: () => number;
   outputStatusReadCount: () => number;
 };
 
@@ -70,12 +62,8 @@ export const createControlPlaneDouble = (
   const activities: Array<{ body: string; metadata: Record<string, unknown> }> = [];
   const taskOutputs: SessionTaskOutput[] = [];
   const publishedBranches: string[] = [];
-  const leaseIndependentCleanups: RunCleanupReport[] = [];
-  const reclaimReports: ReclaimResult[][] = [];
   const reclaimPublications: string[] = [];
   const preflightReports: ControlPlaneDouble["preflightReports"] = [];
-  const availabilityReports: ControlPlaneDouble["availabilityReports"] = [];
-  let heartbeats = 0;
   let outputStatusReads = 0;
 
   const openRun = (claim: RunSessionClaim): RunSession => {
@@ -85,10 +73,7 @@ export const createControlPlaneDouble = (
         starts.push(snapshot);
         await session.start?.(snapshot);
       },
-      heartbeat: async (progress) => {
-        heartbeats += 1;
-        return await session.heartbeat?.(progress) ?? { held: true };
-      },
+      heartbeat: async (progress) => await session.heartbeat?.(progress) ?? { held: true },
       note: async (body, metadata) => {
         activities.push({ body, metadata: metadata ?? {} });
         await session.note?.(body, metadata);
@@ -110,7 +95,6 @@ export const createControlPlaneDouble = (
         await session.publishBranch?.(pushedBranch);
       },
       recordCleanup: async (cleanup) => {
-        leaseIndependentCleanups.push(cleanup);
         await session.recordCleanup?.(cleanup);
       },
       acknowledgeCancellation: async (cancellation, workspace, containment) => {
@@ -128,7 +112,6 @@ export const createControlPlaneDouble = (
     openRun,
     fetchReclaimPlan: async (inventory) => await overrides.fetchReclaimPlan?.(inventory) ?? null,
     reportReclaimOutcomes: async (report) => {
-      reclaimReports.push(report.results);
       await overrides.reportReclaimOutcomes?.(report);
     },
     recordReclaimPublication: async (publication) => {
@@ -139,10 +122,8 @@ export const createControlPlaneDouble = (
       preflightReports.push({ runner, result });
       await overrides.reportPreflight?.(runner, result);
     },
-    reportCliAvailability: async (availability) => {
-      availabilityReports.push(availability);
-      return await overrides.reportCliAvailability?.(availability) ?? { revalidatePreflight: false };
-    },
+    reportCliAvailability: async (availability) =>
+      await overrides.reportCliAvailability?.(availability) ?? { revalidatePreflight: false },
   };
 
   return {
@@ -153,19 +134,11 @@ export const createControlPlaneDouble = (
     activities,
     taskOutputs,
     publishedBranches,
-    leaseIndependentCleanups,
-    reclaimReports,
     reclaimPublications,
     preflightReports,
-    availabilityReports,
-    heartbeatCount: () => heartbeats,
     outputStatusReadCount: () => outputStatusReads,
   };
 };
-
-export const controlPlaneClaim = (claim: ClaimedTask): ControlPlaneOverrides => ({
-  claim: async () => claim,
-});
 
 export type ControlPlaneFetchHandler = (
   input: string | URL | Request,

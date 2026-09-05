@@ -135,11 +135,6 @@ export const boardEntries = (tasks: readonly BoardTask[]): BoardEntry[] => {
   });
 };
 
-/** Normalize a board column input. Keeping raw-task compatibility here makes
- * the extracted column easy to use from existing callers and focused tests. */
-export const normalizeBoardEntries = (entries: readonly (BoardEntry | BoardTask)[]): BoardEntry[] =>
-  entries.map((entry) => isBoardEntry(entry) ? entry : taskBoardEntry(entry));
-
 export const boardEntriesByStatus = (entries: readonly BoardEntry[]): Map<TaskStatus, BoardEntry[]> => {
   const groups = new Map<TaskStatus, BoardEntry[]>(COLUMNS.map((column) => [column.status, []]));
   for (const entry of entries) groups.get(entry.status)?.push(entry);
@@ -162,10 +157,10 @@ export type HoldableChain = ParkedChain;
  * itself lives in `chain-aggregate.ts`, so a column head and the card it sits
  * above can never answer differently. */
 const chainWave = (
-  entries: readonly (BoardEntry | BoardTask)[],
+  entries: readonly BoardEntry[],
   kind: ChainControlActionKind,
 ): ParkedChain[] =>
-  normalizeBoardEntries(entries).flatMap((entry) => {
+  entries.flatMap((entry) => {
     if (entry.kind !== "chain") return [];
     const { chainId, chainName, stepCount } = entry.aggregate;
     const action = chainControlAction(entry.aggregate.activation);
@@ -176,13 +171,13 @@ const chainWave = (
 /** The chains the Todo column head would activate: a `waiting-on-predecessor`
  * chain dispatches itself when its predecessor completes, so offering to start
  * it would be offering to do something the control plane already owns. */
-export const parkedChains = (entries: readonly (BoardEntry | BoardTask)[]): ParkedChain[] =>
+export const parkedChains = (entries: readonly BoardEntry[]): ParkedChain[] =>
   chainWave(entries, "activate");
 
 /** The chains the Doing column head can hold in one operator wave. A chain
  * already carrying a persisted hold is offered Resume instead, so the column
  * head never sends a second hold request to one. */
-export const heldChains = (entries: readonly (BoardEntry | BoardTask)[]): HoldableChain[] =>
+export const heldChains = (entries: readonly BoardEntry[]): HoldableChain[] =>
   chainWave(entries, "hold");
 
 /* ------------------------------------------------------------- the schedule */

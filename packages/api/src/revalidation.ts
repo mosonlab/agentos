@@ -16,7 +16,7 @@ import {
   withFencedRun,
 } from "./run-fence.js";
 import { type Refusal } from "./refusal.js";
-import { readBrief, rewriteBrief } from "./task-brief.js";
+import { legacyBriefMigration, readBrief, rewriteBrief } from "./task-brief.js";
 
 /** The only Agent identity allowed to use the revalidation capability. */
 export const SPEC_REVALIDATOR_AGENT_NAME = "spec-revalidator";
@@ -287,9 +287,7 @@ export const patchBoundImplementationDescription = async (
       const locked = await lockedRevalidationTarget(tx, run, caller, fence);
       if ("message" in locked) return locked;
       const targetRow = locked.rows.find((row) => row.id === locked.target.id)!;
-      const storedBrief = readBrief(targetRow.description, {
-        legacyAttachmentsFromPrevious: (targetRow.templateStep?.priorOutputKinds.length ?? 0) > 0,
-      });
+      const storedBrief = readBrief(targetRow.description, legacyBriefMigration(targetRow.templateStep));
       if ("unparseable" in storedBrief) {
         return failureActivity(tx, locked.caller, fence, {
           reason: "invalid-request",
@@ -298,9 +296,7 @@ export const patchBoundImplementationDescription = async (
       }
       const boundaryRefusal = validateRevalidatedBrief(storedBrief.brief, description);
       if (boundaryRefusal) return failureActivity(tx, locked.caller, fence, boundaryRefusal);
-      const rewritten = rewriteBrief(targetRow.description, description, {
-        legacyAttachmentsFromPrevious: (targetRow.templateStep?.priorOutputKinds.length ?? 0) > 0,
-      });
+      const rewritten = rewriteBrief(targetRow.description, description, legacyBriefMigration(targetRow.templateStep));
       if (typeof rewritten !== "string") {
         return failureActivity(tx, locked.caller, fence, {
           reason: "invalid-request",

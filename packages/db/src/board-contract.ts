@@ -369,7 +369,6 @@ export type ChainFrontier<DateTime = string> = {
   /** Dense one-based position among primary Steps; omitted for a repair. */
   position?: number | null;
 };
-export type BoardChainFrontier<DateTime = string> = ChainFrontier<DateTime>;
 
 export type ChainActiveRepair<DateTime = string> = {
   repairKind: string;
@@ -405,7 +404,6 @@ export type ChainAggregate<DateTime = string> = {
   createdAt: DateTime;
   updatedAt: DateTime;
 };
-export type BoardChainAggregate<DateTime = string> = ChainAggregate<DateTime>;
 
 export type BoardCard<DateTime = string> = {
   id: string;

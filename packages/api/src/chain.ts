@@ -11,6 +11,7 @@ import {
   lockAgentRepoGrant,
   Prisma,
   type PrismaClient,
+  runBudgetCeiling,
   TaskStatus,
 } from "@anneal/db";
 import { heldPredicate } from "@anneal/db/chain-hold";
@@ -18,7 +19,6 @@ import { compare, denseOrdinals, layerOf } from "@anneal/db/chain-order";
 
 export { resumeActivationAnchor, resumeActivationNeedsSourceRun };
 
-import { runBudgetCeiling } from "./execution.js";
 import type { Refusal } from "./refusal.js";
 
 /**
