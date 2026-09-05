@@ -2166,7 +2166,10 @@ parent of the WIP salvage commit a failed Run pushed, which `headSha` names. It
 is persisted on the Run and handed, with the salvage commit itself, to the next
 Run of the same task as the `salvage` member of its claim's
 `previousRunHandoff`, so a step bound to a particular head can recognise the
-salvaged work of its own prior attempt. Runs that did not salvage omit it.
+salvaged work of its own prior attempt. Claim evidence follows the prior same-task
+publication matching the Run's resolved target ref, including when an intervening
+Run was cancelled without publishing. A different target ref does not receive
+that salvage evidence. Runs that did not salvage omit `salvageParentSha`.
 
 The machine-only `POST /runner/tasks/claim` request may include the optional
 `servedKinds` array of exact `RunnerKind` names. Omitting `servedKinds` means

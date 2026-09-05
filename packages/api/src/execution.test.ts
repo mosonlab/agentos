@@ -430,3 +430,14 @@ test("a capacity refusal quoted in the agent's own stdout is not a verdict", () 
   assert.equal(verdict.retryable, false);
   assert.equal(verdict.externalFailure, false);
 });
+
+test("unrelated capacity verdict text is an ordinary task failure", () => {
+  for (const text of ["disk is at capacity", "the connection pool is at capacity; aborting"]) {
+    for (const evidence of [envelope({ providerError: text }), envelope({ stderrSummary: text })]) {
+      const verdict = classifyEnvelope(evidence);
+      assert.equal(verdict.failureClass, FailureClass.TASK_FAILED);
+      assert.equal(verdict.retryable, false);
+      assert.equal(verdict.externalFailure, false);
+    }
+  }
+});

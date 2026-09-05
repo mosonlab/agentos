@@ -83,7 +83,7 @@ const PROVIDER_TRY_AGAIN_PATTERN = /try again later/iu;
  *  and nothing about the task can avoid it — the same prompt on the same model
  *  succeeds once the pool frees up — so it belongs with the transport/outage
  *  phrases, on the verdict channels only. */
-const PROVIDER_CAPACITY_PATTERN = /\b(?:is|are|were|currently)\s+at capacity\b/iu;
+const PROVIDER_CAPACITY_PATTERN = /\bmodel\s+is\s+(?:currently\s+)?at capacity\b/iu;
 
 /**
  * Ported from `packages/runner/src/network-retry.ts` (`TRANSIENT_NETWORK_PATTERNS`
@@ -140,14 +140,16 @@ export const transientNetworkText = (text: string): boolean => {
 const envelopeVerdictText = (envelope: FailureEnvelope): string =>
   `${envelope.providerError ?? ""}\n${envelope.stderrSummary ?? ""}`;
 
-const transientProviderText = (envelope: FailureEnvelope): boolean =>
-  transientNetworkText(envelopeVerdictText(envelope))
-  || PROVIDER_OUTAGE_PATTERN.test(envelopeVerdictText(envelope))
-  || PROVIDER_CAPACITY_PATTERN.test(envelopeVerdictText(envelope))
+const transientProviderText = (envelope: FailureEnvelope): boolean => {
+  const verdict = envelopeVerdictText(envelope);
+  return transientNetworkText(verdict)
+  || PROVIDER_OUTAGE_PATTERN.test(verdict)
+  || PROVIDER_CAPACITY_PATTERN.test(verdict)
   // This generic provider prompt is authoritative only on the structured
   // provider channel. Agent stderr can contain the same words from any tool
   // the task invoked and must not decide a budget refund by itself.
   || PROVIDER_TRY_AGAIN_PATTERN.test(envelope.providerError ?? "");
+};
 
 /**
  * Whether a TRANSIENT_PROVIDER verdict was reached from one of the external

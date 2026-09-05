@@ -13,6 +13,7 @@ import {
   persistSessionTaskOutput,
   requiredOutputKind,
   salvageResumeEvidence,
+  previousRunHandoffForClaim,
 } from "./canonical-task-output.js";
 
 const step = (template: string, stepIndex: number, outputKind: string) => ({
@@ -446,3 +447,32 @@ test("a salvaged prior attempt is handed to the next Run as its commit and paren
   assert.equal(salvageResumeEvidence("task-1", 1, { ...salvaged, salvageParentSha: null }), null);
   assert.equal(salvageResumeEvidence("task-1", 1, { ...salvaged, headSha: null }), null);
 });
+
+for (const matchesBase of [true, false]) {
+  test(`claim salvage follows only the resolved base past cancellation (matching publication: ${matchesBase})`, async () => {
+    const parentSha = "b".repeat(40);
+    const commitSha = "a".repeat(40);
+    const pushedBranch = "agentos/task-1/run-2";
+    const tx = {
+      run: {
+        findUnique: async () => ({
+          id: "run-3", status: "CANCELLED", failureReason: "cancelled",
+          headSha: null, pushedBranch: null, salvageParentSha: null, updatedAt: new Date(), endedAt: null,
+        }),
+        findUniqueOrThrow: async () => ({ targetBranch: pushedBranch }),
+        findFirst: async (query: { where: unknown }) => {
+          assert.deepEqual(query.where, { taskId: "task-1", runNumber: { lt: 4 }, pushedBranch });
+          return matchesBase ? { runNumber: 2, pushedBranch, headSha: commitSha, salvageParentSha: parentSha } : null;
+        },
+      },
+      taskStepOutput: { findUnique: async () => null },
+      taskActivity: { findFirst: async () => null },
+    };
+    const handoff = await previousRunHandoffForClaim(tx as unknown as Parameters<typeof previousRunHandoffForClaim>[0], {
+      taskId: "task-1", runId: "run-4", runNumber: 4,
+      templateStep: step("direct-engineer-workflow", 5, "fixed-implementation"),
+    });
+    assert.equal(handoff?.previousRunId, "run-3");
+    assert.deepEqual(handoff?.salvage, matchesBase ? { commitSha, parentSha } : null);
+  });
+}

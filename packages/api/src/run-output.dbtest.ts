@@ -32,6 +32,9 @@ import {
   TaskStatus,
 } from "@anneal/db";
 
+import { buildPrompt } from "@anneal/runner/adapters";
+import type { ClaimedTask } from "@anneal/runner/api";
+
 import { hashToken } from "./auth.js";
 import { previousRunHandoffForClaim } from "./canonical-task-output.js";
 import { handleRegressionCompletion } from "./merge-tail-actions.js";
@@ -1145,44 +1148,51 @@ test("a canonical step cannot advance from a prior Run's output", async () => {
   });
 });
 
-test("a retry after a salvaged attempt is handed the salvage commit and its parent", async () => {
-  // 2026-09-05: two fix Runs died on a provider capacity refusal after editing
-  // files, salvage committed the edits on top of the reviewed head, and the
-  // replacement Run had no way to learn that its starting HEAD was its own
-  // prior attempt — so both stopped and asked a human.
-  const { task } = await seedTask({
-    chained: true,
-    outputKind: "fixed-implementation",
-    templateName: DIRECT_TEMPLATE_NAME,
-    stepIndex: 5,
-  });
-  const salvageSha = "a".repeat(40);
-  const firstRunId = await enqueue(task.id);
-  const first = await claimRun(firstRunId, "salvage-handoff-runner-1");
-  const salvageBranch = runOwnedHead(task.id, first.run.runNumber);
-  assert.equal((await call("POST", `/runner/runs/${firstRunId}/complete`, RUNNER, {
-    ...failedCompletion("salvage-handoff-runner-1", first.fencingToken, first.run.branch ?? "master"),
-    pushStatus: "SUCCEEDED",
-    pushRemote: "https://github.com/acme/widgets.git",
-    pushedBranch: salvageBranch,
-    headSha: salvageSha,
-    salvageParentSha: SHA,
-  })).status, 200);
+for (const cancelledIntermediary of [false, true]) {
+  test(`a real claim carries salvage through the runner prompt (cancelled intermediary: ${cancelledIntermediary})`, async () => {
+    // 2026-09-05: two fix Runs died on a provider capacity refusal after editing
+    // files, salvage committed the edits on top of the reviewed head, and the
+    // replacement Run had no way to learn that its starting HEAD was its own
+    // prior attempt — so both stopped and asked a human.
+    const { task } = await seedTask({
+      chained: true,
+      outputKind: "fixed-implementation",
+      templateName: DIRECT_TEMPLATE_NAME,
+      stepIndex: 5,
+    });
+    const salvageSha = "a".repeat(40);
+    const firstRunId = await enqueue(task.id);
+    const first = await claimRun(firstRunId, "salvage-handoff-runner-1");
+    const salvageBranch = runOwnedHead(task.id, first.run.runNumber);
+    assert.equal((await call("POST", `/runner/runs/${firstRunId}/complete`, RUNNER, {
+      ...failedCompletion("salvage-handoff-runner-1", first.fencingToken, first.run.branch ?? "master"),
+      pushStatus: "SUCCEEDED",
+      pushRemote: "https://github.com/acme/widgets.git",
+      pushedBranch: salvageBranch,
+      headSha: salvageSha,
+      salvageParentSha: SHA,
+    })).status, 200);
 
-  const queuedSecond = await call("POST", `/tasks/${task.id}/retry`, OPERATOR);
-  assert.equal(queuedSecond.status, 201, JSON.stringify(queuedSecond.body));
-  const loaded = await db.task.findUniqueOrThrow({
-    where: { id: task.id },
-    include: { templateStep: { include: { taskTemplate: { select: { name: true } } } } },
+    const queuedSecond = await call("POST", `/tasks/${task.id}/retry`, OPERATOR);
+    assert.equal(queuedSecond.status, 201, JSON.stringify(queuedSecond.body));
+    if (cancelledIntermediary) {
+      await db.run.update({ where: { id: queuedSecond.body.id }, data: { status: "CANCELLED", endedAt: new Date() } });
+      const queuedThird = await call("POST", `/tasks/${task.id}/retry`, OPERATOR);
+      assert.equal(queuedThird.status, 201, JSON.stringify(queuedThird.body));
+    }
+    const claimed = await call("POST", "/runner/tasks/claim", RUNNER, {
+      runnerId: "salvage-successor", leaseSeconds: 60,
+    });
+    assert.equal(claimed.status, 200, JSON.stringify(claimed.body));
+    const claim = claimed.body as ClaimedTask;
+    assert.equal(claim.task.id, task.id);
+    assert.equal(claim.run.runNumber, cancelledIntermediary ? 3 : 2);
+    assert.equal(claim.run.targetBranch, salvageBranch);
+    assert.equal(claim.run.targetBranchPublished, true);
+    assert.deepEqual(claim.previousRunHandoff?.salvage, { commitSha: salvageSha, parentSha: SHA });
+    assert.match(buildPrompt(claim), new RegExp(`WIP salvage commit ${salvageSha}, made on top of ${SHA}`, "u"));
   });
-  const handoff = await db.$transaction((tx) => previousRunHandoffForClaim(tx, {
-    taskId: task.id,
-    runId: queuedSecond.body.id as string,
-    runNumber: 2,
-    templateStep: loaded.templateStep,
-  }));
-  assert.deepEqual(handoff?.salvage, { commitSha: salvageSha, parentSha: SHA });
-});
+}
 
 test("a retry handoff includes valid immutable findings refused under the prior ownership rule", async () => {
   const { task } = await seedTask({
@@ -1562,6 +1572,7 @@ test("canonical approval revision requeues the same Spec, hands off its output, 
     status: "SUCCEEDED",
     failureReason: null,
     retryReason: "approval-rejected-without-feedback",
+    salvage: null,
     output: {
       runId: firstRunId,
       kind: "spec",

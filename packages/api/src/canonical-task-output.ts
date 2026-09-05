@@ -593,10 +593,10 @@ export const persistSessionTaskOutput = async (
  * The salvage a failed attempt left behind, as the commit the next Run starts
  * on plus the commit that salvage was made on top of.
  *
- * `pushedBranch` is what proves this was a salvage rather than an ordinary
- * publication: `salvageWorkspace` is the only path that pushes the Run-owned
- * head, and it is the only path that reports a parent. Both facts come from
- * the same completion write, so they cannot describe two different commits.
+ * `salvageParentSha` distinguishes salvage from ordinary publication: only
+ * `salvageWorkspace` reports a parent. The Run-owned `pushedBranch` corroborates
+ * ownership; ordinary successful Runs can also publish that ref. Both fields
+ * come from the same completion write.
  */
 export const salvageResumeEvidence = (
   taskId: string,
@@ -633,6 +633,18 @@ export const previousRunHandoffForClaim = async (
     },
   });
   if (!previous || previous.id === input.runId) return null;
+  // The resolved clone base may come from an older attempt if the immediate
+  // predecessor never published. Match that ref within this task, rather than
+  // offering stale salvage evidence for a different starting tree.
+  const current = await tx.run.findUniqueOrThrow({
+    where: { id: input.runId },
+    select: { targetBranch: true },
+  });
+  const publication = current.targetBranch === null ? null : await tx.run.findFirst({
+    where: { taskId: input.taskId, runNumber: { lt: input.runNumber }, pushedBranch: current.targetBranch },
+    orderBy: { runNumber: "desc" },
+    select: { runNumber: true, pushedBranch: true, headSha: true, salvageParentSha: true },
+  });
   const output = await tx.taskStepOutput.findUnique({
     where: { taskId: input.taskId },
     select: { runId: true, kind: true, body: true, commitSha: true, metadata: true },
@@ -704,6 +716,6 @@ export const previousRunHandoffForClaim = async (
     output: output?.runId && (output.runId === previous.id || refusedOutputMatchesPreviousHead)
       ? { runId: output.runId, kind: output.kind, body: output.body, commitSha: output.commitSha }
       : null,
-    salvage: salvageResumeEvidence(input.taskId, input.runNumber - 1, previous),
+    salvage: publication ? salvageResumeEvidence(input.taskId, publication.runNumber, publication) : null,
   };
 };
