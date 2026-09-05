@@ -64,59 +64,61 @@ const row = (steps: readonly PersistedTransitionStep[]): CanonicalInstallationRo
   steps,
 });
 
-test("installation planning decides successor drift, half migrations, and spawnPolicy without a database", async () => {
+test("installation planning decides source generation drift, half migrations, and spawnPolicy without a database", async () => {
   const loaded = await loadTemplateStepSources("direct-engineer-workflow");
   const sources = (steps: readonly TemplateStepSource[]): CanonicalInstallationSources => new Map([
     ["direct-engineer-workflow", steps],
   ]);
   const generation = LEGACY_TEMPLATE_GENERATIONS["direct-engineer-workflow"]
     .find((candidate) => candidate.marker === "pre-adjudication")!;
-  const mutableGeneration = generation as LegacyTemplateGeneration & { successorPromptDigest?: string };
-  const originalSuccessorDigest = mutableGeneration.successorPromptDigest;
 
-    const halfMigrated = asPersisted(loaded);
-    halfMigrated[0] = { ...halfMigrated[0]!, approvalGate: !halfMigrated[0]!.approvalGate };
-    const missingRevalidator = asPersisted(loaded);
-    missingRevalidator[0] = { ...missingRevalidator[0]!, assigneeAgent: null };
-    const spawnPolicy = { mode: "parallel", limit: 2 };
+  const halfMigrated = asPersisted(loaded);
+  halfMigrated[0] = { ...halfMigrated[0]!, approvalGate: !halfMigrated[0]!.approvalGate };
+  const missingRevalidator = asPersisted(loaded);
+  missingRevalidator[0] = { ...missingRevalidator[0]!, assigneeAgent: null };
+  const spawnPolicy = { mode: "parallel", limit: 2 };
   const sourceWithSpawnPolicy = loaded.map((step, index) => index === 0 ? { ...step, spawnPolicy } : step);
+  // Prompts edited after the rollover was registered: the retired row still
+  // matches, so only the pinned source generation can refuse this.
+  const editedSource = loaded.map((step, index) => (
+    index === 0 ? { ...step, prompt: `${step.prompt}\n\nunregistered edit` } : step
+  ));
 
-  try {
-    mutableGeneration.successorPromptDigest = "0".repeat(64);
-    const cases = [
-      {
-        name: "registered row whose source is not its pinned successor",
-        plan: planCanonicalInstallation([row(generationAsPersisted(generation))], sources(loaded)),
-        kind: "refused",
-        reason: /registered to install prompt generation/u,
-      },
-      {
-        name: "half-migrated current row",
-        plan: planCanonicalInstallation([row(halfMigrated)], sources(loaded)),
-        kind: "refused",
-        reason: /Template direct-engineer-workflow \(template\), direct-engineer-workflow step 1 \(step-1\) differs from the canonical source in approvalGate/u,
-      },
-      {
-        name: "current row with a named spawnPolicy",
-        plan: planCanonicalInstallation([row(asPersisted(sourceWithSpawnPolicy))], sources(sourceWithSpawnPolicy)),
-        kind: "current",
-      },
-      {
-        name: "current row with a temporarily missing revalidator Agent",
-        plan: planCanonicalInstallation([row(missingRevalidator)], sources(loaded)),
-        kind: "current",
-      },
-    ] as const;
+  const cases = [
+    {
+      name: "registered row whose source is not the pinned generation",
+      plan: planCanonicalInstallation([row(generationAsPersisted(generation))], sources(editedSource)),
+      kind: "refused",
+      reason: /registered to install prompt generation/u,
+    },
+    {
+      name: "registered row whose source is the pinned generation",
+      plan: planCanonicalInstallation([row(generationAsPersisted(generation))], sources(loaded)),
+      kind: "rollover",
+    },
+    {
+      name: "half-migrated current row",
+      plan: planCanonicalInstallation([row(halfMigrated)], sources(loaded)),
+      kind: "refused",
+      reason: /Template direct-engineer-workflow \(template\), direct-engineer-workflow step 1 \(step-1\) differs from the canonical source in approvalGate/u,
+    },
+    {
+      name: "current row with a named spawnPolicy",
+      plan: planCanonicalInstallation([row(asPersisted(sourceWithSpawnPolicy))], sources(sourceWithSpawnPolicy)),
+      kind: "current",
+    },
+    {
+      name: "current row with a temporarily missing revalidator Agent",
+      plan: planCanonicalInstallation([row(missingRevalidator)], sources(loaded)),
+      kind: "current",
+    },
+  ] as const;
 
-    for (const candidate of cases) {
-      assert.equal(candidate.plan.length, 1, candidate.name);
-      const action = candidate.plan[0]!;
-      assert.equal(action.kind, candidate.kind, candidate.name);
-      if (action.kind === "refused" && "reason" in candidate) assert.match(action.reason, candidate.reason, candidate.name);
-    }
-  } finally {
-    if (originalSuccessorDigest === undefined) delete mutableGeneration.successorPromptDigest;
-    else mutableGeneration.successorPromptDigest = originalSuccessorDigest;
+  for (const candidate of cases) {
+    assert.equal(candidate.plan.length, 1, candidate.name);
+    const action = candidate.plan[0]!;
+    assert.equal(action.kind, candidate.kind, candidate.name);
+    if (action.kind === "refused" && "reason" in candidate) assert.match(action.reason, candidate.reason, candidate.name);
   }
 });
 
@@ -166,5 +168,30 @@ test("current installation adopts review provisioning and the optional-step addi
   assert.match(
     missing[0]?.kind === "refused" ? missing[0].reason : "",
     /provisionDependencies/u,
+  );
+});
+
+test("first installation is refused when the source tree is not the pinned generation", async () => {
+  const loaded = await loadTemplateStepSources("direct-engineer-workflow");
+  const editedSource = loaded.map((step, index) => (
+    index === 0 ? { ...step, prompt: `${step.prompt}\n\nunregistered edit` } : step
+  ));
+  const sources = (steps: readonly TemplateStepSource[]): CanonicalInstallationSources => new Map([
+    ["direct-engineer-workflow", steps],
+  ]);
+
+  assert.deepEqual(planCanonicalInstallation([], sources(loaded), ["project"]), [{
+    kind: "create",
+    templateName: "direct-engineer-workflow",
+    projectId: "project",
+  }]);
+
+  const refusal = planCanonicalInstallation([], sources(editedSource), ["project"]);
+  assert.equal(refusal.length, 1);
+  assert.equal(refusal[0]?.kind, "refused");
+  assert.equal(refusal[0]?.kind === "refused" ? refusal[0].rowId : "unset", null);
+  assert.match(
+    refusal[0]?.kind === "refused" ? refusal[0].reason : "",
+    /registered to install prompt generation/u,
   );
 });

@@ -3,13 +3,14 @@ import test from "node:test";
 
 import { PR_TEMPLATE_NAME } from "./agent-contract.js";
 import {
+  CANONICAL_SOURCE_PROMPT_GENERATIONS,
   canonicalStepOrdinals,
   canonicalTemplateIdentity,
   LEGACY_TEMPLATE_GENERATIONS,
   legacyGenerationMatches,
   legacyTemplateName,
   matchedLegacyGeneration,
-  successorPromptDrift,
+  sourcePromptGenerationDrift,
   templatePromptGenerationDigest,
   templateRolloverBlockerCount,
   type CanonicalTemplateRegistryName,
@@ -266,31 +267,66 @@ test("an unregistered prompt edit matches nothing, so sync refuses instead of ro
   }
 });
 
-test("a rollover refuses a source that is not the successor it was registered to install", async () => {
-  // The gap a single digest leaves: the outgoing row still matches, so the
-  // rename would fire, but the tree now holds prompts nobody registered. That
-  // edit would be installed on the registered transition's authority.
+test("the pinned source generation is the one agents/templates holds", async () => {
+  // The single fact 15 registry literals used to restate, checked here so a
+  // stale pin fails in this suite instead of on a production deploy.
+  const sources = await loadAllTemplateStepSources();
+  for (const [templateName, pinned] of Object.entries(CANONICAL_SOURCE_PROMPT_GENERATIONS)) {
+    const current = sources.get(templateName as CanonicalTemplateRegistryName);
+    assert.ok(current, `${templateName} must load from source`);
+    assert.equal(
+      templatePromptGenerationDigest(current),
+      pinned,
+      `${templateName} pin is stale: re-pin it from npm run db:template-digest`,
+    );
+  }
+  assert.deepEqual(
+    Object.keys(CANONICAL_SOURCE_PROMPT_GENERATIONS).sort((left, right) => left.localeCompare(right)),
+    Object.keys(LEGACY_TEMPLATE_GENERATIONS).sort((left, right) => left.localeCompare(right)),
+  );
+});
+
+test("every registered generation rolls forward to a pinned source generation", () => {
+  // The registry no longer restates the successor, so the only way an entry
+  // can fail to resolve one is by naming a template with no pin at all.
+  for (const [templateName, generations] of Object.entries(LEGACY_TEMPLATE_GENERATIONS)) {
+    const pinned = CANONICAL_SOURCE_PROMPT_GENERATIONS[templateName as CanonicalTemplateRegistryName];
+    assert.match(pinned ?? "", /^[0-9a-f]{64}$/u, `${templateName} must pin a source prompt generation`);
+    for (const generation of generations) {
+      assert.notEqual(
+        generation.promptDigest,
+        pinned,
+        `${templateName}:${generation.marker} retires the generation it rolls forward to`,
+      );
+    }
+  }
+});
+
+test("a rollover refuses a source that is not the generation it was registered to install", async () => {
+  // The gap the retired-row digest leaves: the outgoing row still matches, so
+  // the rename would fire, but the tree now holds prompts nobody registered.
+  // A rollover writes a brand-new row, which no instantiated task references,
+  // so the referenced-step prompt refusal cannot see the edit either.
   const sources = await loadAllTemplateStepSources();
   for (const templateName of PROMPT_ROLLOVER_TEMPLATES) {
     const current = sources.get(templateName);
     assert.ok(current);
 
     // The source as registered: no drift.
-    assert.equal(successorPromptDrift(templateName, "pre-runner-provided-regression-tooling", current), null);
+    assert.equal(sourcePromptGenerationDrift(templateName, current), null);
 
-    // The same rollover, with the prompts edited again after registration.
+    // The same source, with the prompts edited again after registration.
     const driftedSource = current.map((step) => (
       step.stepIndex === current[0]!.stepIndex ? { ...step, prompt: `${step.prompt}\n\nlater edit` } : step
     ));
-    const refusal = successorPromptDrift(templateName, "pre-runner-provided-regression-tooling", driftedSource);
+    const refusal = sourcePromptGenerationDrift(templateName, driftedSource);
     assert.ok(refusal, `${templateName} must refuse an unregistered successor`);
     assert.match(refusal, /registered to install prompt generation/u);
 
     // The outgoing row is unaffected by that edit and still matches, which is
-    // exactly why the successor has to be checked separately.
+    // exactly why the source has to be checked separately.
     const generation = generationOf(templateName, "pre-runner-provided-regression-tooling");
-    assert.ok(generation.successorPromptDigest);
-    assert.notEqual(generation.promptDigest, generation.successorPromptDigest);
+    assert.notEqual(generation.promptDigest, CANONICAL_SOURCE_PROMPT_GENERATIONS[templateName]);
   }
 });
 
@@ -342,7 +378,6 @@ test("the pull-request workflow has a registered prompt-only generation and curr
   assert.ok(current);
   const generation = generationOf(PR_TEMPLATE_NAME, "pre-pr-handover-quality");
   assert.equal(generation.promptDigest, "93a72d354876a6c26020e8638b6c365fb15e4ca4a400a2d6ca80084994f249d6");
-  assert.equal(generation.successorPromptDigest, "1c1169bf0586f6bb71f4ed34b3eb6b166828802a9b24c6b07844b2f526b5f8a8");
   assert.equal(generation.shape.length, 4);
   assert.deepEqual(
     generation.shape,
@@ -359,7 +394,7 @@ test("the pull-request workflow has a registered prompt-only generation and curr
       spawnPolicy,
     })),
   );
-  assert.equal(templatePromptGenerationDigest(current), generation.successorPromptDigest);
+  assert.equal(templatePromptGenerationDigest(current), CANONICAL_SOURCE_PROMPT_GENERATIONS[PR_TEMPLATE_NAME]);
   assert.equal(matchedLegacyGeneration(PR_TEMPLATE_NAME, asPersisted(current)), null);
   assert.deepEqual(canonicalStepOrdinals(PR_TEMPLATE_NAME, null), {
     implementation: 1,
@@ -369,7 +404,7 @@ test("the pull-request workflow has a registered prompt-only generation and curr
   });
   const reviewedGeneration = generationOf(PR_TEMPLATE_NAME, "pre-pr-head-tree-check");
   assert.equal(reviewedGeneration.promptDigest, "805b9e911be94c84e451cdbf4d1cdb93ab10031c031c6854947f56d306fb1906");
-  assert.equal(reviewedGeneration.successorPromptDigest, templatePromptGenerationDigest(current));
+  assert.notEqual(reviewedGeneration.promptDigest, templatePromptGenerationDigest(current));
   assert.deepEqual(reviewedGeneration.shape, generation.shape);
 });
 
@@ -384,8 +419,7 @@ test("the internal npm scope rename is a registered prompt-only rollover", async
     assert.ok(current);
     const generation = generationOf(templateName, "pre-internal-npm-scope-rename");
     assert.equal(generation.promptDigest, retiredDigests[templateName]);
-    assert.equal(templatePromptGenerationDigest(current), generation.successorPromptDigest);
-    assert.notEqual(generation.promptDigest, generation.successorPromptDigest);
+    assert.notEqual(generation.promptDigest, templatePromptGenerationDigest(current));
     assert.equal(matchedLegacyGeneration(templateName, asPersisted(current)), null);
   }
 });
@@ -402,8 +436,7 @@ test("the product rename is a registered prompt-only rollover in both templates"
     assert.ok(current);
     const generation = generationOf(templateName, "pre-product-rename-anneal");
     assert.equal(generation.promptDigest, retiredDigests[templateName]);
-    assert.equal(templatePromptGenerationDigest(current), generation.successorPromptDigest);
-    assert.notEqual(generation.promptDigest, generation.successorPromptDigest);
+    assert.notEqual(generation.promptDigest, templatePromptGenerationDigest(current));
     // The retired generation carries the current shape, so only the digest
     // tells it apart from the graph that replaced it.
     assert.equal(matchedLegacyGeneration(templateName, asPersisted(current)), null);
@@ -422,8 +455,7 @@ test("runner-provided Regression tooling is a registered prompt-only rollover in
     assert.ok(current);
     const generation = generationOf(templateName, "pre-runner-provided-regression-tooling");
     assert.equal(generation.promptDigest, retiredDigests[templateName]);
-    assert.equal(templatePromptGenerationDigest(current), generation.successorPromptDigest);
-    assert.notEqual(generation.promptDigest, generation.successorPromptDigest);
+    assert.notEqual(generation.promptDigest, templatePromptGenerationDigest(current));
     assert.equal(matchedLegacyGeneration(templateName, asPersisted(current)), null);
   }
 });
@@ -440,10 +472,7 @@ test("optional review omission is a registered prompt-only rollover in both temp
     assert.ok(current);
     const generation = generationOf(templateName, "pre-optional-review-omission");
     assert.equal(generation.promptDigest, retiredDigests[templateName]);
-    assert.equal(templatePromptGenerationDigest(current), generation.successorPromptDigest);
-    assert.notEqual(generation.promptDigest, generation.successorPromptDigest);
-    // The retired generation is the one runner-provided tooling rolled to.
-    assert.equal(generationOf(templateName, "pre-runner-provided-regression-tooling").successorPromptDigest, generation.successorPromptDigest);
+    assert.notEqual(generation.promptDigest, templatePromptGenerationDigest(current));
     assert.equal(matchedLegacyGeneration(templateName, asPersisted(current)), null);
     // The deployed rows carry the outgoing prompts on the current shape: no
     // optional steps, and the review steps opting out of dependency
@@ -458,36 +487,13 @@ test("optional review omission is a registered prompt-only rollover in both temp
   }
 });
 
-test("every prompt-only generation can roll straight to the current source", async () => {
+test("every registered generation, structural ones included, rolls straight to the current source", async () => {
+  // No hand-kept marker list: the registry itself is the list, so a newly
+  // registered generation is covered the moment it is added.
   const sources = await loadAllTemplateStepSources();
-  const markers = {
-    "direct-engineer-workflow": [
-      "pre-blind-review-retirement",
-      "pre-platform-spec-materialization",
-      "pre-regression-step-split",
-      "pre-internal-npm-scope-rename",
-      "pre-product-rename-anneal",
-      "pre-runner-provided-regression-tooling",
-      "pre-optional-review-omission",
-    ],
-    "compound-engineer-workflow": [
-      "pre-regression-step-split",
-      "pre-internal-npm-scope-rename",
-      "pre-product-rename-anneal",
-      "pre-runner-provided-regression-tooling",
-      "pre-optional-review-omission",
-    ],
-  } as const;
-  for (const templateName of PROMPT_ROLLOVER_TEMPLATES) {
+  for (const templateName of Object.keys(LEGACY_TEMPLATE_GENERATIONS) as CanonicalTemplateRegistryName[]) {
     const current = sources.get(templateName);
-    assert.ok(current);
-    for (const marker of markers[templateName]) {
-      assert.equal(successorPromptDrift(templateName, marker, current), null, `${templateName}:${marker}`);
-    }
+    assert.ok(current, `${templateName} must load from source`);
+    assert.equal(sourcePromptGenerationDrift(templateName, current), null, templateName);
   }
-});
-
-test("a structural generation pins no successor and is unaffected", () => {
-  const sources: { stepIndex: number; prompt: string }[] = [{ stepIndex: 1, prompt: "anything" }];
-  assert.equal(successorPromptDrift("direct-engineer-workflow", "pre-adjudication", sources), null);
 });
