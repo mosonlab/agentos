@@ -52,10 +52,6 @@ Local runner -----> ephemeral git workspace
    controls whether delivery also attempts to open a pull request. A gated task
    moves to review for a human decision; an ungated successful task can finish.
 
-> **Pending (OSS-C): public demo evidence.** The screenshots above illustrate
-> the interface only. No video, timing, benchmark, or end-to-end demo claim is
-> part of this README until the OSS-C evidence gate is complete.
-
 ## Security defaults and limits
 
 - Operator, runner, and per-run session principals are separate. Runner routes

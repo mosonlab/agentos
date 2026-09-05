@@ -119,6 +119,7 @@ the existing path. New machinery never authorizes its own first publication.
 | Candidate B conflicts while building P2 | End the batch at P1; report B and its conflicted files |
 | A candidate head changes or its PR closes | Cut publication before that candidate |
 | `main` changes while gates run | Publish nothing; rerun from the new live base |
+| The merge lease is held by another task at publication | Publish nothing; report `lease-contended`; rerun after the holder releases (the gates are rebuilt) |
 | Process exits before publication | No remote state changed; rerun |
 | Process exits after publishing P1 | Rerun; P1's candidate is skipped and the rest are rebuilt |
 | Push fails and read-back says `main` is unchanged | Release the lease and fail loudly |

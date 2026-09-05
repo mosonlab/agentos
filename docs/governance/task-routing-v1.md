@@ -114,8 +114,9 @@ interface, persisted data, a component boundary, or a foundational dependency.
 Seeded templates under `agents/templates/` are the execution canon: their
 Markdown owns step prompts, layer structure, blind-review isolation, and the
 mechanical merge tail. `agents/README.md` owns the structural rules that bind
-them. Model and runner defaults live in `agents/roles/` frontmatter and
-`packages/db/src/agent-contract.ts`.
+them. Model and runner defaults live in `agents/roles/` frontmatter;
+`packages/db/src/agent-contract.ts` validates them against the model catalog in
+`packages/db/src/model-routing.ts`.
 
 Chains instantiated before a template change retain stored prompts,
 assignments, and behavior. Canonical sync preserves superseded templates under
@@ -199,8 +200,8 @@ own. The board holds either the card or its chain, never both.
 
 - Create it with `assigneeType: HUMAN` so no runner claims it. Its description
   is the brief from `docs/BRIEF-TEMPLATE.md`, plus the `Route:` line when the
-  implementation assignee is non-default. The create API accepts `status` as
-  optional `status` as `BACKLOG` or `TODO` and defaults to `TODO`; pass `status: BACKLOG` to create
+  implementation assignee is non-default. The create API accepts an optional
+  `status` of `BACKLOG` or `TODO` and defaults to `TODO`; pass `status: BACKLOG` to create
   a human Backlog card atomically, without a follow-up PATCH.
 - Dispatch passes the card's name as instantiate `name` and the brief as
   instantiate `description`; the chain implementation task then owns the
