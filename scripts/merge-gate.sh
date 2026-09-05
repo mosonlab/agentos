@@ -50,7 +50,7 @@
 # serialise runs whose commits have already moved on — so a live holder is an
 # immediate FAIL naming the process that holds it.
 #
-# The frozen-record rules (AGENTS.md "Frozen records") are checked immediately
+# The frozen-record rules (CONTRIBUTING.md "Records that do not change") are checked immediately
 # after the commit is pinned and before Docker is touched: they need nothing
 # installed and nothing running, and a branch that rewrites history should hear
 # that instead of a preflight failure about a daemon it never needed.

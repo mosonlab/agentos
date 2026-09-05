@@ -118,7 +118,7 @@ identifier, recorded below.
 | `apps/web/src/tests/fixtures/tc-ux-v1-prompts.json` | `application/json` | `25d2062e60a618783de79b1d7a824711adb29931e0334c958e0640fec9a53da2` | 53465 |
 | `apps/web/src/tests/fixtures/tc-ux-v1-prompts.provenance.json` | `application/json` | `bab04df18c4680804120478e2362256de41b3a484b81d08024bcc096cdf009d4` | 264 |
 | `docs/release/fixtures/oss-b0-smoke-task.json` | `application/json` | `a716ed8fc39420c1b671574450b92c61d913352539078948f9429bef42650de6` | 1875 |
-| `scripts/fixtures/local-api-origin-cases.json` | `application/json` | `e40ad18b723d231ebee217afe10194ecebc519639ff93d74b3fbf7baf4185bf0` | 7682 |
+| `scripts/fixtures/local-api-origin-cases.json` | `application/json` | `02a07bb85cd1e80db5097100bb5b0d1c37e35df841dcf2ad1e238e1106e8360f` | 7698 |
 | `scripts/fixtures/onboarding-remote-cases.json` | `application/json` | `82ff59b740b4dcc6ef43270fb301800360eecefb65b74ee7ad9e1dc4eafb257f` | 5963 |
 
 Every one of them is first-party, owned by Moson Lab and covered by `LICENSE`,
@@ -141,7 +141,7 @@ is the part worth writing down:
   digest it records is the fixture's actual digest in this commit, so the pair
   checks itself.
 - **`oss-b0-smoke-task.json`** — the frozen deterministic smoke task the
-  quickstart's step 8 creates. Authored here; no credential, no personal data.
+  quickstart's step 10 creates. Authored here; no credential, no personal data.
 - **`local-api-origin-cases.json`** — the shared policy table deciding which
   local API destinations are accepted and refused. Its hostile URLs are synthetic
   and are the cases being refused, not endpoints anything contacts.
@@ -155,9 +155,10 @@ is the part worth writing down:
 `public-snapshot.json`'s `exclude` rules name each held-back file with a reason,
 and its `deny` rules close whole path classes repository-wide: generated build
 output, installed dependencies, caches, dumps, logs, process files and captured
-process output. Plans, reviews, runbooks, internal specifications, design
-references and private operational material are excluded by name or by
-directory. `docs/public-snapshot.md` describes the boundary and how it is
+process output. Plans, reviews, briefs, merge notes, internal specifications,
+design references and private operational material are excluded by name or by
+directory; the four test-coupled runbooks under `docs/runbooks/` are published
+by exact name. `docs/public-snapshot.md` describes the boundary and how it is
 checked.
 
 ## Re-deriving this page
