@@ -436,6 +436,7 @@ test("systemd path directives escape whitespace and percent specifiers", () => {
 });
 
 test("default Darwin render, manifest entries, and plan stdout match 9a52c6ad bytes", () => {
+  const serviceRoot = realpathSync(mkdtempSync(join(tmpdir(), "agentos-darwin-service-root-")));
   const previousPlatform = process.env.AGENTOS_SERVICE_PLATFORM;
   const previousCount = process.env.AGENTOS_RUNNER_COUNT;
   const previousPrefix = process.env.AGENTOS_RUNNER_ID_PREFIX;
@@ -450,15 +451,15 @@ test("default Darwin render, manifest entries, and plan stdout match 9a52c6ad by
     );
     const root = process.cwd();
     const plan = installLaunchdServices({
-      repositoryRoot: root,
-      userHome: join(root, "fixture-home"),
+      repositoryRoot: serviceRoot,
+      userHome: join(serviceRoot, "fixture-home"),
       nodeBinary: "/usr/bin/node",
       gitBinary: "/usr/bin/git",
       path: "/usr/bin:/bin",
       effectiveUid: 501,
       apply: false,
     });
-    const normalize = (value) => value.replaceAll(root, "<ROOT>");
+    const normalize = (value) => value.replaceAll(serviceRoot, "<ROOT>").replaceAll(root, "<ROOT>");
     const hashes = Object.fromEntries(Object.entries(plan.rendered).map(([label, contents]) => [
       label,
       digest(normalize(contents)),
@@ -531,14 +532,25 @@ process.exit(result.status ?? 1);
       baseline.autoDeployManifestEntries,
     );
     rmSync(autoHome, { recursive: true, force: true });
-    const entrypoint = spawnSync(process.execPath, ["scripts/deploy/install-launchd-services.mjs"], {
+    // The service plan reads $HOME/Library/LaunchAgents; a developer machine
+    // with the services installed would otherwise report a definition
+    // conflict instead of the pinned plan bytes.
+    const serviceHome = mkdtempSync(join(tmpdir(), "agentos-darwin-service-home-"));
+    // Use the public command runner with an isolated repository as well as HOME;
+    // the checkout may own a manifest for the developer's installed services.
+    const entrypoint = spawnSync(process.execPath, ["--input-type=module", "--eval", `
+      import { runServiceInstaller } from ${JSON.stringify(new URL("./install-launchd-services.mjs", import.meta.url).href)};
+      process.exitCode = runServiceInstaller([], { repositoryRoot: ${JSON.stringify(serviceRoot)} });
+    `], {
       cwd: root,
       encoding: "utf8",
-      env: { ...process.env, AGENTOS_SERVICE_PLATFORM: "darwin" },
+      env: { ...process.env, AGENTOS_SERVICE_PLATFORM: "darwin", HOME: serviceHome },
     });
+    rmSync(serviceHome, { recursive: true, force: true });
     assert.equal(entrypoint.status, 0, entrypoint.stderr);
     assert.equal(normalize(entrypoint.stdout), baseline.servicePlanStdout);
   } finally {
+    rmSync(serviceRoot, { recursive: true, force: true });
     if (previousPlatform === undefined) delete process.env.AGENTOS_SERVICE_PLATFORM;
     else process.env.AGENTOS_SERVICE_PLATFORM = previousPlatform;
     if (previousCount === undefined) delete process.env.AGENTOS_RUNNER_COUNT;
@@ -2132,6 +2144,8 @@ test("runner role is recorded and rendered into both auto-deploy service formats
 test("runner auto-deploy stage one prints a stage-two command carrying the role", async () => {
   await withLinux(() => {
     const root = mkdtempSync(join(tmpdir(), "agentos-auto-runner-next-"));
+    const systemctlPath = join(root, "systemctl");
+    writeFileSync(systemctlPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     const unitDirectory = join(root, "etc/systemd/system");
     const environment = {
       AGENTOS_SERVICE_PLATFORM: "linux",
@@ -2152,6 +2166,7 @@ test("runner auto-deploy stage one prints a stage-two command carrying the role"
       sudoersPath: join(root, "etc/sudoers.d/anneal-service-control"),
       environment,
       effectiveUid: 501,
+      systemctlPath,
       execute: () => "",
     };
     const output = [];
@@ -2163,6 +2178,25 @@ test("runner auto-deploy stage one prints a stage-two command carrying the role"
       process.stdout.write = write;
     }
     assert.match(output.join(""), /NEXT sudo AGENTOS_DEPLOY_ROLE=runner node .* --install-units/u);
+
+    const unavailableSystemctl = join(root, "systemctl-not-executable");
+    writeFileSync(unavailableSystemctl, "#!/bin/sh\nexit 0\n", { mode: 0o644 });
+    const snapshot = () => readdirSync(root, { recursive: true }).sort().map((path) => {
+      const absolute = join(root, path);
+      const stat = statSync(absolute);
+      return [path, stat.mode, stat.isFile() ? readFileSync(absolute, "hex") : null];
+    });
+    const before = snapshot();
+    const rejectedCalls = [];
+    assert.throws(() => installLaunchd(["--install-units", "--service-user", "anneal-test"], {
+      ...options,
+      effectiveUid: 0,
+      systemctlPath: unavailableSystemctl,
+      execute: (...args) => { rejectedCalls.push(args); return ""; },
+      chown: (...args) => { rejectedCalls.push(args); },
+    }), { message: "systemd-command-unavailable:systemctl" });
+    assert.deepEqual(rejectedCalls, []);
+    assert.deepEqual(snapshot(), before);
 
     const stageTwoCalls = [];
     assert.equal(installLaunchd(["--install-units", "--service-user", "anneal-test"], {
