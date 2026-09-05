@@ -91,24 +91,12 @@ export type LegacyTemplateGeneration = Readonly<{
    * outgoing generation's digest here by hand, exactly as they write a shape,
    * and a prompt edit with no entry still refuses the deploy rather than
    * migrating anything on its own.
+   *
+   * The generation an entry rolls *forward to* is not stated here. Every
+   * rollover of a template installs that template's one current source
+   * generation, pinned once in `CANONICAL_SOURCE_PROMPT_GENERATIONS`.
    */
   promptDigest?: string;
-  /**
-   * The prompt generation this entry rolls *forward to*, as the same digest
-   * over the successor's ordered step prompts.
-   *
-   * `promptDigest` authenticates the row being retired. On its own that is only
-   * half the transition: it says nothing about what the source tree happens to
-   * contain when the rollover finally runs. If the prompts were edited again
-   * between registering this entry and deploying it, the rename would still
-   * fire and would install whatever the tree now holds -- the unregistered edit
-   * would ride in on the registered one's authority.
-   *
-   * Pinning the successor closes that. The rollover verifies the source against
-   * this digest before renaming anything, and a mismatch is refused exactly
-   * like any other unregistered drift.
-   */
-  successorPromptDigest?: string;
 }>;
 
 const legacyTemplateGenerations = {
@@ -143,7 +131,6 @@ const legacyTemplateGenerations = {
       // Structurally identical to the current graph on purpose: this transition
       // changed prompts only. `promptDigest` is what tells the two apart.
       promptDigest: "1b2447559a77e28added3509a6f6b17bce8a8cd7db9113bdaaa17d581d874165",
-      successorPromptDigest: "8dbdb5fc5348a01eef73bd5908c4e142b4b6ca01bbb063eaf4916173fdc51543",
       shape: [
         { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
@@ -157,7 +144,6 @@ const legacyTemplateGenerations = {
     {
       marker: "pre-platform-spec-materialization",
       promptDigest: "c1a9ec1f8e783c3c814c0d0f5f4a9b91d5759b9dc39473dc200447aeb96677c5",
-      successorPromptDigest: "8dbdb5fc5348a01eef73bd5908c4e142b4b6ca01bbb063eaf4916173fdc51543",
       shape: [
         { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
@@ -173,7 +159,6 @@ const legacyTemplateGenerations = {
       // platform script while keeping the template graph unchanged.
       marker: "pre-regression-step-split",
       promptDigest: "a760a6ca04bc047b47831fc4a4064cf2157487142f32a480223d6b5d8187c4a1",
-      successorPromptDigest: "8dbdb5fc5348a01eef73bd5908c4e142b4b6ca01bbb063eaf4916173fdc51543",
       shape: [
         { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
@@ -187,7 +172,6 @@ const legacyTemplateGenerations = {
     {
       marker: "pre-internal-npm-scope-rename",
       promptDigest: "3b50afcdd5aef2d0f06b00b7644cc67fac3ffbd29414e44564dc6aeb9757580d",
-      successorPromptDigest: "8dbdb5fc5348a01eef73bd5908c4e142b4b6ca01bbb063eaf4916173fdc51543",
       shape: [
         { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
@@ -231,7 +215,6 @@ const legacyTemplateGenerations = {
       // `pre-revalidate-step` above and rolls over structurally as before.
       marker: "pre-product-rename-anneal",
       promptDigest: "0aa379a51d722ec9b8b5d91bc6158d9dd9a1f5d380b50695613d5aece9afda46",
-      successorPromptDigest: "8dbdb5fc5348a01eef73bd5908c4e142b4b6ca01bbb063eaf4916173fdc51543",
       shape: [
         { name: "Revalidate specification", agentName: "spec-revalidator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revalidation", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
@@ -246,7 +229,6 @@ const legacyTemplateGenerations = {
     {
       marker: "pre-runner-provided-regression-tooling",
       promptDigest: "c0ec5acb70b82b85bc3f3aff5840029a303d31e6098b7171a2bef35f105f3371",
-      successorPromptDigest: "8dbdb5fc5348a01eef73bd5908c4e142b4b6ca01bbb063eaf4916173fdc51543",
       shape: [
         { name: "Revalidate specification", agentName: "spec-revalidator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revalidation", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
@@ -261,7 +243,6 @@ const legacyTemplateGenerations = {
     {
       marker: "pre-optional-review-omission",
       promptDigest: "e8fdf5533275e85e33b0cf812db9474b00214de2401e4c97bb6eb0732f864df8",
-      successorPromptDigest: "8dbdb5fc5348a01eef73bd5908c4e142b4b6ca01bbb063eaf4916173fdc51543",
       shape: [
         { name: "Revalidate specification", agentName: "spec-revalidator", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revalidation", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
@@ -332,7 +313,6 @@ const legacyTemplateGenerations = {
       // Structurally identical to the current graph on purpose: this transition
       // changed prompts only. `promptDigest` is what tells the two apart.
       promptDigest: "a9994d131d1cf2667c6d61cc7161f5653cf9903a6aae77ed55c18b1db6fb3cf2",
-      successorPromptDigest: "e1e95c18a408a0c1847508ed16d4c60ae3978007dfccdbfe50cd793ee8a78fa9",
       shape: [
         { name: "Write a spec", agentName: "spec", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "spec", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Plan", agentName: "plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
@@ -353,7 +333,6 @@ const legacyTemplateGenerations = {
       // platform script while keeping the template graph unchanged.
       marker: "pre-regression-step-split",
       promptDigest: "74fe9add0789494efce82d477ea472ce2a16132fe105e6f12c87223c18dbabf8",
-      successorPromptDigest: "e1e95c18a408a0c1847508ed16d4c60ae3978007dfccdbfe50cd793ee8a78fa9",
       shape: [
         { name: "Write a spec", agentName: "spec", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "spec", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Plan", agentName: "plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
@@ -372,7 +351,6 @@ const legacyTemplateGenerations = {
     {
       marker: "pre-internal-npm-scope-rename",
       promptDigest: "79845a3badc75200d30ac22cb4fb10c6efa38308c31156e7b15f4c8475e9f7ff",
-      successorPromptDigest: "e1e95c18a408a0c1847508ed16d4c60ae3978007dfccdbfe50cd793ee8a78fa9",
       shape: [
         { name: "Write a spec", agentName: "spec", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "spec", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Plan", agentName: "plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
@@ -391,7 +369,6 @@ const legacyTemplateGenerations = {
     {
       marker: "pre-product-rename-anneal",
       promptDigest: "606f9b5a667781cde3400d114cc7f2ebf00bada6995eee07a7019b63e7dd8424",
-      successorPromptDigest: "e1e95c18a408a0c1847508ed16d4c60ae3978007dfccdbfe50cd793ee8a78fa9",
       shape: [
         { name: "Write a spec", agentName: "spec", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "spec", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Plan", agentName: "plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
@@ -410,7 +387,6 @@ const legacyTemplateGenerations = {
     {
       marker: "pre-runner-provided-regression-tooling",
       promptDigest: "27d552a220439bc091956173bc5ee12e5e7158b160fb015443a68f2e744e85d8",
-      successorPromptDigest: "e1e95c18a408a0c1847508ed16d4c60ae3978007dfccdbfe50cd793ee8a78fa9",
       shape: [
         { name: "Write a spec", agentName: "spec", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "spec", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Plan", agentName: "plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
@@ -429,7 +405,6 @@ const legacyTemplateGenerations = {
     {
       marker: "pre-optional-review-omission",
       promptDigest: "c3b3bb4692bda266e5afd81bb6ad258f58bd1eed14240f272338e0f44fa5e97e",
-      successorPromptDigest: "e1e95c18a408a0c1847508ed16d4c60ae3978007dfccdbfe50cd793ee8a78fa9",
       shape: [
         { name: "Write a spec", agentName: "spec", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "spec", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Plan", agentName: "plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
@@ -454,7 +429,6 @@ const legacyTemplateGenerations = {
       // outgoing and successor generations.
       marker: "pre-pr-handover-quality",
       promptDigest: "93a72d354876a6c26020e8638b6c365fb15e4ca4a400a2d6ca80084994f249d6",
-      successorPromptDigest: "1c1169bf0586f6bb71f4ed34b3eb6b166828802a9b24c6b07844b2f526b5f8a8",
       shape: [
         { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
@@ -467,7 +441,6 @@ const legacyTemplateGenerations = {
       // committed HEAD tree, not the mutable index.
       marker: "pre-pr-head-tree-check",
       promptDigest: "805b9e911be94c84e451cdbf4d1cdb93ab10031c031c6854947f56d306fb1906",
-      successorPromptDigest: "1c1169bf0586f6bb71f4ed34b3eb6b166828802a9b24c6b07844b2f526b5f8a8",
       shape: [
         { name: "Implementation", agentName: "senior-dev-luna", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Code review (Sol)", agentName: "review-coordinator-sol", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
@@ -483,6 +456,34 @@ export type CanonicalTemplateRegistryName = keyof typeof legacyTemplateGeneratio
 export const LEGACY_TEMPLATE_GENERATIONS: Readonly<
   Record<CanonicalTemplateRegistryName, readonly LegacyTemplateGeneration[]>
 > = legacyTemplateGenerations;
+
+/**
+ * The prompt generation each canonical template's source tree holds, as the
+ * digest `templatePromptGenerationDigest` computes over its ordered step
+ * prompts. One value per template; no registered generation restates it.
+ *
+ * `promptDigest` authenticates the row a rollover retires. On its own that is
+ * only half the transition: it says nothing about what the source tree holds
+ * when the rollover finally runs. Everywhere else an unregistered prompt edit
+ * refuses the deploy because the persisted step is referenced by instantiated
+ * tasks and its prompt no longer matches source. A rollover has no such
+ * witness: it renames the retired row away and writes a brand-new template row
+ * from source, and a brand-new row is referenced by nothing. Without this pin,
+ * prompts edited between registering a rollover and deploying it would be
+ * installed on the registered transition's authority.
+ *
+ * It is pinned rather than read from the tree on purpose: a digest computed
+ * from the same tree it is meant to authenticate proves nothing. Re-pin it, in
+ * the same change that edits a canonical prompt, from the value
+ * `npm run db:template-digest` prints. It cannot go stale unnoticed --
+ * `canonical-template-transition.test.ts` recomputes every entry here from
+ * `agents/templates/` and fails on a mismatch.
+ */
+export const CANONICAL_SOURCE_PROMPT_GENERATIONS = {
+  "direct-engineer-workflow": "8dbdb5fc5348a01eef73bd5908c4e142b4b6ca01bbb063eaf4916173fdc51543",
+  "compound-engineer-workflow": "e1e95c18a408a0c1847508ed16d4c60ae3978007dfccdbfe50cd793ee8a78fa9",
+  [PR_TEMPLATE_NAME]: "1c1169bf0586f6bb71f4ed34b3eb6b166828802a9b24c6b07844b2f526b5f8a8",
+} as const satisfies Readonly<Record<CanonicalTemplateRegistryName, string>>;
 
 export type CanonicalTemplateIdentity = Readonly<{
   canonicalName: CanonicalTemplateRegistryName;
@@ -549,7 +550,7 @@ export const canonicalStepOrdinals = (
     return generation === null ? CURRENT_CANONICAL_STEP_ORDINALS[canonicalName] ?? null : null;
   }
   if (generation === null && registered.successorStepOrdinals !== undefined) return registered.successorStepOrdinals;
-  if (generation === null && (registered.promptDigest === undefined || registered.successorPromptDigest === undefined)) {
+  if (generation === null && registered.promptDigest === undefined) {
     throw new Error(`Current ${canonicalName} Step ordinals are not derivable from its latest structural transition`);
   }
 
@@ -681,23 +682,21 @@ const shapeMatches = (
  * most one entry can match, and the current source graph matches none.
  */
 /**
- * A named reason the source graph is not the successor a matched generation was
- * registered to roll forward to, or null when it is.
+ * A named reason the source tree does not hold the prompt generation this
+ * template's rollovers are registered to install, or null when it does.
  *
- * Only entries that pin a successor are checked. A structural generation is
- * already authenticated by the shape the source has to match, and entries
- * predating this field keep their previous behaviour.
+ * Every rollover installs the same thing -- the current source graph -- so
+ * this is asked once per template rather than once per retired generation, and
+ * it covers structural rollovers as well as prompt-only ones.
  */
-export const successorPromptDrift = (
-  templateName: string,
-  marker: string,
+export const sourcePromptGenerationDrift = (
+  templateName: CanonicalTemplateRegistryName,
   sourceSteps: readonly { stepIndex: number; prompt: string }[],
 ): string | null => {
-  const generation = registeredGenerations(templateName)?.find((candidate) => candidate.marker === marker);
-  if (!generation?.successorPromptDigest) return null;
+  const registered = CANONICAL_SOURCE_PROMPT_GENERATIONS[templateName];
   const actual = templatePromptGenerationDigest(sourceSteps);
-  if (actual === generation.successorPromptDigest) return null;
-  return `${templateName} rollover ${marker} is registered to install prompt generation ${generation.successorPromptDigest}, but the source tree holds ${actual}`;
+  if (actual === registered) return null;
+  return `${templateName} rollover is registered to install prompt generation ${registered}, but the source tree holds ${actual}`;
 };
 
 export const legacyGenerationMatches = (
@@ -719,17 +718,3 @@ export const matchedLegacyGeneration = (
 ): string | null =>
   registeredGenerations(templateName)
     ?.find((generation) => legacyGenerationMatches(generation, steps))?.marker ?? null;
-
-/**
- * Return a named refusal reason when a canonical row is neither an exact
- * retired graph nor the exact current graph. The caller runs this for every row before
- * renaming or creating anything, so a refusal rolls back as an all-or-none
- * transition and cannot leave a half-installed template set.
- */
-export const legacyTemplateShapeRefusal = (
-  templateName: string,
-  steps: readonly PersistedTransitionStep[],
-): string | null => {
-  if (!registeredGenerations(templateName)) return `unknown canonical template ${templateName}`;
-  return matchedLegacyGeneration(templateName, steps) === null ? null : "legacy";
-};

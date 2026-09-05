@@ -3,9 +3,8 @@ import { AssigneeType, Prisma, RunStatus, TaskStatus } from "@prisma/client";
 import { canonicalStepDrift } from "./canonical-step-adoption.js";
 import {
   legacyTemplateName,
-  LEGACY_TEMPLATE_GENERATIONS,
   matchedLegacyGeneration,
-  successorPromptDrift,
+  sourcePromptGenerationDrift,
   templateRolloverBlockerCount,
   type PersistedTransitionStep,
 } from "./canonical-template-transition.js";
@@ -34,7 +33,6 @@ export type CanonicalInstallationAction =
     rowId: string;
     marker: string;
     legacyName: string;
-    successorVerified: boolean;
   }>
   | Readonly<{
     kind: "refused";
@@ -84,6 +82,9 @@ export const planCanonicalInstallation = (
   const plan: CanonicalInstallationAction[] = [];
   for (const [templateName, sourceSteps] of sources) {
     const matchingRows = rows.filter((row) => row.name === templateName);
+    // Every rollover of this template installs the same graph, so the source
+    // is authenticated once, before any row decides what to do.
+    const sourceDrift = sourcePromptGenerationDrift(templateName, sourceSteps);
     for (const projectId of requiredProjectIds) {
       if (!matchingRows.some((row) => row.projectId === projectId)) {
         plan.push({ kind: "create", templateName, projectId });
@@ -92,10 +93,7 @@ export const planCanonicalInstallation = (
     for (const row of matchingRows) {
       const marker = matchedLegacyGeneration(templateName, row.steps);
       if (marker !== null) {
-        const generation = LEGACY_TEMPLATE_GENERATIONS[templateName]
-          .find((candidate) => candidate.marker === marker)!;
-        const drift = successorPromptDrift(templateName, marker, sourceSteps);
-        plan.push(drift === null
+        plan.push(sourceDrift === null
           ? {
             kind: "rollover",
             templateName,
@@ -103,21 +101,21 @@ export const planCanonicalInstallation = (
             rowId: row.id,
             marker,
             legacyName: legacyTemplateName(templateName, marker, row.id),
-            successorVerified: generation.successorPromptDigest !== undefined,
           }
-          : { kind: "refused", templateName, projectId: row.projectId, rowId: row.id, reason: drift });
+          : { kind: "refused", templateName, projectId: row.projectId, rowId: row.id, reason: sourceDrift });
         continue;
       }
       if (row.legacyNameOverride) {
-        plan.push({
-          kind: "rollover",
-          templateName,
-          projectId: row.projectId,
-          rowId: row.id,
-          marker: "pre-registry-seed",
-          legacyName: row.legacyNameOverride,
-          successorVerified: false,
-        });
+        plan.push(sourceDrift === null
+          ? {
+            kind: "rollover",
+            templateName,
+            projectId: row.projectId,
+            rowId: row.id,
+            marker: "pre-registry-seed",
+            legacyName: row.legacyNameOverride,
+          }
+          : { kind: "refused", templateName, projectId: row.projectId, rowId: row.id, reason: sourceDrift });
         continue;
       }
       const refusal = currentGraphRefusal(templateName, row.id, row.steps, sourceSteps);
