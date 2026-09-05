@@ -29,6 +29,7 @@ const agentSources = (): AgentSources => ({
   foundationalPrompt: "foundation",
   roles: PROJECT_BOOTSTRAP_ROLE_NAMES.map((name) => ({
     name,
+    canonicalRole: name,
     title: `${name} title`,
     model: `${name}-model`,
     runnerPreference: RunnerPreference.CODEX,

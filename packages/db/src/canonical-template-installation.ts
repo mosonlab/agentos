@@ -8,6 +8,7 @@ import {
   templateRolloverBlockerCount,
   type PersistedTransitionStep,
 } from "./canonical-template-transition.js";
+import { planStaffingProfileCarry } from "./staffing-profile-carry.js";
 import {
   canonicalTemplateSourceSpec,
   type CanonicalTemplateName,
@@ -150,10 +151,17 @@ const writeCanonicalTemplate = async (
       data: { description: metadata.description, variables: ["branchName"] },
     });
   for (const step of steps) {
+    // The source binds a canonical role, and `Agent.name` is operator-editable,
+    // so the role column is the identity. A row that predates the column still
+    // carries its role in its name, which is the fallback.
     const assigneeAgentId = step.agentName === null
       ? null
       : (await tx.agent.findFirst({
-        where: { projectId, name: step.agentName, archivedAt: null },
+        where: {
+          projectId,
+          archivedAt: null,
+          OR: [{ canonicalRole: step.agentName }, { canonicalRole: null, name: step.agentName }],
+        },
         select: { id: true },
       }))?.id ?? null;
     if (step.agentName !== null && assigneeAgentId === null) {
@@ -195,7 +203,7 @@ export const applyCanonicalInstallation = async (
     synchronizeCurrent?: boolean;
     projectLabel?: (projectId: string) => string | undefined;
   }> = {},
-): Promise<{ created: number }> => {
+): Promise<{ created: number; staffingNotices: string[] }> => {
   const scopedError = (projectId: string, message: string): Error => {
     const slug = options.projectLabel?.(projectId);
     return new Error(slug ? `Project ${slug}: ${message}` : message);
@@ -206,6 +214,7 @@ export const applyCanonicalInstallation = async (
   }
 
   let created = 0;
+  const staffingNotices: string[] = [];
   for (const action of plan) {
     if (action.kind === "refused") continue;
     const sourceSteps = sources.get(action.templateName);
@@ -257,6 +266,27 @@ export const applyCanonicalInstallation = async (
       }
       await tx.taskTemplate.update({ where: { id: action.rowId }, data: { name: action.legacyName } });
     }
+    // A rollover writes the new graph into a new row, so the retired row keeps
+    // its staffing profiles. They are read before the new row is written and
+    // replanted on it afterwards; entries the new graph has no step for are
+    // dropped and reported rather than silently reassigned.
+    const carry = action.kind === "rollover"
+      ? planStaffingProfileCarry(
+        await tx.staffingProfile.findMany({
+          where: { taskTemplateId: action.rowId },
+          orderBy: { name: "asc" },
+          select: {
+            name: true,
+            isDefault: true,
+            entries: {
+              select: { outputKind: true, assigneeAgentId: true, include: true },
+              orderBy: { outputKind: "asc" },
+            },
+          },
+        }),
+        sourceSteps.map((step) => step.outputKind),
+      )
+      : null;
     const installedTemplateId = await writeCanonicalTemplate(
       tx,
       action.projectId,
@@ -265,15 +295,26 @@ export const applyCanonicalInstallation = async (
       null,
       scopedError,
     );
-    if (action.kind === "rollover") {
-      // TODO-for-integrator: staffing profiles follow the graph across a
-      // rollover. Call L1's carry helper here, where both row ids are known:
-      //   await carryStaffingProfiles(tx, action.rowId, installedTemplateId);
-      // imported from "./staffing-profile-carry.js"; the helper is absent on
-      // this lane's branch.
-      void installedTemplateId;
+    if (carry) {
+      for (const profile of carry.profiles) {
+        const created = await tx.staffingProfile.create({
+          data: {
+            projectId: action.projectId,
+            taskTemplateId: installedTemplateId,
+            name: profile.name,
+            isDefault: profile.isDefault,
+          },
+          select: { id: true },
+        });
+        if (profile.entries.length > 0) {
+          await tx.staffingProfileEntry.createMany({
+            data: profile.entries.map((entry) => ({ profileId: created.id, ...entry })),
+          });
+        }
+      }
+      staffingNotices.push(...carry.reportLines);
     }
     created += 1;
   }
-  return { created };
+  return { created, staffingNotices };
 };

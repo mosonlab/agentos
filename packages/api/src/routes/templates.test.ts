@@ -56,6 +56,7 @@ test("template instantiate route maps an archived step agent to a named 400", as
             ? [{ id: template.id, projectId: "project-1", name: template.name }]
             : [{ id: "agent-1", name: "Archived Ada", projectId: "project-1", archivedAt }];
         },
+        staffingProfile: { findFirst: async () => null },
         taskTemplate: { findFirst: async () => template },
         repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
       }),

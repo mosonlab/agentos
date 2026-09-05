@@ -213,6 +213,7 @@ test("instantiating the canonical feature template copies every layer and writes
         model: agent.model, runnerPreference: agent.runnerPreference,
         agentId: agent.id, repoId: "repo-1",
       })),
+    staffingProfile: { findFirst: async () => null },
     taskTemplate: { findFirst: async () => template },
     repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
     agent: {
@@ -256,6 +257,7 @@ test("instantiating the canonical feature template copies every layer and writes
     agentRepoAccess: { count: async () => 1 },
   };
   const db = {
+    staffingProfile: { findFirst: async () => null },
     taskTemplate: { findFirst: async () => template },
     repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
     agentRepoAccess: { findFirst: async () => ({ agentId: "granted-agent" }) },
@@ -312,6 +314,7 @@ test("instantiating the canonical feature template copies every layer and writes
 
 test("the lower-level materializer rejects blank variables and invalid branches from the locked graph", async () => {
   const db = {
+    staffingProfile: { findFirst: async () => null },
     taskTemplate: { findFirst: async () => ({
       id: "template-1",
       name: "Template",
@@ -328,6 +331,7 @@ test("the lower-level materializer rejects blank variables and invalid branches 
       $queryRaw: async (query: TemplateStringsArray) => query.join(" ").includes('"TaskTemplate"')
         ? [{ id: "template-1", projectId: "project-1", name: "Template" }]
         : [],
+      staffingProfile: { findFirst: async () => null },
       taskTemplate: { findFirst: async () => ({
         id: "template-1",
         name: "Template",
@@ -380,12 +384,14 @@ test("template base reference failures expose stable 400 refusal codes", async (
     [[step(1, 1)], "template_base_reference_not_earlier"],
   ] as const) {
     const db = {
+      staffingProfile: { findFirst: async () => null },
       taskTemplate: { findFirst: async () => ({ id: "template-1", name: "Template", variables: [], steps }) },
       repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
       $transaction: async (operation: (client: unknown) => Promise<unknown>) => operation({
         $queryRaw: async (query: TemplateStringsArray) => query.join(" ").includes('"TaskTemplate"')
           ? [{ id: "template-1", projectId: "project-1", name: "Template" }]
           : [],
+        staffingProfile: { findFirst: async () => null },
         taskTemplate: { findFirst: async () => ({ id: "template-1", name: "Template", variables: [], steps }) },
         repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
       }),
@@ -424,6 +430,7 @@ test("an agent archived after the step check still loses to the locked re-read",
       $queryRaw: async (query: TemplateStringsArray) => query.join(" ").includes('"TaskTemplate"')
         ? [{ id: "template-1", projectId: "project-1", name: "Template" }]
         : [{ id: agent.id, name: agent.name, projectId: "project-1", archivedAt: new Date() }],
+      staffingProfile: { findFirst: async () => null },
       taskTemplate: { findFirst: async () => ({
         id: "template-1",
         name: "Template",
@@ -489,6 +496,7 @@ test("a serializable conflict raised by the raw Agent lock is retried, not surfa
           ? [{ id: "template-1", projectId: "project-1", name: "Template" }]
           : [{ id: agent.id, name: agent.name, projectId: "project-1", archivedAt: new Date() }];
       },
+      staffingProfile: { findFirst: async () => null },
       taskTemplate: { findFirst: async () => ({
         id: "template-1",
         name: "Template",
@@ -536,6 +544,7 @@ test("template instantiation rejects an archived step agent and names the step",
       $queryRaw: async (query: TemplateStringsArray) => query.join(" ").includes('"TaskTemplate"')
         ? [{ id: "template-1", projectId: "project-1", name: "Template" }]
         : [{ id: agent.id, name: agent.name, projectId: "project-1", archivedAt: agent.archivedAt }],
+      staffingProfile: { findFirst: async () => null },
       taskTemplate: { findFirst: async () => ({
         id: "template-1",
         name: "Template",
@@ -590,6 +599,7 @@ test("step overrides copy only the effective assignee and lock canonical plus ov
         ...[...agents, replacement].map((agent) => ({ agentId: agent.id, repoId: "repo-1" })),
       ];
     },
+    staffingProfile: { findFirst: async () => null },
     taskTemplate: { findFirst: async () => template },
     repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
     agentRepoAccess: { count: async () => 1 },
@@ -603,6 +613,7 @@ test("step overrides copy only the effective assignee and lock canonical plus ov
     taskActivity: { createMany: async () => ({ count: created.length }) },
   };
   const db = {
+    staffingProfile: { findFirst: async () => null },
     taskTemplate: { findFirst: async () => template },
     repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
     agent: { findMany: async () => [replacement] },
@@ -625,6 +636,7 @@ test("step overrides copy only the effective assignee and lock canonical plus ov
 
 test("step override structural refusals happen before template reads and carry stable codes", async () => {
   const db = {
+    staffingProfile: { findFirst: async () => null },
     taskTemplate: { findFirst: async () => { throw new Error("database must not be read"); } },
     repo: { findFirst: async () => { throw new Error("database must not be read"); } },
   } as unknown as PrismaClient;
@@ -689,6 +701,7 @@ test("direct Route overrides implementation while non-direct templates refuse Ro
         { agentId: revalidator.id, repoId: "repo-1" },
         { agentId: routed.id, repoId: "repo-1" },
       ],
+    staffingProfile: { findFirst: async () => null },
     taskTemplate: { findFirst: async () => ({ ...template, name: templateName }) },
     repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
     agent: { findFirst: async () => routed },
@@ -828,6 +841,7 @@ test("canonical unbound direct instantiation retains the seven-task prompt snaps
     $queryRaw: async (query: TemplateStringsArray) => query.join(" ").includes('"TaskTemplate"')
       ? [{ id: template.id, projectId: "project-1", name: template.name }]
       : lockedRows,
+    staffingProfile: { findFirst: async () => null },
     taskTemplate: { findFirst: async () => template },
     repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
     agentRepoAccess: { count: async () => 1 },
@@ -841,6 +855,7 @@ test("canonical unbound direct instantiation retains the seven-task prompt snaps
     taskActivity: { createMany: async () => ({ count: created.length }) },
   };
   const db = {
+    staffingProfile: { findFirst: async () => null },
     taskTemplate: { findFirst: async () => template },
     repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
     agent: { findMany: async () => [], findFirst: async () => null },
@@ -920,6 +935,7 @@ test("instantiation resolves only the two gate slots from overrides then project
       return [];
     },
     project: {},
+    staffingProfile: { findFirst: async () => null },
     taskTemplate: { findFirst: async () => template },
     repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
     agentRepoAccess: { count: async () => 1 },
@@ -1007,6 +1023,7 @@ test("instantiate refuses absent gate slots before creating any task and checks 
       return [];
     },
     project: {},
+    staffingProfile: { findFirst: async () => null },
     taskTemplate: { findFirst: async () => template },
     repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
     agentRepoAccess: { count: async () => 1 },

@@ -34,6 +34,8 @@ import { isCanonicalRelPath, normalizeRelPath } from "../files/paths.js";
 import { isValidBranchName, parseRepoRemote } from "../onboarding.js";
 import { RepositoryPreflightError } from "../onboarding-preflight.js";
 import { noteArchivedQueuedRuns } from "../reconcile.js";
+import { AGENT_REFERENCED_BY_STAFFING_PROFILES } from "../staffing-profile-errors.js";
+import { profilesReferencingAgent } from "../staffing-profiles.js";
 import { readCommitted } from "../transaction.js";
 import { withoutUndefined } from "../without-undefined.js";
 import {
@@ -406,18 +408,23 @@ export const registerAgentsRoutes = (app: RouteApp, deps: RouteDeps): void => {
       if (agent.archivedAt) return { agent };
       const blocker = await agentArchiveBlocker(tx, agentId);
       if (blocker) return refusal("conflict", blocker);
-      // TODO(staffing-profiles integrator): R6 — refuse with the referencing
-      // profiles before archiving, under this same Agent-row mutex:
-      //   const profiles = await profilesReferencingAgent(tx, agentId);
-      //   if (profiles.length > 0) {
-      //     return refusal("conflict", `Agent is staffed by profiles ${profiles.map(({ name }) => name).join(", ")}; change them first`);
-      //   }
-      // `profilesReferencingAgent` is exported by packages/api/src/staffing-profiles.ts
-      // (lane L1); neither it nor the StaffingProfileEntry model exists in this
-      // worktree, so the call is left here rather than compiled against nothing.
+      // R6: a staffing profile that names this Agent is an operator decision,
+      // not history. Archiving under it would silently re-staff every chain the
+      // profile answers, so the refusal names the profiles to edit. Read under
+      // the same Agent-row mutex a profile save takes, so the list cannot be
+      // stale by the time it is answered.
+      const staffing = await profilesReferencingAgent(tx, agentId);
+      if (staffing.length > 0) return { staffingProfiles: staffing };
       return { agent: await tx.agent.update({ where: { id: agentId }, data: { archivedAt: now } }) };
     });
     if ("message" in result) return refusalJson(context, result);
+    if ("staffingProfiles" in result) {
+      return context.json({
+        error: "Agent is named by a staffing profile; change those profiles before archiving it",
+        code: AGENT_REFERENCED_BY_STAFFING_PROFILES,
+        profiles: result.staffingProfiles,
+      }, 409);
+    }
     // Unchanged sweep: rows archived before this protocol existed — or queued by
     // a writer that committed first — still get their explanatory activity.
     await noteArchivedQueuedRuns(db, { agentId });

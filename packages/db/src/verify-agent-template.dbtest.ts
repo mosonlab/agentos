@@ -138,7 +138,7 @@ const createProject = async (options: {
         inboxAccess: source.inboxAccess,
         foundationalPrompt: agentSources.foundationalPrompt,
         rolePrompt: source.rolePrompt,
-        runtimeConfigCustomized: false,
+        customizedFields: [],
         runtimeConfigDriftNoticeFingerprint: null,
         codexServiceTier: CodexServiceTier.DEFAULT,
         disabledTools: [],
@@ -304,7 +304,7 @@ test("--project applies the canonical runtime override treatment", async () => {
     const agent = fixture.agents.get("senior-dev-luna-max")!;
     await prisma.agent.update({
       where: { id: agent.id },
-      data: { model: "gpt-5.6-luna:high", runnerPreference: RunnerPreference.CODEX, runtimeConfigCustomized: true },
+      data: { model: "gpt-5.6-luna:high", runnerPreference: RunnerPreference.CODEX, customizedFields: ["model", "runnerPreference"] },
     });
     const compatible = verify(fixture.id);
     assert.equal(compatible.status, 0, compatible.output);
@@ -314,7 +314,7 @@ test("--project applies the canonical runtime override treatment", async () => {
     const agent = fixture.agents.get("senior-dev-luna-max")!;
     await prisma.agent.update({
       where: { id: agent.id },
-      data: { model: "gpt-5.6-luna:high", runnerPreference: RunnerPreference.CODEX, runtimeConfigCustomized: false },
+      data: { model: "gpt-5.6-luna:high", runnerPreference: RunnerPreference.CODEX, customizedFields: [] },
     });
     const uncustomized = verify(fixture.id);
     assert.notEqual(uncustomized.status, 0, uncustomized.output);
@@ -326,7 +326,7 @@ test("--project applies the canonical runtime override treatment", async () => {
     const agent = fixture.agents.get("senior-dev-luna-max")!;
     await prisma.agent.update({
       where: { id: agent.id },
-      data: { model: "gpt-5.6-luna:max", runnerPreference: RunnerPreference.CLAUDE, runtimeConfigCustomized: true },
+      data: { model: "gpt-5.6-luna:max", runnerPreference: RunnerPreference.CLAUDE, customizedFields: ["model", "runnerPreference"] },
     });
     const incompatible = verify(fixture.id);
     assert.notEqual(incompatible.status, 0, incompatible.output);
@@ -514,7 +514,7 @@ test("default verification keeps the complete-inventory requirement and success 
   });
   await prisma.agent.update({
     where: { id: customized.id },
-    data: { model: "gpt-5.6-luna:high", runnerPreference: RunnerPreference.CODEX, runtimeConfigCustomized: true },
+    data: { model: "gpt-5.6-luna:high", runnerPreference: RunnerPreference.CODEX, customizedFields: ["model", "runnerPreference"] },
   });
   try {
     const compatible = verify();
@@ -525,7 +525,7 @@ test("default verification keeps the complete-inventory requirement and success 
       data: {
         model: customized.model,
         runnerPreference: customized.runnerPreference,
-        runtimeConfigCustomized: customized.runtimeConfigCustomized,
+        customizedFields: customized.customizedFields,
       },
     });
   }
@@ -615,7 +615,7 @@ test("the compound implementation root is verified as a Codex gpt-* capability",
     data: {
       model: "claude-opus-5:medium",
       runnerPreference: RunnerPreference.CLAUDE,
-      runtimeConfigCustomized: true,
+      customizedFields: ["model", "runnerPreference"],
     },
   });
   try {
@@ -628,7 +628,7 @@ test("the compound implementation root is verified as a Codex gpt-* capability",
       data: {
         model: agent.model,
         runnerPreference: agent.runnerPreference,
-        runtimeConfigCustomized: agent.runtimeConfigCustomized,
+        customizedFields: agent.customizedFields,
       },
     });
   }

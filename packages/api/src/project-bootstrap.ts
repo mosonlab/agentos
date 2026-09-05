@@ -32,9 +32,9 @@ export type ProjectInput = z.infer<typeof projectInput>;
 
 /** The exact role set the canonical PR workflow is allowed to install. */
 export const PROJECT_BOOTSTRAP_ROLE_NAMES = [
-  "senior-dev-luna",
-  "review-coordinator-sol",
-  "review-coordinator-opus",
+  "senior-dev-luna-max",
+  "code-reviewer-sol-high",
+  "code-reviewer-opus-high",
   "senior-dev-astra-low",
 ] as const;
 
@@ -71,7 +71,9 @@ const requireRoleSources = (
   sources: AgentSources,
   requiredRoleNames: readonly string[],
 ): Map<string, AgentSources["roles"][number]> => {
-  const rolesByName = new Map(sources.roles.map((role) => [role.name, role]));
+  // Keyed by canonical role, not by name: `name` is operator-editable, and the
+  // roster this installs is stated in role slugs.
+  const rolesByName = new Map(sources.roles.map((role) => [role.canonicalRole, role]));
   for (const roleName of requiredRoleNames) {
     if (!rolesByName.has(roleName)) {
       throw new Error(`Canonical role ${roleName} was not found`);
@@ -152,6 +154,7 @@ export const createProjectBootstrap = async (
             projectId: createdProject.id,
             environmentId: environment.id,
             name: role.name,
+            canonicalRole: role.canonicalRole,
             title: role.title,
             model: role.model,
             runnerPreference: role.runnerPreference,

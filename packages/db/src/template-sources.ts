@@ -80,7 +80,12 @@ export type TemplateStepSource = {
 
 export type PersistedTemplateStepStructure = {
   name: string;
-  assigneeAgent: { name: string } | null;
+  /**
+   * `canonicalRole` is the Agent's identity; `name` is the operator-editable
+   * label kept for messages. Callers that select only the name still satisfy
+   * this shape, and `persistedStepAgentIdentity` falls back to it.
+   */
+  assigneeAgent: { name: string; canonicalRole?: string | null } | null;
   assigneeType: string;
   /**
    * Optional during the expand phase. The contract slice makes this column

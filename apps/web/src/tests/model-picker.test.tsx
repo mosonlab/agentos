@@ -103,7 +103,7 @@ test("the real detail Save button blocks a stored contradiction until the picker
   const { dom, container } = installDom();
   const root = (await reactDom()).createRoot(container);
   const agent: Agent = {
-    id: "a", projectId: "p", environmentId: "e", name: "senior-dev-astra-medium", title: "Senior Developer",
+    id: "a", projectId: "p", environmentId: "e", name: "senior-dev-astra-medium", canonicalRole: null, customizedFields: [], title: "Senior Developer",
     model: "gpt-5.6-luna:high", codexServiceTier: "DEFAULT", runnerPreference: "CLAUDE", inboxAccess: false, disabledTools: [],
     foundationalPrompt: "foundation", rolePrompt: "role", createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(), archivedAt: null,
@@ -141,7 +141,7 @@ test("the executioner Setup page has no legacy subprocess profile controls", asy
   const { dom, container } = installDom();
   const root = (await reactDom()).createRoot(container);
   const agent: Agent = {
-    id: "a", projectId: "p", environmentId: "e", name: "plan-executor-astra-medium", title: "Implementation Plan Executioner",
+    id: "a", projectId: "p", environmentId: "e", name: "plan-executor-astra-medium", canonicalRole: "plan-executor-astra-medium", customizedFields: [], title: "Implementation Plan Executioner",
     model: "gpt-5.6-sol:high", codexServiceTier: "DEFAULT", runnerPreference: "CODEX", inboxAccess: true, disabledTools: [],
     foundationalPrompt: "foundation", rolePrompt: "role", createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(), archivedAt: null,

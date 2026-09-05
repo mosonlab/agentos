@@ -48,6 +48,7 @@ const expectedRoutes = [
   "DELETE /agents/:agentId",
   "POST /agents/:agentId/archive",
   "POST /agents/:agentId/unarchive",
+  "POST /agents/:agentId/duplicate",
   "GET /agents/:agentId/secret-grants",
   "POST /agents/:agentId/secret-grants",
   "DELETE /agents/:agentId/secret-grants/:secretId/:envVar",

@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import {
   AssigneeType,
   canonicalIntegratorBindingRefusal,
+  COMPOUND_IMPLEMENTATION_ASSIGNEE_MESSAGE,
   compoundImplementationAssigneeValid,
   DIRECT_TEMPLATE_NAME,
   enqueueTaskRun,
@@ -140,13 +141,6 @@ type StaffingProfile = {
   entries: StaffingProfileEntry[];
 };
 
-type StaffingProfileDelegate = {
-  findFirst(args: {
-    where: Record<string, unknown>;
-    select: Record<string, unknown>;
-  }): Promise<StaffingProfile | null>;
-};
-
 const staffingProfileSelect = {
   id: true,
   name: true,
@@ -154,32 +148,18 @@ const staffingProfileSelect = {
 } as const;
 
 /**
- * TODO(integrator): replace this body with L1's staffing-profile reader once
- * the `StaffingProfile` model exists; this lane cannot own `schema.prisma`, so
- * until then the generated client has no `staffingProfile` delegate and every
- * chain resolves from its canonical bindings exactly as it did before.
+ * Reads the staffing profile a chain is staffed from.
  *
  * The read happens inside the Serializable callback, after the template row
  * mutex is held, so the profile a chain is staffed from is the one that
- * belonged to the graph this chain snapshots.
+ * belonged to the graph this chain snapshots. A template with no default
+ * profile answers `null`, which staffs every step from its canonical binding.
  */
 const readStaffingProfile = async (
   tx: Prisma.TransactionClient,
   selection: { templateId: string; profileId: string | null; profileName: string | null },
 ): Promise<StaffingProfile | null> => {
-  const delegate = (tx as unknown as { staffingProfile?: StaffingProfileDelegate }).staffingProfile;
-  if (delegate === undefined) {
-    // A caller that named a profile must never be answered with the canonical
-    // staffing it did not ask for.
-    if (selection.profileId !== null || selection.profileName !== null) {
-      throw templateRefusal(
-        "staffing_profile_not_found",
-        `Staffing profile ${selection.profileId ?? selection.profileName} was not found on this template`,
-      );
-    }
-    return null;
-  }
-  const byId = selection.profileId === null ? null : await delegate.findFirst({
+  const byId = selection.profileId === null ? null : await tx.staffingProfile.findFirst({
     where: { id: selection.profileId, taskTemplateId: selection.templateId },
     select: staffingProfileSelect,
   });
@@ -189,7 +169,7 @@ const readStaffingProfile = async (
       `Staffing profile ${selection.profileId} was not found on this template`,
     );
   }
-  const byName = selection.profileName === null ? null : await delegate.findFirst({
+  const byName = selection.profileName === null ? null : await tx.staffingProfile.findFirst({
     where: { taskTemplateId: selection.templateId, name: selection.profileName },
     select: staffingProfileSelect,
   });
@@ -207,7 +187,7 @@ const readStaffingProfile = async (
   }
   const selected = byId ?? byName;
   if (selected) return selected;
-  return delegate.findFirst({
+  return tx.staffingProfile.findFirst({
     where: { taskTemplateId: selection.templateId, isDefault: true },
     select: staffingProfileSelect,
   });
@@ -818,7 +798,7 @@ export const instantiateTemplate = async (
             assigneeAgent,
             { stepIndex: step.stepIndex, outputKind: step.outputKind, taskTemplate: { name: template.name } },
           )) {
-            const message = `Compound implementation step must remain assigned to the active in-project Agent implementation-plan-executioner (step ${step.stepIndex})`;
+            const message = `${COMPOUND_IMPLEMENTATION_ASSIGNEE_MESSAGE} (step ${step.stepIndex})`;
             if (overridesAssignee) throw templateRefusal("step_override_compound_implementation", message);
             if (fromProfile) {
               throw templateRefusal(

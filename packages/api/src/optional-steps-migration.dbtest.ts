@@ -75,7 +75,6 @@ test("the optional-steps migration defaults existing rows without changing chain
     cpSync(join(dbDirectory, "prisma", "migrations", targetMigration), join(stagedMigrations, targetMigration), { recursive: true });
     deploy(url, join(stagedPrisma, "schema.prisma"));
 
-    const project = await db.project.findUniqueOrThrow({ where: { id: "project-optional-upgrade" } });
     const step = await db.taskTemplateStep.findUniqueOrThrow({ where: { id: "step-optional-upgrade" } });
     const afterTasks = await db.task.findMany({
       where: { chainId: "chain-optional-upgrade" },
@@ -83,7 +82,9 @@ test("the optional-steps migration defaults existing rows without changing chain
       select: { id: true, approvalGate: true, chainIndex: true, chainLayer: true },
     });
 
-    assert.equal(project.skipOptionalSteps, false);
+    // `Project.skipOptionalSteps` was this migration's other column; the
+    // staffing-profile migration retired it, so what survives to prove here is
+    // the step column and the untouched Task rows.
     assert.equal(step.optional, false);
     assert.deepEqual(afterTasks, beforeTasks);
   } finally {

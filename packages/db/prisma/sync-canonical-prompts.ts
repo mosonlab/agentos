@@ -576,8 +576,17 @@ const syncCanonicalTemplates = async (
             );
           }
           if (adoption.write.kind === "bind-agent") {
+            // `adoption.write.agentName` is the role file name, and `name` is
+            // operator-editable, so the target is resolved by canonical role.
             const assignee = await tx.agent.findFirst({
-              where: { projectId: template.projectId, name: adoption.write.agentName, archivedAt: null },
+              where: {
+                projectId: template.projectId,
+                archivedAt: null,
+                OR: [
+                  { canonicalRole: adoption.write.agentName },
+                  { canonicalRole: null, name: adoption.write.agentName },
+                ],
+              },
               select: { id: true },
             });
             if (!assignee) {
@@ -660,6 +669,7 @@ export const main = async (
 
           const projectCounters = emptyCanonicalSyncCounters(reportKeys);
           const transactionAdoptions: typeof runtimeConfigAdoptions = [];
+          const staffingNotices: string[] = [];
           const installationRows = await readCanonicalInstallationRows(tx, project.id, templateSources);
           const installationPlan = planCanonicalInstallation(
             installationRows,
@@ -688,9 +698,10 @@ export const main = async (
             transactionAdoptions,
           );
 
-          await applyCanonicalInstallation(tx, installationPlan, templateSources, {
+          const installation = await applyCanonicalInstallation(tx, installationPlan, templateSources, {
             projectLabel: () => project.slug,
           });
+          staffingNotices.push(...installation.staffingNotices);
           await syncCanonicalTemplates(tx, project, templateSources, projectCounters);
 
           if (fullInstallTarget) {
@@ -702,14 +713,20 @@ export const main = async (
                 projectCounters.createdCanonicalTemplates += 1;
               }
             }
-            await applyCanonicalInstallation(tx, fullInstallationPlan, templateSources, {
+            const fullInstallation = await applyCanonicalInstallation(tx, fullInstallationPlan, templateSources, {
               projectLabel: () => project.slug,
             });
+            staffingNotices.push(...fullInstallation.staffingNotices);
           }
-          return { counters: projectCounters, runtimeConfigAdoptions: transactionAdoptions };
+          return {
+            counters: projectCounters,
+            runtimeConfigAdoptions: transactionAdoptions,
+            staffingNotices,
+          };
         }, { timeout: 120_000 });
         outcomes.push({ kind: "synced", slug: project.slug, counters: result.counters });
         runtimeConfigAdoptions.push(...result.runtimeConfigAdoptions);
+        for (const notice of result.staffingNotices) console.log(`Project ${project.slug}: ${notice}`);
       } catch (error) {
         if (project.id === canonicalProject.id || project.id === installFullProjectId) throw error;
         const message = error instanceof Error ? error.message : String(error);

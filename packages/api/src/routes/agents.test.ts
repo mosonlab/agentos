@@ -78,6 +78,9 @@ test("agent archive and unarchive are idempotent and preserve the original archi
       // principal (§D-P1 rule 3). An ordinary run has no template step.
       run: { findFirst: async () => null, findUnique: async () => ({ runnerId: "runner-1", task: { templateStep: null } }) },
         task: { findFirst: async () => null },
+        // R6: archive also reads the staffing profiles naming this Agent. No
+        // profile names it here, so the archive proceeds.
+        staffingProfileEntry: { findMany: async () => [] },
       }),
       run: {
         findMany: async () => archivedAt ? [{

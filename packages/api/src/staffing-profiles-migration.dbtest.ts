@@ -10,7 +10,7 @@ import { PrismaClient } from "@anneal/db";
 
 import { testDatabaseUrl } from "./testdb.js";
 
-const targetMigration = "20260905101000_staffing_profiles";
+const targetMigration = "20260905120000_staffing_profiles";
 const dbDirectory = fileURLToPath(new URL("../../db", import.meta.url));
 
 const execute = (url: string, sql: string): void => {

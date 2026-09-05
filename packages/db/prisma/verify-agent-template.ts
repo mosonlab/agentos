@@ -16,6 +16,7 @@ import {
   INTEGRATOR_TEMPLATE_NAME,
   integratorBindingValid,
 } from "../src/merge-integrator.js";
+import { codexGptCapability } from "../src/run-open.js";
 import { stepRole } from "../src/step-role.js";
 import { persistedStepAgentIdentity } from "../src/template-step-fields.js";
 import {
@@ -39,7 +40,7 @@ type AgentRow = {
   name: string;
   title: string;
   model: string;
-  runtimeConfigCustomized: boolean;
+  customizedFields: string[];
   runnerPreference: RunnerPreference;
   inboxAccess: boolean;
   foundationalPrompt: string;
@@ -82,27 +83,14 @@ type TemplateRow = {
 };
 
 /**
- * `Agent.canonicalRole` is the column identity is read from, and it arrives in
- * its own change. Until the generated client carries it, the verifier selects
- * nothing extra and `persistedStepAgentIdentity` falls back to the Agent name.
- */
-const AGENT_CANONICAL_ROLE_SELECT: { canonicalRole?: true } = Object.hasOwn(
-  Prisma.AgentScalarFieldEnum as Record<string, unknown>,
-  "canonicalRole",
-)
-  ? { canonicalRole: true }
-  : {};
-
-/**
  * The compound implementation root is a capability, not a name: the step that
  * drives implementation from a plan must bind an Agent that runs on the Codex
- * runner with a `gpt-*` model. `run-open.ts` states the same rule at Run open.
+ * runner with a `gpt-*` model. This is the same predicate Run open enforces, so
+ * the verifier can never pass a binding a Run would refuse.
  */
 const compoundImplementationRootCapable = (
   agent: { model: string; runnerPreference: RunnerPreference } | null,
-): boolean => agent !== null
-  && agent.runnerPreference === RunnerPreference.CODEX
-  && agent.model.startsWith("gpt-");
+): boolean => agent !== null && codexGptCapability(agent);
 
 const scopedError = (context: VerificationContext, message: string): string => (
   context.partial ? `Project ${context.project.slug}: ${message}` : message
@@ -142,8 +130,11 @@ const verifyAgent = (
   if (structuralDifferences.length > 0) {
     throw new Error(scopedError(context, `${agentReference(context, agent)} differs from canonical Markdown structure: ${structuralDifferences.join(", ")}`));
   }
-  if (runtimeDifferences.length > 0 && !agent.runtimeConfigCustomized) {
-    const message = "runtime model/runner differs from canonical defaults without an operator override";
+  const unmarkedRuntimeDifferences = runtimeDifferences.filter(
+    (difference) => !agent.customizedFields.includes(difference),
+  );
+  if (unmarkedRuntimeDifferences.length > 0) {
+    const message = `runtime ${unmarkedRuntimeDifferences.join("/")} differs from canonical defaults without an operator override`;
     throw new Error(scopedError(context, `${agentReference(context, agent)} ${message}`));
   }
   if (agent.foundationalPrompt !== foundationalPrompt) {
@@ -315,7 +306,7 @@ const main = async (): Promise<void> => {
       name: true,
       title: true,
       model: true,
-      runtimeConfigCustomized: true,
+      customizedFields: true,
       runnerPreference: true,
       inboxAccess: true,
       foundationalPrompt: true,
@@ -362,7 +353,7 @@ const main = async (): Promise<void> => {
           provisionDependencies: true,
           baseFromStepIndex: true,
           assigneeAgent: {
-            select: { id: true, name: true, model: true, runnerPreference: true, ...AGENT_CANONICAL_ROLE_SELECT },
+            select: { id: true, name: true, model: true, runnerPreference: true, canonicalRole: true },
           },
         },
         orderBy: { stepIndex: "asc" },
