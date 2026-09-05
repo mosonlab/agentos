@@ -24,12 +24,13 @@ Concurrency changes latency, never the question the gate asks — every step sti
 runs, with the same command, and a group passes only when all of its members do.
 
 An interrupted gate stops its members before it tears anything down. Members run
-as process-group leaders, and `cleanup` signals each group, gives it five
-seconds, then kills it — all before it removes `GATE_TMP`, releases the worktree
-lock and deletes the container. Signalling the gate process alone would leave a
-build still writing `dist/` while the next gate takes the lock this one just
-released, so do not remove the `set -m` around the spawn: it is what makes the
-whole tree reachable rather than just the member's own shell.
+as process-group leaders (`scripts/gate-worker/step-engine.sh`), and `cleanup`
+in `scripts/gate-worker/verdict.sh` signals each group, gives it five seconds,
+then kills it — all before it removes `GATE_TMP`, releases the worktree lock and
+deletes the container. Signalling the gate process alone would leave a build
+still writing `dist/` while the next gate takes the lock this one just released,
+so do not remove the `set -m` around the spawn in `step-engine.sh`: it is what
+makes the whole tree reachable rather than just the member's own shell.
 
 How wide each group runs is derived from a stated share of the host, not from
 the core count. `run-gate.sh` exports `AGENTOS_GATE_HOST_SHARE` as the worker's
@@ -519,9 +520,10 @@ systemically full. That is a capacity signal, not an error to retry harder:
 either stagger the merges, or repeat the same-commit overlap acceptance before
 changing host capacity.
 
-**`GATE NOT RUN: the slot locks are unusable (...)`** — the named slots have a
-lock this dispatcher cannot operate, so nothing was gated and nothing will be
-until they are cleared. Look in the slot directory named by the dispatcher's
+**`GATE NOT RUN: no configured worker produced a verdict`** with a stderr line
+naming `broken:` slots or `the locks of <slots> are unusable` — the named slots
+have a lock this dispatcher cannot operate, so nothing was gated and nothing
+will be until they are cleared. Look in the slot directory named by the dispatcher's
 startup line (see the accounting-unit paragraph above): a `<slot>.lock`
 *directory* is a leftover from the pre-#132 dispatcher and can go once no old
 `gate-dispatch.sh` is running; a `<slot>.slot` file that does not contain a pid
