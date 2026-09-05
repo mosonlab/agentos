@@ -1,7 +1,7 @@
 import { type ReactNode, useMemo, useState } from "react";
 
 import { formatDateTime, formatT, titleCase, usageMoney } from "../lib/format";
-import { useLocalStorage, usePoll } from "../lib/hooks";
+import { useLocalStorage, useMediaQuery, usePoll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { useProjectScope } from "../lib/project";
 import type { CostsReport } from "../lib/types";
@@ -94,23 +94,42 @@ const busyPercentage = (value: number): string => Number.isFinite(value) ? `${va
 /* ------------------------------------------------------------------- chart */
 
 /* Geometry is in viewBox units and the SVG scales uniformly, so these are
- * proportions rather than pixels. 1200x240 is close to the rendered box on a
- * full-width page, which keeps the type in the chart near the type around it. */
-const VIEW_WIDTH = 1200;
-const VIEW_HEIGHT = 240;
-const PAD_LEFT = 62;
-const PAD_RIGHT = 10;
-const PAD_TOP = 12;
-const PAD_BOTTOM = 24;
-const PLOT_WIDTH = VIEW_WIDTH - PAD_LEFT - PAD_RIGHT;
-const PLOT_HEIGHT = VIEW_HEIGHT - PAD_TOP - PAD_BOTTOM;
+ * proportions rather than pixels — including `fontSize`, which is why the shape
+ * of the box decides whether the axis is legible. 1200x240 is close to the
+ * rendered box on a full-width page, which keeps the type in the chart near the
+ * type around it. */
+export type ChartGeometry = {
+  width: number; height: number;
+  padLeft: number; padRight: number; padTop: number; padBottom: number;
+  /** At a seven-day window a column would otherwise be 160 units wide, which
+   *  reads as a block diagram rather than a bar chart. */
+  maxBar: number;
+  fontSize: number;
+};
+
+export const WIDE_CHART: ChartGeometry = {
+  width: 1200, height: 240, padLeft: 62, padRight: 10, padTop: 12, padBottom: 24,
+  maxBar: 52, fontSize: 13,
+};
+
+/**
+ * The same chart on a phone, where the card is about 306px wide.
+ *
+ * Reusing `WIDE_CHART` there scaled a unit to a quarter of a CSS pixel: the
+ * plot came out 61px tall and both axes rendered at 3.3px, which is a picture of
+ * a chart rather than a chart. A viewBox 400 units wide puts a unit at about
+ * 0.77px, so `fontSize: 15` lands near the 11.5px the hints around it use, and
+ * `padLeft: 82` is the gutter `$1234.56` needs at that size.
+ */
+export const PHONE_CHART: ChartGeometry = {
+  width: 400, height: 340, padLeft: 82, padRight: 6, padTop: 10, padBottom: 30,
+  maxBar: 26, fontSize: 15,
+};
+
 /** A surface-coloured gap between stacked fills, so two adjacent segments read
  *  as two values and not one. */
 const SEGMENT_GAP = 2;
 const CORNER = 4;
-/** At a seven-day window a column would otherwise be 160 units wide, which reads
- *  as a block diagram rather than a bar chart. */
-const MAX_BAR = 52;
 
 export type ChartSegment = {
   key: string;
@@ -131,21 +150,24 @@ export const chartSegments = (
   daily: CostsReport["daily"],
   order: readonly string[],
   max: number,
+  geometry: ChartGeometry = WIDE_CHART,
 ): ChartSegment[] => {
   if (daily.length === 0 || max <= 0) return [];
-  const column = PLOT_WIDTH / daily.length;
-  const barWidth = Math.min(MAX_BAR, column * 0.72);
+  const plotWidth = geometry.width - geometry.padLeft - geometry.padRight;
+  const plotHeight = geometry.height - geometry.padTop - geometry.padBottom;
+  const column = plotWidth / daily.length;
+  const barWidth = Math.min(geometry.maxBar, column * 0.72);
   const segments: ChartSegment[] = [];
   daily.forEach((bucket, index) => {
-    const x = PAD_LEFT + column * index + (column - barWidth) / 2;
+    const x = geometry.padLeft + column * index + (column - barWidth) / 2;
     // Stacked from the baseline up, in the legend's order, so a given agent sits
     // at the same height in every column and the shape is comparable across days.
     const stacked = order
       .map((agent) => ({ agent, usd: Number(bucket.byAgent[agent] ?? 0) }))
       .filter((entry) => entry.usd > 0);
-    let baseline = PAD_TOP + PLOT_HEIGHT;
+    let baseline = geometry.padTop + plotHeight;
     stacked.forEach((entry, position) => {
-      const full = (entry.usd / max) * PLOT_HEIGHT;
+      const full = (entry.usd / max) * plotHeight;
       // The gap comes out of the segment, never out of the value it encodes: a
       // sliver thinner than the gap keeps its full height instead of vanishing.
       const hasSegmentAbove = position < stacked.length - 1;
@@ -186,21 +208,25 @@ export const axisDates = (daily: CostsReport["daily"]): number[] => {
   return [...new Set([0, Math.floor((daily.length - 1) / 2), daily.length - 1])];
 };
 
-export const DailySpendChart = ({ daily, order, colors }: {
+export const DailySpendChart = ({ daily, order, colors, geometry = WIDE_CHART }: {
   daily: CostsReport["daily"];
   order: readonly string[];
   colors: (agent: string) => string;
+  /** `PHONE_CHART` below 900px. A prop rather than a media query inside this
+   *  component, so the geometry stays testable without a matchMedia. */
+  geometry?: ChartGeometry;
 }): ReactNode => {
   const t = useT();
   const totals = daily.map((bucket) => Object.values(bucket.byAgent).reduce((sum, usd) => sum + Number(usd), 0));
   const max = Math.max(0, ...totals);
-  const segments = chartSegments(daily, order, max);
-  const column = daily.length === 0 ? 0 : PLOT_WIDTH / daily.length;
-  const baseline = PAD_TOP + PLOT_HEIGHT;
+  const segments = chartSegments(daily, order, max, geometry);
+  const plotWidth = geometry.width - geometry.padLeft - geometry.padRight;
+  const column = daily.length === 0 ? 0 : plotWidth / daily.length;
+  const baseline = geometry.height - geometry.padBottom;
   if (segments.length === 0) return <EmptyState>{t("costs.chart.empty")}</EmptyState>;
   return (
     <svg
-      viewBox={`0 0 ${VIEW_WIDTH} ${VIEW_HEIGHT}`}
+      viewBox={`0 0 ${geometry.width} ${geometry.height}`}
       className="h-auto w-full"
       role="img"
       aria-label={t("costs.chart.aria", { amount: usageMoney(max), n: daily.length })}
@@ -209,14 +235,14 @@ export const DailySpendChart = ({ daily, order, colors }: {
           `--border-soft` is very nearly `--card` in the dark theme, so a scale
           line drawn in it would simply not exist there; `--border` is the
           quietest token still visible against both surfaces. */}
-      <line x1={PAD_LEFT} y1={PAD_TOP} x2={VIEW_WIDTH - PAD_RIGHT} y2={PAD_TOP}
+      <line x1={geometry.padLeft} y1={geometry.padTop} x2={geometry.width - geometry.padRight} y2={geometry.padTop}
         stroke="var(--border)" strokeWidth="1" />
-      <line x1={PAD_LEFT} y1={baseline} x2={VIEW_WIDTH - PAD_RIGHT} y2={baseline}
+      <line x1={geometry.padLeft} y1={baseline} x2={geometry.width - geometry.padRight} y2={baseline}
         stroke="var(--border)" strokeWidth="1.5" />
-      <text x={PAD_LEFT - 8} y={PAD_TOP + 4} textAnchor="end" fontSize="13" fill="var(--faint)">
+      <text x={geometry.padLeft - 8} y={geometry.padTop + 4} textAnchor="end" fontSize={geometry.fontSize} fill="var(--faint)">
         {usageMoney(max)}
       </text>
-      <text x={PAD_LEFT - 8} y={baseline} textAnchor="end" fontSize="13" fill="var(--faint)">0</text>
+      <text x={geometry.padLeft - 8} y={baseline} textAnchor="end" fontSize={geometry.fontSize} fill="var(--faint)">0</text>
       {segments.map((segment) => (
         <path key={segment.key} d={segmentPath(segment)} fill={colors(segment.agent)}>
           <title>{t("costs.chart.tooltip", {
@@ -229,10 +255,10 @@ export const DailySpendChart = ({ daily, order, colors }: {
       {axisDates(daily).map((index) => (
         <text
           key={daily[index]?.date ?? index}
-          x={PAD_LEFT + column * (index + 0.5)}
-          y={VIEW_HEIGHT - 6}
+          x={geometry.padLeft + column * (index + 0.5)}
+          y={geometry.height - 6}
           textAnchor={index === 0 ? "start" : index === daily.length - 1 ? "end" : "middle"}
-          fontSize="13"
+          fontSize={geometry.fontSize}
           fill="var(--faint)"
         >
           {daily[index]?.date ?? ""}
@@ -483,6 +509,7 @@ export const CostsPage = (): ReactNode => {
   // and refuses the request without one, so the browser's zone travels with the
   // window rather than being guessed at the other end.
   const timeZone = browserTimeZone();
+  const narrow = useMediaQuery("(max-width: 900px)");
   const path = projectId === ""
     ? null
     : `/projects/${encodeURIComponent(projectId)}/costs?days=${days}&tz=${encodeURIComponent(timeZone)}`;
@@ -573,7 +600,7 @@ export const CostsPage = (): ReactNode => {
             <div className={COSTS_COLUMNS}>
               <div className={STACK}>
                 <Card title={t("costs.chart.title")}>
-                  <DailySpendChart daily={daily} order={order} colors={colors} />
+                  <DailySpendChart daily={daily} order={order} colors={colors} geometry={narrow ? PHONE_CHART : WIDE_CHART} />
                   {order.length > 1 ? <ChartLegend order={order} colors={colors} /> : null}
                 </Card>
 

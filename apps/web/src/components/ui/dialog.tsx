@@ -47,7 +47,7 @@ function DialogContent({ className, children, ...props }: React.ComponentProps<t
         {...props}
       >
         {children}
-        <DialogPrimitive.Close className="absolute right-4 top-4 rounded-sm opacity-70 transition-opacity hover:opacity-100 focus-visible:outline-hidden focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-muted-foreground">
+        <DialogPrimitive.Close className="absolute right-4 top-4 rounded-sm before:absolute before:content-[''] [@media(max-width:900px)]:before:-inset-[16px] opacity-70 transition-opacity hover:opacity-100 focus-visible:outline-hidden focus-visible:ring-ring/50 focus-visible:ring-[3px] disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-muted-foreground">
           <X className="h-4 w-4" />
           <span className="sr-only">{t("common.close")}</span>
         </DialogPrimitive.Close>

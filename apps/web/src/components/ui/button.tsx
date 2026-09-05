@@ -54,8 +54,12 @@ const buttonVariants = cva(
         sm: "h-8 rounded-md px-3 text-xs",
         lg: "h-10 rounded-md px-8",
         icon: "h-9 w-9",
-        legacy: "h-[34px] gap-[7px] px-[13px] text-[12.5px] rounded-lg whitespace-nowrap",
-        legacySmall: "h-[28px] gap-[7px] px-[10px] text-[12px] rounded-lg",
+        /** The phone heights are the 44px finger target, and they are `min-h`
+         *  rather than `h`: a call site that passes `h-auto` — the onboarding
+         *  wizard does — must still clear it. Type size is untouched, so the
+         *  button reads the same and only its padding grows. */
+        legacy: "h-[34px] gap-[7px] px-[13px] text-[12.5px] rounded-lg whitespace-nowrap [@media(max-width:900px)]:min-h-[44px]",
+        legacySmall: "h-[28px] gap-[7px] px-[10px] text-[12px] rounded-lg [@media(max-width:900px)]:min-h-[44px]",
         legacyIcon: "size-[28px] rounded-[7px] text-[13px]",
       },
     },

@@ -21,8 +21,11 @@ function Select({ className, ...props }: React.ComponentProps<"select">) {
     <select
       data-slot="select"
       className={cn(
-        "flex w-full appearance-none rounded-lg border border-border bg-[color:var(--surface-input)] px-[11px] py-[9px] text-[12.5px] text-foreground outline-0 shadow-sm transition-colors focus:border-primary focus-visible:outline-hidden focus-visible:ring-ring/50 focus-visible:ring-[3px] aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive disabled:cursor-not-allowed disabled:opacity-50",
+        "flex w-full [@media(max-width:900px)]:min-h-[44px] appearance-none rounded-lg border border-border bg-[color:var(--surface-input)] px-[11px] py-[9px] text-[12.5px] text-foreground outline-0 shadow-sm transition-colors focus:border-primary focus-visible:outline-hidden focus-visible:ring-ring/50 focus-visible:ring-[3px] aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive disabled:cursor-not-allowed disabled:opacity-50",
         "bg-[image:linear-gradient(45deg,transparent_50%,var(--faint)_50%),linear-gradient(135deg,var(--faint)_50%,transparent_50%)] bg-[position:right_14px_top_15px,right_9px_top_15px] bg-[size:5px_5px] bg-no-repeat pr-[30px]",
+        /* The chevron is painted from the top edge, so the phone height moves it
+         * off centre unless it is re-placed against the taller box. */
+        "[@media(max-width:900px)]:bg-[position:right_14px_top_19px,right_9px_top_19px]",
         className
       )}
       {...props}

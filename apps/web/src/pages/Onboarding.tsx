@@ -8,7 +8,7 @@ import {
 } from "../lib/onboarding";
 import type { OnboardingInstallation, OnboardingStatus, RunnersResponse } from "../lib/types";
 import { type CodexReadiness, CodexReadinessNotice, codexReady, useFreshnessClock } from "../components/runner-status";
-import { Card, ErrorNotice, Field, HINT, KeyValue, NOTICE, Page, STACK } from "../components/ui";
+import { Card, ErrorNotice, Field, HINT, KeyValue, NOTICE, Page, STACK, TOUCH_HALO } from "../components/ui";
 import { Button } from "../components/ui/button";
 import { Checkbox } from "../components/ui/checkbox";
 import { Input } from "../components/ui/input";
@@ -318,7 +318,7 @@ export const OnboardingPage = ({ onInstalled, recoverCompleted = true }: {
               {codex.state === "ready" ? null : <div className={NOTICE}><CodexReadinessNotice readiness={codex} /></div>}
               <div className={NOTICE}>{t("onboarding.confirm.credentials")}</div>
               <label className="flex items-start gap-[10px] text-[12.5px]">
-                <Checkbox checked={acknowledged} onCheckedChange={(next) => setAcknowledged(next === true)}
+                <Checkbox className={TOUCH_HALO} checked={acknowledged} onCheckedChange={(next) => setAcknowledged(next === true)}
                   aria-label={t("onboarding.confirm.acknowledge")} />
                 <span>{t("onboarding.confirm.acknowledge")}</span>
               </label>

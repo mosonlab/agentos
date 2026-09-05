@@ -553,7 +553,7 @@ export const DebugEvents = ({ events }: { events: SessionEvent[] }): ReactNode =
     filter === "all" || (filter === "runner" ? event.source === "RUNNER" : event.source !== "RUNNER"));
   return (
     <Card
-      title={<button type="button" className="flex items-center gap-[8px] border-0 bg-transparent p-0 text-[13.5px]" onClick={() => setOpen(!open)}>
+      title={<button type="button" className="flex items-center gap-[8px] border-0 bg-transparent p-0 text-[13.5px] [@media(max-width:900px)]:min-h-[44px]" onClick={() => setOpen(!open)}>
         <span className="text-muted-foreground"><IconChevron open={open} /></span>{t("sessions.debug.title")}
       </button>}
       extra={<span className={COUNT}>{events.length}</span>}
@@ -587,7 +587,7 @@ export const FilesTouched = ({ files, hint }: { files: Array<{ path: string; cou
   const t = useT();
   return (
     <Card
-      title={<button type="button" className="flex items-center gap-[8px] border-0 bg-transparent p-0 text-[13.5px]" onClick={() => setOpen(!open)}>
+      title={<button type="button" className="flex items-center gap-[8px] border-0 bg-transparent p-0 text-[13.5px] [@media(max-width:900px)]:min-h-[44px]" onClick={() => setOpen(!open)}>
         <span className="text-muted-foreground"><IconChevron open={open} /></span>{t("sessions.files.title")}
       </button>}
       extra={<span className={COUNT}>{files.length}</span>}

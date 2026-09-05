@@ -6,7 +6,8 @@ import { mountPage } from "./dom-harness";
 
 import {
   COSTS_COLUMNS, COSTS_RANGES, ChartLegend, DailySpendChart, ModelBar, SERIES_SLOTS, axisDates,
-  ChainsTable, sortCostChains, chartSegments, chartSeries, percent, seriesColor, sharePct, wasteShare,
+  ChainsTable, PHONE_CHART, WIDE_CHART, sortCostChains, chartSegments, chartSeries, percent,
+  seriesColor, sharePct, wasteShare,
 } from "../pages/Costs";
 import type { CostsReport } from "../lib/types";
 import type { CostsPageReport } from "../pages/Costs";
@@ -71,6 +72,35 @@ test("an empty window produces no geometry at all", () => {
   assert.deepEqual(chartSegments([], ["Dev"], 5), []);
 });
 
+test("the phone geometry is a taller box in fewer units, so its type stays legible", () => {
+  // Everything in the chart is measured in viewBox units, `fontSize` included,
+  // so a 306px-wide card renders a 1200-unit box at a quarter scale: the plot
+  // came out 61px tall and both axes at 3.3px. Fewer units across is what buys
+  // the type back, and a taller box is what buys the bars back.
+  assert.ok(PHONE_CHART.width < WIDE_CHART.width / 2);
+  assert.ok(PHONE_CHART.height / PHONE_CHART.width > WIDE_CHART.height / WIDE_CHART.width);
+  // 306px of card over 400 units is 0.77px a unit, so 15 units lands near the
+  // 11.5px the hints around the chart use.
+  assert.ok(PHONE_CHART.fontSize * (306 / PHONE_CHART.width) > 11);
+  // `$1234.56` is eight monospace characters at ~0.6em; the gutter has to hold
+  // them plus the 8px the label is offset by.
+  assert.ok(PHONE_CHART.padLeft >= 8 * PHONE_CHART.fontSize * 0.6 + 8);
+});
+
+test("a full-height day rests on the phone baseline too, and its bar stays a bar", () => {
+  const [only] = chartSegments([bucket("2026-08-26", { Dev: "5" })], ["Dev"], 5, PHONE_CHART);
+  assert.ok(only);
+  assert.equal(only.y, PHONE_CHART.padTop);
+  assert.equal(only.y + only.height, PHONE_CHART.height - PHONE_CHART.padBottom);
+  // Thirty days of a 322-unit plot make a 10.7-unit column, so the cap never
+  // binds and a bar is never wider than its column.
+  const month = Array.from({ length: 30 }, (_, index) => bucket(`d${index}`, { Dev: "1" }));
+  for (const segment of chartSegments(month, ["Dev"], 1, PHONE_CHART)) {
+    assert.ok(segment.width <= PHONE_CHART.maxBar);
+    assert.ok(segment.width < (PHONE_CHART.width - PHONE_CHART.padLeft - PHONE_CHART.padRight) / month.length);
+  }
+});
+
 test("the date axis shows three labels however long the window is", () => {
   assert.deepEqual(axisDates(Array.from({ length: 90 }, (_, index) => bucket(`d${index}`, {}))), [0, 44, 89]);
   assert.deepEqual(axisDates(Array.from({ length: 7 }, (_, index) => bucket(`d${index}`, {}))), [0, 3, 6]);
@@ -93,6 +123,21 @@ test("the chart renders one fill per segment, each with a readable tooltip", () 
   assert.ok(markup.includes('role="img"'));
   // Ink stays on text tokens; only the fills carry series colour.
   assert.ok(markup.includes('fill="var(--faint)"'));
+});
+
+test("the phone chart draws itself in the phone viewBox", () => {
+  const daily = [bucket("2026-08-26", { Dev: "3" })];
+  const markup = renderToStaticMarkup(
+    <DailySpendChart daily={daily} order={["Dev"]} colors={colorsFor(["Dev"])} geometry={PHONE_CHART} />,
+  );
+  assert.ok(markup.includes(`viewBox="0 0 ${PHONE_CHART.width} ${PHONE_CHART.height}"`));
+  assert.ok(markup.includes(`font-size="${PHONE_CHART.fontSize}"`));
+  // The default is still the wide box, so nothing that does not ask for a phone
+  // gets one.
+  const wide = renderToStaticMarkup(
+    <DailySpendChart daily={daily} order={["Dev"]} colors={colorsFor(["Dev"])} />,
+  );
+  assert.ok(wide.includes(`viewBox="0 0 ${WIDE_CHART.width} ${WIDE_CHART.height}"`));
 });
 
 test("a window with no spend says so instead of drawing an empty box", () => {

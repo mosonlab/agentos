@@ -57,7 +57,14 @@ export const PAGE_ACTIONS = "flex flex-wrap items-center justify-end gap-[9px] [
  *  the viewport. */
 export const DETAIL_HEAD = "mb-[18px] flex flex-wrap items-center gap-[12px]";
 export const DETAIL_HEAD_H1 = "text-[20px] [overflow-wrap:anywhere] [@media(max-width:900px)]:flex-[1_0_60%] [@media(max-width:900px)]:text-[18px]";
-export const BACK_LINK = "inline-flex items-center gap-[8px] text-[12.5px] text-muted-foreground hover:text-foreground";
+/** A 44px finger target on a phone, drawn as a halo rather than as padding: the
+ *  bare-arrow form of this link is 16px square, and growing its box would push
+ *  the detail title across by the same amount on every detail page. A
+ *  `::before` overlay belongs to the link for hit testing and to nothing for
+ *  layout. The same idiom is on the icon button, the checkbox and the dialog's
+ *  close, which are the other controls too small to grow in place. */
+export const TOUCH_HALO = "relative before:absolute before:content-[''] [@media(max-width:900px)]:before:-inset-[14px]";
+export const BACK_LINK = `inline-flex items-center gap-[8px] text-[12.5px] text-muted-foreground hover:text-foreground ${TOUCH_HALO}`;
 export const TOOLBAR = "mb-[16px] flex items-center gap-[10px]";
 
 /** `.fieldRow` — `align-items: start` keeps a hint-less control from stretching to
@@ -69,7 +76,10 @@ export const FIELD_ROW = "grid grid-cols-[repeat(auto-fit,minmax(190px,1fr))] it
 export const CARD_TITLE = "mb-[14px] flex items-center gap-[9px] text-[13.5px]";
 export const COUNT = "inline-grid h-[19px] min-w-[20px] place-items-center rounded-md bg-accent px-[6px] text-[11.5px] text-muted-foreground";
 export const HINT = "text-[11.5px] leading-[1.5] text-[color:var(--faint)]";
-export const METRICS = "grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-[14px]";
+/** Two per row on a phone: `minmax(180px,…)` resolves to one column at 358px, so
+ *  three metrics claimed a whole first screen and pushed the page they head
+ *  below the fold. 140px still fits `0 done · 2 open` on one line. */
+export const METRICS = "grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-[14px] [@media(max-width:900px)]:grid-cols-[repeat(auto-fit,minmax(140px,1fr))]";
 export const STAT_PILLS = "flex flex-wrap gap-[8px]";
 export const STAT_PILL = "inline-flex items-center gap-[7px] rounded-lg border border-border bg-card px-[11px] py-[5px] text-[12px] text-secondary-foreground";
 export const CODE_BLOCK = "max-h-[460px] overflow-auto rounded-lg border border-[color:var(--border-soft)] bg-[color:var(--code-background)] px-[16px] py-[14px] text-[12px] leading-[1.65] whitespace-pre-wrap text-secondary-foreground [overflow-wrap:anywhere]";
@@ -116,17 +126,17 @@ export const MOBILE_TAB_ACTIVE = "text-foreground [&_svg]:opacity-100 after:abso
 export const MOBILE_TAB_BADGE = "absolute top-[7px] left-[calc(50%+6px)]";
 export const SHEET = "inset-x-0 top-auto bottom-0 left-0 max-h-[85dvh] w-full translate-x-0 translate-y-0 overflow-y-auto rounded-t-[16px] rounded-b-none border-[color:var(--border-soft)] bg-popover px-[10px] pt-[14px] pb-[calc(10px+env(safe-area-inset-bottom))] font-mono";
 export const SHEET_TITLE = "mb-[8px] px-[12px] text-[11.5px] font-normal tracking-[.04em] text-[color:var(--faint)] uppercase";
-export const SHEET_ITEM = "flex w-full items-center gap-[12px] rounded-lg border-0 bg-transparent px-[12px] py-[12px] text-left text-[14px] text-secondary-foreground [&_svg]:flex-none [&_svg]:opacity-85";
+export const SHEET_ITEM = "flex min-h-[44px] w-full items-center gap-[12px] rounded-lg border-0 bg-transparent px-[12px] py-[12px] text-left text-[14px] text-secondary-foreground [&_svg]:flex-none [&_svg]:opacity-85";
 export const SHEET_ITEM_ACTIVE = "bg-accent text-foreground";
 export const SHEET_RULE = "my-[8px] border-t border-[color:var(--border-soft)]";
-export const PROJECT_SWITCHER = "flex w-full items-center gap-[9px] rounded-lg border border-transparent bg-transparent p-[8px] mb-[10px] text-left hover:bg-secondary";
+export const PROJECT_SWITCHER = "flex w-full items-center gap-[9px] rounded-lg border border-transparent bg-transparent p-[8px] mb-[10px] text-left hover:bg-secondary [@media(max-width:900px)]:min-h-[44px]";
 export const PROJECT_MARK = "grid flex-none place-items-center size-[26px] rounded-[7px] bg-primary text-[12px] font-bold text-primary-foreground";
 export const PROJECT_NAME = "min-w-0 flex-1 overflow-hidden text-[13px] text-ellipsis whitespace-nowrap";
 export const CHEVRON = "flex-none text-[color:var(--faint)]";
 export const RUNNER_ROW = "flex items-center gap-[10px] px-[10px] py-[8px] text-[12.5px] text-secondary-foreground whitespace-nowrap";
 export const RUNNER_STATE = "ml-auto text-[11.5px] text-muted-foreground";
 /** The top-bar form of the runner row: the dot and the state word, no label. */
-export const RUNNER_ROW_COMPACT = "flex flex-none items-center gap-[7px] rounded-lg px-[10px] py-[8px] text-[11.5px] text-muted-foreground";
+export const RUNNER_ROW_COMPACT = "flex min-h-[44px] flex-none items-center gap-[7px] rounded-lg px-[10px] py-[8px] text-[11.5px] text-muted-foreground";
 export const CONTENT = "min-w-0 bg-popover";
 
 export const Page = ({ className, children }: { className?: string; children: ReactNode }): ReactNode => (
@@ -217,8 +227,13 @@ export const KeyValue = ({ items, columns }: {
   columns?: 2 | 3;
 }): ReactNode => (
   <div className={cn(
-    "grid gap-x-[40px] gap-y-[16px] [&>div]:min-w-0",
-    columns === 3 ? "grid-cols-[repeat(3,minmax(0,1fr))] [@media(max-width:900px)]:grid-cols-[repeat(2,minmax(0,1fr))]" : "grid-cols-[repeat(2,minmax(0,1fr))]",
+    /* One column on a phone. Two columns of a 358px page are ~145px each, which
+     * is a dozen monospace characters: `Environment networking` broke over two
+     * lines as a label and `danger-full-access` broke mid-word as a value, so
+     * the list read as a column of fragments. Height is the cheap axis on a
+     * phone and width is the scarce one. */
+    "grid gap-x-[40px] gap-y-[16px] [&>div]:min-w-0 [@media(max-width:900px)]:grid-cols-[minmax(0,1fr)] [@media(max-width:900px)]:gap-y-[14px]",
+    columns === 3 ? "grid-cols-[repeat(3,minmax(0,1fr))]" : "grid-cols-[repeat(2,minmax(0,1fr))]",
   )}>
     {items.map((item) => (
       <div key={item.k}>
@@ -248,7 +263,10 @@ export const Metric = ({ label, value }: { label: string; value: ReactNode }): R
  *  and `.on` came second — so the selected button did not react to hover. As
  *  utilities the hover variant would sort last and win, so the hover colour is
  *  attached to the unselected buttons only. */
-const SEGMENTED_BUTTON = "rounded-[7px] border-0 bg-transparent px-[13px] py-[6px] text-[12.5px]";
+/** The phone height is the 44px finger target; the segmented control and the
+ *  tab strip are how an operator changes what a page is showing, so they are
+ *  the two shapes a mis-tap costs the most. */
+const SEGMENTED_BUTTON = "rounded-[7px] border-0 bg-transparent px-[13px] py-[6px] text-[12.5px] [@media(max-width:900px)]:min-h-[44px]";
 
 export const Segmented = <T extends string>({ options, value, onChange, accent }: {
   options: Array<{ value: T; label: string }>;
@@ -277,7 +295,7 @@ export const Segmented = <T extends string>({ options, value, onChange, accent }
 );
 
 /** `.tabs button` had no hover rule, unlike `.segmented button`. */
-const TABS_BUTTON = "rounded-[7px] border-0 bg-transparent px-[14px] py-[7px] text-[12.5px] whitespace-nowrap";
+const TABS_BUTTON = "rounded-[7px] border-0 bg-transparent px-[14px] py-[7px] text-[12.5px] whitespace-nowrap [@media(max-width:900px)]:min-h-[44px]";
 
 export const Tabs = <T extends string>({ options, value, onChange }: {
   options: Array<{ value: T; label: string }>;
@@ -474,7 +492,7 @@ export const RowMenu = ({ items, label, onOpenChange }: { items: RowMenuEntry[];
     <DropdownMenu {...(onOpenChange === undefined ? {} : { onOpenChange })}>
       <span className="relative" onClick={(event) => event.stopPropagation()}>
         <DropdownMenuTrigger asChild>
-          <Button type="button" variant="icon" size="legacyIcon" aria-label={label ?? t("ui.rowMenu.more")}><IconDots /></Button>
+          <Button type="button" variant="icon" size="legacyIcon" className={TOUCH_HALO} aria-label={label ?? t("ui.rowMenu.more")}><IconDots /></Button>
         </DropdownMenuTrigger>
       </span>
       <DropdownMenuContent align="end" className="min-w-32 border-border bg-popover font-mono text-popover-foreground" onClick={(event) => event.stopPropagation()}>

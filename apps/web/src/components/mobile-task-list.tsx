@@ -24,8 +24,16 @@ import { Button } from "./ui/button";
  * scrolls, which is the only scroll a phone reliably has, and every card in the
  * selected status is reachable by scrolling to it.
  */
-const TABS = "sticky top-[52px] z-[3] -mx-[16px] flex gap-[6px] overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden border-b border-[color:var(--border-soft)] bg-popover px-[16px] py-[10px]";
-const TAB = "flex flex-none items-center gap-[6px] rounded-lg border border-transparent px-[12px] py-[8px] text-[12.5px] whitespace-nowrap text-muted-foreground";
+/** The strip is wider than a phone — five statuses and their counts come to
+ *  about 470px — and it hides its scrollbar, so nothing said it could be
+ *  swiped: `Done` simply did not exist for anyone who did not try. The bar and
+ *  the scroller are two elements because the fade must not travel with the
+ *  content; `sticky` already positions the bar, so the overlay resolves against
+ *  it. The gradient ends in `--popover`, the bar's own background, so it is
+ *  invisible on a viewport wide enough to fit all five. */
+const TABS_BAR = "sticky top-[52px] z-[3] -mx-[16px] border-b border-[color:var(--border-soft)] bg-popover after:pointer-events-none after:absolute after:inset-y-0 after:right-0 after:w-[36px] after:bg-[linear-gradient(to_right,transparent,var(--popover))]";
+const TABS = "flex gap-[6px] overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden px-[16px] py-[10px]";
+const TAB = "flex min-h-[44px] flex-none items-center gap-[6px] rounded-lg border border-transparent px-[12px] py-[8px] text-[12.5px] whitespace-nowrap text-muted-foreground";
 const TAB_ON = "border-border bg-accent text-foreground";
 const LIST = "mt-[14px] grid grid-cols-[minmax(0,1fr)] gap-[10px]";
 const LIST_EMPTY = "px-0 py-[40px] text-center text-[12.5px] text-[color:var(--faint)]";
@@ -48,31 +56,33 @@ export const MobileTaskList = ({ tab, counts, tasks: entries, loading, onSelectT
   return <>
     {/* A tablist, not five buttons: it is the page's primary navigation and the
         arrow keys are what a screen reader user reaches for. */}
-    <div className={TABS} role="tablist" aria-label={t("tasks.mobile.statusTabs")}>
-      {COLUMNS.map((column) => (
-        <button
-          key={column.status}
-          type="button"
-          role="tab"
-          id={`tab-${column.status}`}
-          aria-selected={tab === column.status}
-          aria-controls="mobile-task-list"
-          tabIndex={tab === column.status ? 0 : -1}
-          className={cn(TAB, tab === column.status && TAB_ON)}
-          onClick={() => onSelectTab(column.status)}
-          onKeyDown={(event) => {
-            const step = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
-            if (step === 0) return;
-            event.preventDefault();
-            const index = COLUMNS.findIndex((candidate) => candidate.status === tab);
-            const next = COLUMNS[(index + step + COLUMNS.length) % COLUMNS.length]!;
-            onSelectTab(next.status);
-            document.getElementById(`tab-${next.status}`)?.focus();
-          }}
-        >
-          {t(column.labelKey)}<span className={COUNT}>{counts[column.status]}</span>
-        </button>
-      ))}
+    <div className={TABS_BAR}>
+      <div className={TABS} role="tablist" aria-label={t("tasks.mobile.statusTabs")}>
+        {COLUMNS.map((column) => (
+          <button
+            key={column.status}
+            type="button"
+            role="tab"
+            id={`tab-${column.status}`}
+            aria-selected={tab === column.status}
+            aria-controls="mobile-task-list"
+            tabIndex={tab === column.status ? 0 : -1}
+            className={cn(TAB, tab === column.status && TAB_ON)}
+            onClick={() => onSelectTab(column.status)}
+            onKeyDown={(event) => {
+              const step = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
+              if (step === 0) return;
+              event.preventDefault();
+              const index = COLUMNS.findIndex((candidate) => candidate.status === tab);
+              const next = COLUMNS[(index + step + COLUMNS.length) % COLUMNS.length]!;
+              onSelectTab(next.status);
+              document.getElementById(`tab-${next.status}`)?.focus();
+            }}
+          >
+            {t(column.labelKey)}<span className={COUNT}>{counts[column.status]}</span>
+          </button>
+        ))}
+      </div>
     </div>
 
     {/* Archive All lives here on a phone rather than in a column head there is

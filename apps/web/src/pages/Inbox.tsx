@@ -260,8 +260,13 @@ export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode
       </div>
 
       <div className={STACK}>
-        <div className={ROW}>
-          <h1 className="text-[18px]">{firstLine(message.body)}</h1>
+        {/* The subject is the first line of a message body, so it is arbitrary
+            text: an auto-deploy notice carries two 40-character shas, which in a
+            non-wrapping row pushed the status pill off the right of a phone and
+            gave the document a horizontal scroll. The title breaks inside a word
+            and the pills fall to their own line. */}
+        <div className={cn(ROW, "[@media(max-width:900px)]:flex-wrap")}>
+          <h1 className="min-w-0 text-[18px] [overflow-wrap:anywhere]">{firstLine(message.body)}</h1>
           <InboxPill status={message.status} />
           {message.gateTaskId === null ? null : <Pill tone="violet">{t("inbox.approvalGate")}</Pill>}
         </div>
