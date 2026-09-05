@@ -51,8 +51,9 @@ runbooks are maintained outside this repository.
 The exact list is the point. A directory glob would publish anything dropped into
 `docs/release/` afterwards. The internal record classes a maintainer checkout does
 carry — `docs/reviews/**`, `docs/briefs/**`, `docs/merge-notes/**` and
-`docs/plans/**`, the same directories the frozen-record guard in
-`scripts/check-frozen-docs.sh` protects — are excluded by name, each with a
+`docs/plans/**` — a superset of the directories the frozen-record guard in
+`scripts/check-frozen-docs.sh` protects, which stops at `docs/plans/archive/`
+so an unarchived plan stays editable — are excluded by name, each with a
 reason, so a file dropped into one is classified as held back rather than as a
 file nobody looked at. A scanner test derives the open docs set from the manifest and
 asserts that every entry names one literal file rather than a glob.

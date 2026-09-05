@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Frozen-record check (AGENTS.md "Frozen records"). Two mechanical rules, and one
+# Frozen-record check (CONTRIBUTING.md "Records that do not change"). Two mechanical rules, and one
 # statement of what is deliberately not mechanical.
 #
 #   1. Append-only directories. docs/reviews, docs/merge-notes, docs/briefs and
@@ -8,7 +8,7 @@
 #      is on master it is history: a branch may add files, but may not modify or
 #      delete one. Every file a branch adds there must carry a YYYY-MM-DD-
 #      basename prefix, which is the half of the convention the first version of
-#      this script wrote down in AGENTS.md and then never checked.
+#      this script wrote down in CONTRIBUTING.md and then never checked.
 #
 #      One rename is allowed: a byte-identical rename inside the same frozen
 #      directory to a dated name. That is the only way a record merged under a
@@ -25,8 +25,8 @@
 #
 #      What this cannot decide is whether a doc that *should* be marked is:
 #      nothing in a diff says "this document stopped being authority". So the
-#      gate enforces the marker's form, never its presence. AGENTS.md says the
-#      same thing; do not quote this script as enforcing more than that.
+#      gate enforces the marker's form, never its presence. CONTRIBUTING.md
+#      says the same thing; do not quote this script as enforcing more than that.
 #
 # Baseline. The rules are about what is already on master, so the answer depends
 # entirely on which commit "master" is. In order:
@@ -270,7 +270,7 @@ done <<< "${marker_files}"
 # --- verdict ----------------------------------------------------------------
 
 if [ -n "${violations}" ]; then
-  printf 'frozen records (AGENTS.md "Frozen records"), against merge-base %.12s of %s:\n%s\n' \
+  printf 'frozen records (CONTRIBUTING.md "Records that do not change"), against merge-base %.12s of %s:\n%s\n' \
     "${base}" "${baseline_source}" "${violations}" >&2
   exit 1
 fi

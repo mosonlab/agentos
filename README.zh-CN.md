@@ -140,6 +140,8 @@ Developer Preview 7（v0.7.0）：接口与存储数据形态在 preview 之间�
 Linux 与 Intel macOS 预计可运行，但尚未完成 release-level 验证；Windows
 不支持。
 
+Pull-request 工作流请按 [Add a project](docs/runbooks/add-a-project.md) 操作。
+
 **把它指向任何你在乎的东西之前先读这段：** Anneal 以非交互的权限旁路
 方式启动 coding CLI，以你的 macOS 用户身份运行，不在沙箱内。请使用可
 丢弃的仓库和一台你愿意让 agent 修改的机器。详见
