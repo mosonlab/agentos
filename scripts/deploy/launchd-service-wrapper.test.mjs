@@ -44,6 +44,7 @@ import {
   renderServicePlists,
   verifyServicePlistDefinitions,
 } from "./install-launchd.mjs";
+import { runServiceInstaller } from "./install-launchd-services.mjs";
 
 /** The standalone wrapper carries label, runner id and unit name; the resolved
  * inventory carries those plus the runner index and plist name. Compare the
@@ -477,6 +478,49 @@ test("the real web invocation starts from a read-only release without writing in
   await new Promise((resolveExit) => child.once("exit", resolveExit));
 });
 
+const captureStdout = (work) => {
+  const chunks = [];
+  const original = process.stdout.write;
+  process.stdout.write = (chunk) => { chunks.push(String(chunk)); return true; };
+  try { work(); } finally { process.stdout.write = original; }
+  return chunks.join("");
+};
+
+test("the service CLI prints the launchd outcome for every phase", () => {
+  const fixture = releaseFixture();
+  const home = join(fixture.root, "operator-home");
+  const context = {
+    repositoryRoot: fixture.root,
+    userHome: home,
+    nodeBinary: process.execPath,
+    gitBinary: process.execPath,
+  };
+  const wrapper = serviceWrapperPath(realpathSync(fixture.root));
+  const definitions = SERVICE_LABELS.length + 1;
+  try {
+    assert.equal(
+      captureStdout(() => assert.equal(runServiceInstaller([], context), 0)),
+      `PLAN service-wrapper=${wrapper}\nPLAN service-definitions=${definitions}\nPLAN no files or launchd state changed\n`,
+    );
+    assert.equal(
+      captureStdout(() => assert.equal(runServiceInstaller(["--apply"], context), 0)),
+      `APPLY service-wrapper=${wrapper}\nAPPLY service-definitions=${definitions}\n`
+        + "NEXT reload each service plist with launchctl, then run the wrapper inventory readiness check\n",
+    );
+    assert.equal(
+      captureStdout(() => assert.equal(runServiceInstaller(["--revert"], context), 0)),
+      `REVERT service-wrapper=${wrapper}\nREVERT service-definitions=${definitions}\nPLAN no files or launchd state changed\n`,
+    );
+    assert.equal(
+      captureStdout(() => assert.equal(runServiceInstaller(["--revert", "--apply"], context), 0)),
+      `REVERT service-wrapper=${wrapper}\nREVERT service-definitions=${definitions}\n`,
+    );
+    assert.equal(existsSync(wrapper), false);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("service plist rendering and installation cover every label before activation", () => {
   const fixture = releaseFixture();
   const home = join(fixture.root, "operator-home");
@@ -520,9 +564,9 @@ test("service plist rendering and installation cover every label before activati
     }
 
     const plannedRevert = installLaunchdServices({ repositoryRoot: fixture.root, userHome: home, revert: true });
-    assert.equal(plannedRevert.applied, false);
+    assert.deepEqual([plannedRevert.phase, plannedRevert.applied], ["REVERT", false]);
     const reverted = installLaunchdServices({ repositoryRoot: fixture.root, userHome: home, revert: true, apply: true });
-    assert.equal(reverted.reverted, true);
+    assert.deepEqual([reverted.phase, reverted.applied], ["REVERT", true]);
     assert.equal(existsSync(serviceWrapperPath(fixture.root)), false);
     for (const label of SERVICE_LABELS) assert.equal(existsSync(join(home, "Library/LaunchAgents", `${label}.plist`)), false);
     assert.equal(existsSync(join(fixture.root, "shared/.env")), true);
@@ -573,7 +617,7 @@ test("an explicit wrapper migration replaces existing service definitions and re
       replaceExisting: true,
       apply: true,
     });
-    assert.equal(installed.applied, true);
+    assert.deepEqual([installed.phase, installed.applied], ["APPLY", true]);
     for (const label of SERVICE_LABELS) {
       const installedDefinition = readFileSync(join(launchAgents, `${label}.plist`), "utf8");
       assert.match(installedDefinition, /agentos-service-wrapper\.mjs/u);
@@ -594,7 +638,7 @@ test("an explicit wrapper migration replaces existing service definitions and re
       revert: true,
       apply: true,
     });
-    assert.equal(reverted.reverted, true);
+    assert.deepEqual([reverted.phase, reverted.applied], ["REVERT", true]);
     for (const label of SERVICE_LABELS) {
       assert.equal(readFileSync(join(launchAgents, `${label}.plist`), "utf8"), originals[label]);
     }
@@ -624,7 +668,7 @@ test("wrapper migration reuses matching orphaned backups and names conflicting l
       replaceExisting: true,
       apply: true,
     });
-    assert.equal(installed.applied, true);
+    assert.deepEqual([installed.phase, installed.applied], ["APPLY", true]);
     installLaunchdServices({ repositoryRoot: fixture.root, userHome: home, revert: true, apply: true });
 
     writeFileSync(apiBackup, "unrelated-leftover\n");

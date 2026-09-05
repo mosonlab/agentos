@@ -47,41 +47,21 @@ export const runServiceInstaller = (args, context = {}) => {
     if (options.help) {
       usage();
       return 0;
-    } else {
-      const result = installLaunchdServices({
-        ...context,
-        apply: options.apply,
-        revert: options.revert,
-        replaceExisting: options.replaceExisting,
-        installUnits: options.installUnits,
-        serviceUser: options.serviceUser,
-      });
-      if (result.platform === "linux") {
-        const prefix = `${result.deployRole === "runner" ? "AGENTOS_DEPLOY_ROLE=runner " : ""}${result.runnerIdPrefix
-          ? `AGENTOS_RUNNER_ID_PREFIX=${shellQuote(result.runnerIdPrefix)} `
-          : ""}`;
-        const phase = options.revert ? "REVERT" : options.apply || options.installUnits ? "APPLY" : "PLAN";
-        process.stdout.write(`${phase} platform=linux\n`);
-        process.stdout.write(`${phase} unit-directory=${result.unitDirectory ?? "/etc/systemd/system"}\n`);
-        process.stdout.write(`${phase} units=${result.units.length}\n`);
-        process.stdout.write(`${phase} staging=${result.staging ?? "recorded"}\n`);
-        if (!options.apply && !options.installUnits) process.stdout.write("PLAN no files or systemd state changed\n");
-        else if (options.apply && !options.installUnits && !options.revert) {
-          process.stdout.write(`NEXT sudo ${prefix}node ${shellQuote(process.argv[1])} --install-units --service-user ${shellQuote(options.serviceUser)}\n`);
-        } else if (options.apply && options.revert && !options.installUnits) {
-          process.stdout.write(`NEXT sudo ${prefix}node ${shellQuote(process.argv[1])} --install-units --revert --service-user ${shellQuote(options.serviceUser)}\n`);
-        }
-      } else {
-        process.stdout.write(`${options.revert ? "REVERT" : options.apply ? "APPLY" : "PLAN"} service-wrapper=${result.wrapper ?? "recorded"}\n`);
-        process.stdout.write(`${options.revert ? "REVERT" : options.apply ? "APPLY" : "PLAN"} service-definitions=${result.entries.length}\n`);
-        if (options.apply && !options.revert) {
-          process.stdout.write("NEXT reload each service plist with launchctl, then run the wrapper inventory readiness check\n");
-        } else if (!options.apply) {
-          process.stdout.write("PLAN no files or launchd state changed\n");
-        }
-      }
-      return 0;
     }
+    const result = installLaunchdServices({
+      ...context,
+      apply: options.apply,
+      revert: options.revert,
+      replaceExisting: options.replaceExisting,
+      installUnits: options.installUnits,
+      serviceUser: options.serviceUser,
+    });
+    for (const [key, value] of result.report) process.stdout.write(`${result.phase} ${key}=${value}\n`);
+    if (result.notice) process.stdout.write(`${result.notice}\n`);
+    if (result.remaining) {
+      process.stdout.write(`NEXT sudo ${result.remaining.environment}node ${shellQuote(process.argv[1])} ${result.remaining.options}\n`);
+    }
+    return 0;
   } catch (error) {
     process.stderr.write(`STOP ${error instanceof Error ? error.message : String(error)}\n`);
     return 1;
