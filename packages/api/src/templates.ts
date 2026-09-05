@@ -22,6 +22,7 @@ import {
 import { layerOf } from "@anneal/db/chain-order";
 
 import { isValidBranchName } from "./branch-name.js";
+import { templateStepInstantiation } from "./chain-step-omission.js";
 import { composeBrief } from "./task-brief.js";
 import {
   TemplateInstantiationRefusal,
@@ -371,16 +372,12 @@ export const instantiateTemplate = async (
       }
       assertValidBaseReferences(template.steps);
 
-      const conditionalRevalidation = consumesImplementationRoute
-        ? template.steps.find((step) => step.outputKind === "revalidation") ?? null
-        : null;
-      const omitRevalidation = conditionalRevalidation !== null && !input.afterTaskId;
-      const instantiatedTemplateSteps = omitRevalidation || projectInstantiationDefaults.skipOptionalSteps
-        ? template.steps.filter((step) => (
-          (!omitRevalidation || step.id !== conditionalRevalidation?.id)
-          && (!projectInstantiationDefaults.skipOptionalSteps || !step.optional)
-        ))
-        : template.steps;
+      const instantiation = templateStepInstantiation(template.steps, {
+        routesImplementation: consumesImplementationRoute,
+        boundToPredecessor: Boolean(input.afterTaskId),
+        skipOptionalSteps: projectInstantiationDefaults.skipOptionalSteps,
+      });
+      const instantiatedTemplateSteps = instantiation.instantiated;
       if (instantiatedTemplateSteps.length === 0) {
         throw templateRefusal("template_has_no_instantiable_steps", "Template has no instantiable steps");
       }
@@ -648,7 +645,7 @@ export const instantiateTemplate = async (
         const promptVariables = { ...input.variables, chainId };
         for (const [index, effective] of effectiveSteps.entries()) {
           const { step } = effective;
-          const conditionalOrdinalOffset = omitRevalidation ? 1 : 0;
+          const conditionalOrdinalOffset = instantiation.omittedConditionalRevalidation ? 1 : 0;
           const context = composeTemplateTaskDescription({
             prompt: interpolate(step.prompt, promptVariables),
             featureBrief: input.description,

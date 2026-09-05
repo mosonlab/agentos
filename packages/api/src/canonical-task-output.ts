@@ -19,6 +19,7 @@ import {
 } from "@anneal/db";
 import type { ClaimPreviousRunHandoff } from "@anneal/db/claim-contract";
 
+import { chainStepPresence, type ChainStepPresenceIndex } from "./chain-step-omission.js";
 import {
   fenceRefusalResponse,
   type FenceRefusalResponse,
@@ -172,6 +173,7 @@ type FixStepTask = {
   projectId: string;
   chainId: string | null;
   chainLayer: number | null;
+  templateStep: { taskTemplateId: string };
 };
 
 /**
@@ -242,13 +244,27 @@ const fixedImplementationPersistenceRefusal = async (
     successfulSiblingHeads.set(run.taskId, heads);
   }
   const reports: ReviewArtifact[] = [];
+  let presence: ChainStepPresenceIndex | null = null;
   for (const kind of ["sol-findings", "blind-findings"] as const) {
     const matches = reviewTasks.filter((candidate) => (
       kind === "sol-findings"
         ? isCanonicalSolFindingsStep(candidate.templateStep)
         : isCanonicalBlindFindingsStep(candidate.templateStep)
     ));
-    if (matches.length === 0) continue;
+    if (matches.length === 0) {
+      // Absence of the sibling excuses the fix only when the producing step is
+      // absent from the whole chain. A step this chain did instantiate is
+      // owed in the fix step's predecessor layer.
+      presence ??= await chainStepPresence(tx, {
+        projectId: task.projectId,
+        chainId: task.chainId,
+        taskTemplateId: task.templateStep.taskTemplateId,
+      });
+      if (presence.ofRole(kind) === "instantiated") {
+        return `fixed-implementation requires exactly one immutable ${kind} sibling output`;
+      }
+      continue;
+    }
     if (matches.length !== 1 || !matches[0]!.stepOutput || matches[0]!.stepOutput!.kind !== kind) {
       return `fixed-implementation requires exactly one immutable ${kind} sibling output`;
     }
@@ -441,6 +457,7 @@ export const persistSessionTaskOutput = async (
     templateStep: { select: {
       stepIndex: true,
       outputKind: true,
+      taskTemplateId: true,
       taskTemplate: { select: { name: true } },
     } },
   } },
@@ -463,8 +480,8 @@ export const persistSessionTaskOutput = async (
     const bodyRefusal = canonicalBodyRefusal(step, input.body, input.commitSha, phase);
     if (bodyRefusal) return { ok: false, reason: bodyRefusal };
   }
-  if (isCanonicalFixStep(step)) {
-    const refusal = await fixedImplementationPersistenceRefusal(tx, task, input.body);
+  if (step && isCanonicalFixStep(step)) {
+    const refusal = await fixedImplementationPersistenceRefusal(tx, { ...task, templateStep: step }, input.body);
     if (refusal) return { ok: false, reason: refusal };
   }
   // The retired must-fix role remains only on already-instantiated Chains.
