@@ -10,7 +10,7 @@ import {
   AssigneeType,
   DependencyProvisioning,
   INTEGRATOR_TEMPLATE_NAME,
-  legacyTemplateName,
+  templateRolloverName,
   PrismaClient,
   TaskStatus,
   enqueueTaskRun,
@@ -986,7 +986,7 @@ test("repairs on every previously omitted legacy generation reopen the Librarian
   ]) {
     const seeded = await exercise("review-fail", {
       withLibrarian: true,
-      templateName: legacyTemplateName(INTEGRATOR_TEMPLATE_NAME, marker, `template-${marker}`),
+      templateName: templateRolloverName(INTEGRATOR_TEMPLATE_NAME, marker, `template-${marker}`),
     });
     const repair = await repairFor(seeded, "review-fix");
     await completeRepair(seeded, repair.id, `Closed ${marker} findings.`);

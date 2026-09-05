@@ -1,4 +1,4 @@
-Seed rollover could preserve historical template rows under names that `canonicalTemplateIdentity` could not recognize. The transition registry now owns and validates every seed-era name helper; merge-integrator retains re-exports for existing consumers. Source-discovered unit coverage catches unregistered helpers, and canonical prompt sync database coverage exercises persisted legacy rows.
+Seed rollover could preserve historical template rows under names that `canonicalTemplateIdentity` could not recognize. The transition registry now owns and validates every seed-era name helper; merge-integrator no longer re-exports name helpers. Source-discovered unit coverage catches unregistered helpers, and canonical prompt sync database coverage exercises persisted legacy rows.
 
 ## Decisions taken
 
@@ -6,7 +6,10 @@ Seed rollover could preserve historical template rows under names that `canonica
 - Also register direct `human-6`, minted inline since `17ee82ba`, and route seed through its registry helper. This satisfies the brief's requirement that every name minted in packages/db resolves.
 - Register seed-era identities separately from structural transition fingerprints within the same registry module. These graphs predate the closed structural contract, and some output protocols are retired. Preserve seed's existing predicates; do not invent shape/adoption authority or change which graphs canonical sync may roll over.
 - Keep `template-sources.ts`, `canonical-step-adoption.ts`, `agents/`, prompt content, and migrations untouched. No new runtime dependency enters template-sources.
-- The call-site criterion is applied to standalone minting: merge-integrator contains only re-exports. Existing installation and unit-test callers continue using the registry's exported `legacyTemplateName`; all production literal markers passed to it live in the registry.
+- The primitive `legacyTemplateName` is private. Installation and regression fixtures use the registry-owned `templateRolloverName`; the exact acceptance grep now finds calls only in the registry.
+- Preserve both fixed `v1` names because API fixtures consume them as row identities. Move their constants into the registry and resolve these exact unsuffixed identities, without relaxing the row-id requirement for other generations or granting structural adoption authority.
+- Recognized seed-era and fixed v1 names now receive canonical run-open implementation guards and native implementation subagent settings by output role; compound implementation bindings require Codex gpt-* capability. Template authoring also reserves these names and refuses editing canonical rows. These are intended identity consequences, independent of sync rollover authority. Unit coverage checks seed-era family classification and non-implementation exclusions; existing run-open tests cover capability refusals.
+- Production source AST coverage forbids inline legacy literals outside the registry; test fixtures remain free to express expected and invalid names. Export discovery explicitly rejects unsupported helper arities. Marker lists are computed once, direct names use the shared constant, and the compound constant is checked against the registry type.
 
 ## Validation
 

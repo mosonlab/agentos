@@ -10,15 +10,8 @@
  * them is a second thing to get wrong.
  */
 
+import type { CanonicalTemplateRegistryName } from "./canonical-template-transition.js";
 import { stepRole } from "./step-role.js";
-
-// Preserve existing consumers while the transition registry owns name minting.
-export {
-  legacyTenStepTemplateName,
-  legacyNineStepTemplateName,
-  legacyHumanTwelveStepTemplateName,
-  legacyRegressionFirstThirteenStepTemplateName,
-} from "./canonical-template-transition.js";
 
 export { stepGeneration, stepRole, type StepRole, type TemplateStepLike } from "./step-role.js";
 
@@ -55,10 +48,8 @@ export const LEGACY_INTEGRATOR_STEP_INDEX = 12;
 export const LEGACY_DIRECT_INTEGRATOR_STEP_INDEX = 7;
 export const INTEGRATOR_OUTPUT_KIND = "merge-result";
 export const INTEGRATOR_AGENT_NAME = "merge-integrator";
-export const INTEGRATOR_TEMPLATE_NAME = "compound-engineer-workflow";
+export const INTEGRATOR_TEMPLATE_NAME = "compound-engineer-workflow" satisfies CanonicalTemplateRegistryName;
 export const DIRECT_INTEGRATOR_TEMPLATE_NAME = "direct-engineer-workflow";
-export const LEGACY_INTEGRATOR_TEMPLATE_NAME = `${INTEGRATOR_TEMPLATE_NAME}-legacy-v1`;
-export const LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME = `${DIRECT_INTEGRATOR_TEMPLATE_NAME}-legacy-v1`;
 /** Sentinel model. `catalogRunnerForModel` returns null for it, so no runner/model assertion fires. */
 export const INTEGRATOR_SENTINEL_MODEL = "mechanical/merge-executor-v1";
 

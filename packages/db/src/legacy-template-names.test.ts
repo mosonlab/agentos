@@ -3,7 +3,7 @@ import { readdir, readFile } from "node:fs/promises";
 import test from "node:test";
 import ts from "typescript";
 
-import { canonicalTemplateIdentity, legacyTemplateName } from "./canonical-template-transition.js";
+import { canonicalTemplateIdentity, templateRolloverName } from "./canonical-template-transition.js";
 
 /** Discover declarations rather than maintaining a second list of name helpers. */
 test("every exported legacy template name helper produces a registered identity", async () => {
@@ -14,6 +14,16 @@ test("every exported legacy template name helper produces a registered identity"
       if (!entry.endsWith(".ts") || /\.(?:test|dbtest)\.ts$/u.test(entry)) continue;
       const url = new URL(`${directory}${entry}`, workspace);
       const source = ts.createSourceFile(entry, await readFile(url, "utf8"), ts.ScriptTarget.Latest, true);
+      if (entry !== "canonical-template-transition.ts") {
+        const checkLiteral = (node: ts.Node): void => {
+          if (ts.isStringLiteralLike(node) || ts.isTemplateHead(node)
+            || ts.isTemplateMiddle(node) || ts.isTemplateTail(node)) {
+            assert.ok(!node.text.includes("-legacy-"), `${entry}: legacy name literals belong in the transition registry`);
+          }
+          ts.forEachChild(node, checkLiteral);
+        };
+        checkLiteral(source);
+      }
       const names: string[] = [];
       for (const statement of source.statements) {
         if (ts.isExportDeclaration(statement) && statement.exportClause && ts.isNamedExports(statement.exportClause)) {
@@ -37,6 +47,7 @@ test("every exported legacy template name helper produces a registered identity"
       for (const name of helpers) {
         const helper = exports[name] as (...args: string[]) => string;
         assert.equal(typeof helper, "function", `${entry}: ${name}`);
+        assert.ok(helper.length === 1 || helper.length === 2, `${entry}: ${name} has unsupported arity ${helper.length}`);
         const argumentLists = helper.length === 1
           ? [["template-row"]]
           : ["compound-engineer-workflow", "direct-engineer-workflow"].map((template) => [template, "template-row"]);
@@ -66,8 +77,14 @@ test("seed-era legacy names preserve their exact template and generation", () =>
 });
 
 test("name minting refuses unknown generations and missing row identities", () => {
-  assert.throws(() => legacyTemplateName("compound-engineer-workflow", "unregistered", "row"), /Unregistered legacy/);
-  assert.throws(() => legacyTemplateName("unknown-template", "10", "row"), /Unregistered legacy/);
-  assert.throws(() => legacyTemplateName("direct-engineer-workflow", "10", "row"), /Unregistered legacy/);
-  assert.throws(() => legacyTemplateName("compound-engineer-workflow", "10", ""), /requires a row id/);
+  assert.throws(() => templateRolloverName("compound-engineer-workflow", "unregistered", "row"), /Unregistered legacy/);
+  assert.throws(() => templateRolloverName("unknown-template", "10", "row"), /Unregistered legacy/);
+  assert.throws(() => templateRolloverName("direct-engineer-workflow", "10", "row"), /Unregistered legacy/);
+  assert.throws(() => templateRolloverName("compound-engineer-workflow", "10", ""), /requires a row id/);
+});
+
+test("fixed v1 legacy identities remain recognizable", () => {
+  for (const canonicalName of ["compound-engineer-workflow", "direct-engineer-workflow"]) {
+    assert.deepEqual(canonicalTemplateIdentity(`${canonicalName}-legacy-v1`), { canonicalName, generation: "v1" });
+  }
 });
