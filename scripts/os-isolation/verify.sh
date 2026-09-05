@@ -28,6 +28,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../deploy" && pwd)"
 if ! SERVICE_PLATFORM="$(agentos_service_platform)"; then
   exit 64
 fi
+# The service inventory is read once, from the one generator, so no check below
+# re-spells a label, a unit name or a plist name.
+# shellcheck source=scripts/deploy/service-inventory.sh
+. "$SCRIPT_DIR/service-inventory.sh"
 
 PROBE=0
 STAGED=0
@@ -40,21 +44,22 @@ for arg in "$@"; do
   esac
 done
 
-SERVICE_RUNNER_COUNT="${AGENTOS_RUNNER_COUNT-10}"
-ACCOUNT_COUNT="${ACCOUNT_COUNT-8}"
-case "$SERVICE_RUNNER_COUNT" in
-    ''|*[!0-9]*)
-      printf 'runner-count-invalid:%s\n' "$SERVICE_RUNNER_COUNT" >&2
-      exit 64
-      ;;
-esac
-normalized="${SERVICE_RUNNER_COUNT#${SERVICE_RUNNER_COUNT%%[!0]*}}"
-[ -n "$normalized" ] || normalized=0
-if [ "$normalized" -lt 1 ] 2>/dev/null || [ "$normalized" -gt 64 ] 2>/dev/null; then
-  printf 'runner-count-invalid:%s\n' "$SERVICE_RUNNER_COUNT" >&2
-  exit 64
+agentos_load_service_inventory || exit 64
+SERVICE_RUNNER_COUNT="$AGENTOS_RUNNER_SERVICE_COUNT"
+API_LABEL="com.agentos.api"
+# A runner-role host's inventory has no control plane in it. The API checks
+# below then describe a service this host does not run, so they are not asked;
+# a missing label is only a refusal on a host whose inventory names it.
+API_IN_INVENTORY=0
+API_UNIT=""
+API_PLIST=""
+if agentos_service_inventory_has_label "$API_LABEL"; then
+  agentos_service_entry_for_label "$API_LABEL" || exit 64
+  API_IN_INVENTORY=1
+  API_UNIT="$AGENTOS_SERVICE_UNIT"
+  API_PLIST="$AGENTOS_SERVICE_PLIST"
 fi
-SERVICE_RUNNER_COUNT="$normalized"
+ACCOUNT_COUNT="${ACCOUNT_COUNT-8}"
 case "$ACCOUNT_COUNT" in
     ''|*[!0-9]*)
       printf 'account-count-invalid:%s\n' "$ACCOUNT_COUNT" >&2
@@ -83,7 +88,8 @@ verify_linux() {
   local LAUNCHER_USER="${LAUNCHER_USER:-${SUDO_USER:-$(id -un)}}"
   local SYSTEMCTL="${SYSTEMCTL_BIN:-${SYSTEMCTL:-systemctl}}"
   local REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-  local WRAPPER_PATH="${WRAPPER_PATH:-$REPO_ROOT/shared/bin/agentos-service-wrapper.mjs}"
+  local WRAPPER_PATH="${WRAPPER_PATH:-$(agentos_service_wrapper_path "$REPO_ROOT")}"
+  [ -n "$WRAPPER_PATH" ] || exit 64
   local problems=0
   local LINUX_SYSTEMCTL_OUTPUT=''
   local LINUX_ACTIVE_OUTPUT=''
@@ -99,14 +105,6 @@ verify_linux() {
     account_id=$(( (runner_id - 1) % ACCOUNT_COUNT + 1 ))
     printf '%s%s\n' "$ACCOUNT_PREFIX" "$account_id"
   }
-  runner_label_for_linux() {
-    if [ "$1" = 1 ]; then
-      printf 'com.agentos.runner\n'
-    else
-      printf 'com.agentos.runner-%s\n' "$1"
-    fi
-  }
-  unit_for_linux() { printf '%s.service\n' "$1"; }
   stat_linux() { stat -c "$1" "$2" 2>/dev/null; }
   as_account_linux() { sudo -n -u "$1" "${@:2}"; }
 
@@ -195,8 +193,7 @@ verify_linux() {
     return 1
   }
   check_loaded_env_linux() {
-    local label="$1" key="$2" expected="$3" unit output
-    unit="$(unit_for_linux "$label")"
+    local label="$1" unit="$2" key="$3" expected="$4" output
     if ! systemctl_show_linux Environment "$unit"; then return; fi
     output="$LINUX_SYSTEMCTL_OUTPUT"
     if env_key_present_linux "$key" "$output"; then
@@ -210,8 +207,7 @@ verify_linux() {
     fi
   }
   check_reload_linux() {
-    local label="$1" unit
-    unit="$(unit_for_linux "$label")"
+    local label="$1" unit="$2"
     if ! systemctl_show_linux NeedDaemonReload "$unit"; then return; fi
     case "$LINUX_SYSTEMCTL_OUTPUT" in
       yes|true|1) fail_linux "systemd-daemon-reload-required:$unit" ;;
@@ -220,8 +216,7 @@ verify_linux() {
     esac
   }
   check_active_linux() {
-    local label="$1" unit
-    unit="$(unit_for_linux "$label")"
+    local label="$1" unit="$2"
     if systemctl_active_linux "$unit"; then
       pass_linux "$label is active"
     elif [ "$STAGED" = 1 ]; then
@@ -231,8 +226,7 @@ verify_linux() {
     fi
   }
   check_execstart_linux() {
-    local label="$1" unit output
-    unit="$(unit_for_linux "$label")"
+    local label="$1" unit="$2" output
     if ! systemctl_show_linux ExecStart "$unit"; then return; fi
     output="$LINUX_SYSTEMCTL_OUTPUT"
     case "$output" in
@@ -398,44 +392,51 @@ verify_linux() {
   [ "$problems" -eq 0 ] && pass_linux "all $ACCOUNT_COUNT accounts can read the staged MCP server and pi extension"
 
   step_linux "loaded systemd service wiring"
-  local label account_id
+  local label unit account_id
   for i in $(seq 1 "$SERVICE_RUNNER_COUNT"); do
-    label="$(runner_label_for_linux "$i")"
+    label="${AGENTOS_RUNNER_LABELS[$i]}"
+    unit="${AGENTOS_RUNNER_UNITS[$i]}"
     account_id=$(( (i - 1) % ACCOUNT_COUNT + 1 ))
     account="${ACCOUNT_PREFIX}${account_id}"
-    check_reload_linux "$label"
-    check_loaded_env_linux "$label" RUNNER_RUN_AS_PREFIX "sudo -u $account -E --"
-    check_loaded_env_linux "$label" RUNNER_HOME "$HOME_BASE/$account"
-    check_loaded_env_linux "$label" RUNNER_WORKSPACE_ROOT "$WORKSPACE_ROOT"
-    check_loaded_env_linux "$label" RUNNER_MCP_SERVER_PATH "$LIB_DIR/mcp-server.js"
-    check_loaded_env_linux "$label" RUNNER_PI_EXTENSION_PATH "$LIB_DIR/pi-agentos-extension.ts"
-    check_loaded_env_linux "$label" RUNNER_CLAUDE_SETTINGS_PATH "$LIB_DIR/claude-platform-settings.json"
-    check_loaded_env_linux "$label" RUNNER_SESSION_CONFIG_BASELINE_ROOT "$LIB_DIR/session-config-baseline"
-    if systemctl_show_linux Environment "$(unit_for_linux "$label")"; then
+    check_reload_linux "$label" "$unit"
+    check_loaded_env_linux "$label" "$unit" RUNNER_RUN_AS_PREFIX "sudo -u $account -E --"
+    check_loaded_env_linux "$label" "$unit" RUNNER_HOME "$HOME_BASE/$account"
+    check_loaded_env_linux "$label" "$unit" RUNNER_WORKSPACE_ROOT "$WORKSPACE_ROOT"
+    check_loaded_env_linux "$label" "$unit" RUNNER_MCP_SERVER_PATH "$LIB_DIR/mcp-server.js"
+    check_loaded_env_linux "$label" "$unit" RUNNER_PI_EXTENSION_PATH "$LIB_DIR/pi-agentos-extension.ts"
+    check_loaded_env_linux "$label" "$unit" RUNNER_CLAUDE_SETTINGS_PATH "$LIB_DIR/claude-platform-settings.json"
+    check_loaded_env_linux "$label" "$unit" RUNNER_SESSION_CONFIG_BASELINE_ROOT "$LIB_DIR/session-config-baseline"
+    if systemctl_show_linux Environment "$unit"; then
       env_key_present_linux RUNNER_PATH "$LINUX_SYSTEMCTL_OUTPUT" \
         || fail_linux "$label has no RUNNER_PATH; the runner would search a default PATH the account may not share"
     fi
-    check_active_linux "$label"
-    check_execstart_linux "$label"
+    check_active_linux "$label" "$unit"
+    check_execstart_linux "$label" "$unit"
   done
 
   # The API uses runner 1's account/home for ownership locks and workspace GC.
-  label=com.agentos.api
-  account="${ACCOUNT_PREFIX}1"
-  check_reload_linux "$label"
-  check_loaded_env_linux "$label" RUNNER_WORKSPACE_ROOT "$WORKSPACE_ROOT"
-  check_loaded_env_linux "$label" RUNNER_RUN_AS_PREFIX "sudo -u $account -E --"
-  check_loaded_env_linux "$label" RUNNER_HOME "$HOME_BASE/$account"
-  check_loaded_env_linux "$label" RUNNER_REPO_MIRROR_ROOT "$HOME_BASE/$account/.agentos/repo-mirrors"
-  check_active_linux "$label"
+  if [ "$API_IN_INVENTORY" = 1 ]; then
+    label="$API_LABEL"
+    unit="$API_UNIT"
+    account="${ACCOUNT_PREFIX}1"
+    check_reload_linux "$label" "$unit"
+    check_loaded_env_linux "$label" "$unit" RUNNER_WORKSPACE_ROOT "$WORKSPACE_ROOT"
+    check_loaded_env_linux "$label" "$unit" RUNNER_RUN_AS_PREFIX "sudo -u $account -E --"
+    check_loaded_env_linux "$label" "$unit" RUNNER_HOME "$HOME_BASE/$account"
+    check_loaded_env_linux "$label" "$unit" RUNNER_REPO_MIRROR_ROOT "$HOME_BASE/$account/.agentos/repo-mirrors"
+    check_active_linux "$label" "$unit"
+  else
+    pass_linux "$API_LABEL is not in this host's service inventory; this host runs no control plane"
+  fi
 
   step_linux "toolchain reachable by every account, on that runner's own PATH"
   local runner_path cli
   for i in $(seq 1 "$SERVICE_RUNNER_COUNT"); do
-    label="$(runner_label_for_linux "$i")"
+    label="${AGENTOS_RUNNER_LABELS[$i]}"
+    unit="${AGENTOS_RUNNER_UNITS[$i]}"
     account_id=$(( (i - 1) % ACCOUNT_COUNT + 1 ))
     account="${ACCOUNT_PREFIX}${account_id}"
-    if ! systemctl_show_linux Environment "$(unit_for_linux "$label")"; then continue; fi
+    if ! systemctl_show_linux Environment "$unit"; then continue; fi
     runner_path="$(env_value_linux RUNNER_PATH "$LINUX_SYSTEMCTL_OUTPUT")"
     [ -n "$runner_path" ] || continue
     for cli in claude codex pi node git gh; do
@@ -539,7 +540,6 @@ BIN_DIR="$AGENTOS_PREFIX/bin"
 SUDOERS_FILE="${SUDOERS_FILE:-/etc/sudoers.d/agentos-runners}"
 AGENT_DIR="${AGENT_DIR:-$HOME/Library/LaunchAgents}"
 LAUNCHER_USER="${LAUNCHER_USER:-$(id -un)}"
-API_LABEL="com.agentos.api"
 DOMAIN="gui/$(id -u)"
 PLIST_BUDDY=/usr/libexec/PlistBuddy
 
@@ -594,11 +594,6 @@ check_env() {
       fail "$label is LOADED with $key='${loaded:-<unset>}', expected '$expected' — reload it (the plist alone proves nothing)"
     fi
   fi
-}
-
-runner_label_for() {
-  # com.agentos.runner is runner 1; com.agentos.runner-N is runner N.
-  if [ "$1" = 1 ]; then printf 'com.agentos.runner'; else printf 'com.agentos.runner-%s' "$1"; fi
 }
 
 step "accounts and group"
@@ -709,9 +704,9 @@ if [ "${#plists[@]}" -ne "$SERVICE_RUNNER_COUNT" ]; then
   fail "found ${#plists[@]} com.agentos.runner*.plist under $AGENT_DIR, expected $SERVICE_RUNNER_COUNT"
 fi
 for i in $(seq 1 "$SERVICE_RUNNER_COUNT"); do
-  label="$(runner_label_for "$i")"
+  label="${AGENTOS_RUNNER_LABELS[$i]}"
   account="$(account_for "$i")"
-  file="$AGENT_DIR/$label.plist"
+  file="$AGENT_DIR/${AGENTOS_RUNNER_PLISTS[$i]}"
   if [ ! -f "$file" ]; then
     fail "$label.plist is missing from $AGENT_DIR"
     continue
@@ -734,8 +729,11 @@ for i in $(seq 1 "$SERVICE_RUNNER_COUNT"); do
   fi
 done
 
-api_plist="$AGENT_DIR/$API_LABEL.plist"
-if [ -f "$api_plist" ]; then
+api_plist=""
+[ "$API_IN_INVENTORY" != 1 ] || api_plist="$AGENT_DIR/$API_PLIST"
+if [ "$API_IN_INVENTORY" != 1 ]; then
+  pass "$API_LABEL is not in this host's service inventory; this host runs no control plane"
+elif [ -f "$api_plist" ]; then
   # The API canonicalises this root for the ownership lock and sweeps it for GC.
   # Disagreement here points the control plane at a directory the runners left.
   check_env "$api_plist" "$API_LABEL" RUNNER_WORKSPACE_ROOT "$WORKSPACE_ROOT"
@@ -763,9 +761,9 @@ step "the Node each runner actually runs the MCP server with"
 # start the MCP server with. Checking this shell's `command -v node` does not
 # answer whether the *runner's* interpreter is reachable by the launched account.
 for i in $(seq 1 "$SERVICE_RUNNER_COUNT"); do
-  label="$(runner_label_for "$i")"
+  label="${AGENTOS_RUNNER_LABELS[$i]}"
   account="$(account_for "$i")"
-  file="$AGENT_DIR/$label.plist"
+  file="$AGENT_DIR/${AGENTOS_RUNNER_PLISTS[$i]}"
   [ -f "$file" ] || continue
   program="$(loaded_program "$label")"
   [ -n "$program" ] || program="$(plist_value "$file" "ProgramArguments:0")"
@@ -807,9 +805,9 @@ done
 
 step "toolchain reachable by every account, on that runner's own PATH"
 for i in $(seq 1 "$SERVICE_RUNNER_COUNT"); do
-  label="$(runner_label_for "$i")"
+  label="${AGENTOS_RUNNER_LABELS[$i]}"
   account="$(account_for "$i")"
-  file="$AGENT_DIR/$label.plist"
+  file="$AGENT_DIR/${AGENTOS_RUNNER_PLISTS[$i]}"
   [ -f "$file" ] || continue
   runner_path="$(loaded_env "$label" RUNNER_PATH)"
   [ -n "$runner_path" ] || runner_path="$(plist_env "$file" RUNNER_PATH)"

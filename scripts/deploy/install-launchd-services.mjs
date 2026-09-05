@@ -63,7 +63,7 @@ export const runServiceInstaller = (args, context = {}) => {
         const phase = options.revert ? "REVERT" : options.apply || options.installUnits ? "APPLY" : "PLAN";
         process.stdout.write(`${phase} platform=linux\n`);
         process.stdout.write(`${phase} unit-directory=${result.unitDirectory ?? "/etc/systemd/system"}\n`);
-        process.stdout.write(`${phase} units=${result.units?.length ?? Math.max(0, result.entries.length - 1)}\n`);
+        process.stdout.write(`${phase} units=${result.units.length}\n`);
         process.stdout.write(`${phase} staging=${result.staging ?? "recorded"}\n`);
         if (!options.apply && !options.installUnits) process.stdout.write("PLAN no files or systemd state changed\n");
         else if (options.apply && !options.installUnits && !options.revert) {

@@ -37,7 +37,10 @@ import {
   verifySystemdAutoDeployDefinitions,
   verifySystemdServiceDefinitions,
 } from "./install-launchd.mjs";
-import { SERVICE_LABELS } from "./launchd-service-wrapper.mjs";
+import { generateServiceInventory, resolveServiceInventory } from "./service-inventory.mjs";
+
+const DEFAULT_INVENTORY = resolveServiceInventory({});
+const SERVICE_LABELS = DEFAULT_INVENTORY.labels;
 
 const withServicePlatform = async (platform, work) => {
   const previous = process.env.AGENTOS_SERVICE_PLATFORM;
@@ -286,6 +289,7 @@ test("systemd service units carry the exact plist environment contract", () => {
   const root = join(tmpdir(), "agentos-systemd-fixture");
   const values = SERVICE_LABELS.map((label) => servicePlistValues({
     label,
+    inventory: DEFAULT_INVENTORY,
     nodeBinary: "/usr/bin/node",
     repositoryRoot: root,
     sharedRoot: join(root, "shared"),
@@ -298,7 +302,7 @@ test("systemd service units carry the exact plist environment contract", () => {
     value.label,
     renderServiceSystemdUnit(undefined, { ...value, serviceUser: "anneal-test" }),
   ]));
-  assert.equal(verifySystemdServiceDefinitions(definitions), true);
+  assert.equal(verifySystemdServiceDefinitions(definitions, DEFAULT_INVENTORY), true);
   for (const value of values) {
     const unit = definitions[value.label];
     const plist = renderServiceLaunchdPlist(
@@ -354,7 +358,7 @@ test("non-default runner count is persisted in service and auto-deploy definitio
   const root = "/fixture";
   const serviceValues = servicePlistValues({
     label: "com.agentos.runner-16",
-    runnerCount: 16,
+    inventory: generateServiceInventory({ runnerCount: 16, runnerIdPrefix: "", deployRole: "control-plane" }),
     nodeBinary: "/usr/bin/node",
     repositoryRoot: root,
     stdoutPath: "/tmp/stdout",
@@ -386,13 +390,13 @@ test("non-default runner count is persisted in service and auto-deploy definitio
   assert.match(renderAutoDeploySystemdUnit(undefined, autoValues), /^Environment=AGENTOS_RUNNER_COUNT="16"$/mu);
 });
 
-test("sudoers rendering resolves unit names from the given labels, not the import-time inventory", () => {
+test("sudoers rendering resolves unit names from the inventory it is given, never an import-time one", () => {
   const source = String.raw`
     import { renderSystemdSudoers } from "./scripts/deploy/install-launchd.mjs";
-    import { generateServiceInventory } from "./scripts/deploy/launchd-service-wrapper.mjs";
-    const labels = generateServiceInventory(16).map(({ label }) => label);
-    const sudoers = renderSystemdSudoers({ serviceUser: "anneal-test", labels });
-    console.log(JSON.stringify({ labels: labels.length, restarts: (sudoers.match(/\/bin\/systemctl restart /gu) ?? []).length, last: sudoers.includes(generateServiceInventory(16).at(-1).unitName) }));
+    import { generateServiceInventory } from "./scripts/deploy/service-inventory.mjs";
+    const inventory = generateServiceInventory({ runnerCount: 16, runnerIdPrefix: "", deployRole: "control-plane" });
+    const sudoers = renderSystemdSudoers({ serviceUser: "anneal-test", inventory });
+    console.log(JSON.stringify({ labels: inventory.labels.length, restarts: (sudoers.match(/\/bin\/systemctl restart /gu) ?? []).length, last: sudoers.includes(inventory.entries.at(-1).unitName) }));
   `;
   const env = { ...process.env, AGENTOS_SERVICE_PLATFORM: "linux" };
   delete env.AGENTOS_RUNNER_COUNT;
@@ -405,6 +409,7 @@ test("systemd path directives escape whitespace and percent specifiers", () => {
   const root = "/opt/Anneal Runtime 100%";
   const values = servicePlistValues({
     label: "com.agentos.api",
+    inventory: DEFAULT_INVENTORY,
     nodeBinary: "/opt/Node Runtime 100%/node",
     repositoryRoot: root,
     sharedRoot: `${root}/shared`,
@@ -545,6 +550,7 @@ test("rendered unit syntax is verified by systemd-analyze when available", (t) =
     const serviceUser = process.env.USER && process.env.USER !== "root" ? process.env.USER : "nobody";
     const values = SERVICE_LABELS.map((label) => servicePlistValues({
       label,
+      inventory: DEFAULT_INVENTORY,
       nodeBinary: process.execPath,
       repositoryRoot: root,
       sharedRoot: join(root, "shared"),
@@ -682,6 +688,7 @@ test("the real service CLI enforces the Linux root boundary and sudo -n policy",
       const sudoers = readFileSync(sudoersPath, "utf8");
       assert.equal(sudoers, renderSystemdSudoers({
         serviceUser: "anneal-test",
+        inventory: DEFAULT_INVENTORY,
         systemctlPath: "/bin/systemctl",
       }));
       assert.match(sudoers, /systemctl show -p ExecStart --value com\.agentos\.api\.service/u);
@@ -2057,4 +2064,16 @@ test("privileged auto-deploy install rejects tampered targets and root service c
       }
     }
   });
+});
+
+test("the exported verification and sudoers entry points refuse an inventory the generator did not produce", () => {
+  const forged = {
+    runnerCount: DEFAULT_INVENTORY.runnerCount,
+    runnerIdPrefix: DEFAULT_INVENTORY.runnerIdPrefix,
+    deployRole: DEFAULT_INVENTORY.deployRole,
+    labels: ["com.agentos.api"],
+    entries: [{ label: "com.agentos.api", runnerIndex: null, runnerId: null, unitName: "com.agentos.api.service", plistName: "com.agentos.api.plist" }],
+  };
+  assert.throws(() => renderSystemdSudoers({ serviceUser: "anneal-test", inventory: forged }), /systemd-service-inventory-invalid/u);
+  assert.throws(() => verifySystemdServiceDefinitions({}, forged), /systemd-service-inventory-invalid/u);
 });

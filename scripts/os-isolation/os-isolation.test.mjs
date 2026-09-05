@@ -16,6 +16,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
+import { generateServiceInventory } from "../deploy/service-inventory.mjs";
+
 const TEST_DIR = dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_ROOT = resolve(TEST_DIR, "../..");
 const ISOLATION_DIR = join(REPOSITORY_ROOT, "scripts", "os-isolation");
@@ -566,16 +568,17 @@ test("Linux patch maps runners to accounts and field-level revert preserves unre
     const environment = { ...fixture.environment, SYSTEMD_STAGING_DIR: staging };
     const firstResult = runScript("patch-runner-plists.sh", ["--apply"], environment);
     assert.equal(firstResult.status, 0, runnerCount + ": " + firstResult.output);
-    for (let index = 1; index <= runnerCount; index += 1) {
-      const label = index === 1 ? "com.agentos.runner" : "com.agentos.runner-" + index;
-      const account = fixture.accounts[(index - 1) % fixture.accounts.length];
-      const dropin = join(staging, label + ".service.d", "os-isolation.conf");
+    const runners = generateServiceInventory({ runnerCount, runnerIdPrefix: "", deployRole: "runner" }).entries;
+    assert.equal(runners.length, runnerCount);
+    for (const { runnerIndex, unitName } of runners) {
+      const account = fixture.accounts[(runnerIndex - 1) % fixture.accounts.length];
+      const dropin = join(staging, unitName + ".d", "os-isolation.conf");
       const contents = readFileSync(dropin, "utf8");
       assert.match(contents, new RegExp("RUNNER_HOME=.*" + account));
       assert.match(contents, new RegExp(`RUNNER_PATH=.*${dirname(process.execPath).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}`, "u"));
     }
-    const firstLabel = "com.agentos.runner";
-    const firstDropin = join(staging, firstLabel + ".service.d", "os-isolation.conf");
+    const firstLabel = runners[0].label;
+    const firstDropin = join(staging, runners[0].unitName + ".d", "os-isolation.conf");
     const original = readFileSync(firstDropin, "utf8");
     writeFileSync(firstDropin, original + "Environment=UNRECORDED=keep-me\n");
     const revert = runScript("patch-runner-plists.sh", ["--revert", "--apply"], environment);
@@ -586,6 +589,36 @@ test("Linux patch maps runners to accounts and field-level revert preserves unre
     assert.doesNotMatch(reverted, /RUNNER_HOME=/u);
     assert.ok(existsSync(join(staging, "plist-manifest", firstLabel + ".manifest.reverted")));
   }
+});
+
+test("a runner-role host has no control plane in its inventory and both scripts still run", (t) => {
+  const fixture = makeLinuxFixture(t, { runnerCount: 2, accountCount: 2 });
+  const runnerRole = { ...fixture.environment, AGENTOS_DEPLOY_ROLE: "runner" };
+
+  const verified = runScript("verify.sh", [], runnerRole);
+  assert.notEqual(verified.status, 64, verified.output);
+  assert.doesNotMatch(verified.output, /service-label-unknown/u);
+  assert.match(verified.output, /com\.agentos\.api is not in this host's service inventory/u);
+  assert.match(verified.output, /loaded systemd service wiring/u);
+
+  const runnerStaging = join(fixture.root, "runner-staging");
+  mkdirSync(runnerStaging, { recursive: true });
+  const patched = runScript("patch-runner-plists.sh", ["--apply"], { ...runnerRole, SYSTEMD_STAGING_DIR: runnerStaging });
+  assert.equal(patched.status, 0, patched.output);
+  assert.equal(existsSync(join(runnerStaging, "com.agentos.runner.service.d", "os-isolation.conf")), true);
+  assert.equal(existsSync(join(runnerStaging, "com.agentos.api.service.d")), false);
+
+  // The same fixture on a control-plane host still patches the API drop-in, so
+  // the runner-role result above is the inventory speaking, not a dead branch.
+  const controlPlaneStaging = join(fixture.root, "control-plane-staging");
+  mkdirSync(controlPlaneStaging, { recursive: true });
+  const controlPlane = runScript("patch-runner-plists.sh", ["--apply"], {
+    ...fixture.environment,
+    AGENTOS_DEPLOY_ROLE: "control-plane",
+    SYSTEMD_STAGING_DIR: controlPlaneStaging,
+  });
+  assert.equal(controlPlane.status, 0, controlPlane.output);
+  assert.equal(existsSync(join(controlPlaneStaging, "com.agentos.api.service.d", "os-isolation.conf")), true);
 });
 
 test("Linux rollback refuses wired or uninspectable systemd runners and force is explicit", (t) => {

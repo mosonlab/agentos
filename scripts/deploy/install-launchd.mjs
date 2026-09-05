@@ -30,15 +30,21 @@ import { DEFAULT_DEPLOY_ROLE, resolveDeployRole } from "./deploy-role.mjs";
 
 export { DEFAULT_DEPLOY_ROLE, resolveDeployRole };
 
+import { resolveCurrentRelease } from "./launchd-service-wrapper.mjs";
 import {
+  DEFAULT_RUNNER_COUNT,
   MAX_RUNNER_COUNT,
-  SERVICE_INVENTORY_ENTRIES,
+  SERVICE_WRAPPER_FILE_NAME,
   generateServiceInventory,
-  resolveRunnerIdPrefix,
+  isGeneratedServiceInventory,
+  plistNameForLabel,
   resolveRunnerCount,
-  SERVICE_LABELS,
-  resolveCurrentRelease,
-} from "./launchd-service-wrapper.mjs";
+  resolveRunnerIdPrefix,
+  resolveServiceInventory,
+  serviceInventoryEntry,
+  serviceWrapperPath,
+  unitNameForLabel,
+} from "./service-inventory.mjs";
 import {
   DEPLOY_OPTIONAL_ARTIFACT_PATHS,
   deployReleaseArtifactPaths,
@@ -52,6 +58,10 @@ const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const REPOSITORY_ROOT = resolve(SCRIPT_DIR, "../..");
 const TEMPLATE = join(SCRIPT_DIR, "com.agentos.auto-deploy.plist.in");
 const LABEL = "com.agentos.auto-deploy";
+// The auto-deploy scheduler is installed by this installer but is not a
+// service inventory entry, so its names are spelled through the same helpers.
+const AUTO_DEPLOY_UNIT = unitNameForLabel(LABEL);
+const AUTO_DEPLOY_TIMER = `${LABEL}.timer`;
 const SERVICE_TEMPLATE = join(SCRIPT_DIR, "com.agentos.service.plist.in");
 const SYSTEMD_SERVICE_TEMPLATE = join(SCRIPT_DIR, "com.agentos.service.unit.in");
 const SYSTEMD_AUTO_DEPLOY_TEMPLATE = join(SCRIPT_DIR, "com.agentos.auto-deploy.unit.in");
@@ -206,7 +216,7 @@ export const verifyBackupConfiguration = (backup, execute = execFileSync) => {
   });
 };
 
-const runnerCountEnvironment = (runnerCount) => runnerCount === undefined || runnerCount === 10
+const runnerCountEnvironment = (runnerCount) => runnerCount === undefined || runnerCount === DEFAULT_RUNNER_COUNT
   ? {}
   : { AGENTOS_RUNNER_COUNT: String(runnerCount) };
 
@@ -270,13 +280,6 @@ export const renderLaunchdPlist = (template, values) => {
   return rendered;
 };
 
-/** Stable paths and plist rendering for the service side of the wrapper-first
- * migration. The auto-deploy plist above intentionally remains a separate
- * definition: installing or reverting service wrappers must not alter the
- * deployment scheduler. */
-export const serviceWrapperPath = (repositoryRoot) =>
-  join(resolve(repositoryRoot), "shared", "bin", "agentos-service-wrapper.mjs");
-
 /** Materialize the still-serving checkout as the initial immutable release.
  * Existing service definitions continue to run from the checkout during this
  * step; only after current identifies the same bytes can the independently
@@ -330,6 +333,7 @@ export const bootstrapCurrentRelease = ({
 
 export const servicePlistValues = ({
   label,
+  inventory,
   nodeBinary,
   repositoryRoot,
   sharedRoot = join(repositoryRoot, "shared"),
@@ -337,12 +341,8 @@ export const servicePlistValues = ({
   stderrPath,
   path,
   wrapperPath = serviceWrapperPath(repositoryRoot),
-  runnerCount = resolveRunnerCount(),
-  runnerIdPrefix = resolveRunnerIdPrefix(),
-  deployRole = resolveDeployRole(),
 }) => {
-  const inventoryEntry = generateServiceInventory(runnerCount, runnerIdPrefix, deployRole).find((entry) => entry.label === label);
-  if (!inventoryEntry) throw new Error(`service-label-unknown:${String(label)}`);
+  const entry = serviceInventoryEntry(inventory, label);
   if (!nodeBinary || !repositoryRoot || !stdoutPath || !stderrPath || !path) {
     throw new Error("service-plist-values-incomplete");
   }
@@ -355,11 +355,11 @@ export const servicePlistValues = ({
     stdoutPath,
     stderrPath,
     path,
-    runnerCount,
-    runnerIdPrefix,
-    deployRole,
-    ...(inventoryEntry.runnerId
-      ? { runnerId: inventoryEntry.runnerId, runnerPath: path }
+    runnerCount: inventory.runnerCount,
+    runnerIdPrefix: inventory.runnerIdPrefix,
+    deployRole: inventory.deployRole,
+    ...(entry.runnerId
+      ? { runnerId: entry.runnerId, runnerPath: path }
       : {}),
     wrapperPath,
   });
@@ -544,41 +544,21 @@ export const renderAutoDeploySystemdTimer = (
   template = readFileSync(SYSTEMD_AUTO_DEPLOY_TIMER_TEMPLATE, "utf8"),
 ) => renderSystemdTemplate(template, {}, "systemd-auto-deploy-timer-has-unresolved-placeholder");
 
-const inventoryForCount = (runnerCount, runnerIdPrefix = "", deployRole = DEFAULT_DEPLOY_ROLE) =>
-  generateServiceInventory(runnerCount, runnerIdPrefix, deployRole);
-const unitNameForLabel = (label, inventory = SERVICE_INVENTORY_ENTRIES) => {
-  const entry = inventory.find((candidate) => candidate.label === label);
-  if (!entry) throw new Error(`service-label-unknown:${String(label)}`);
-  return entry.unitName;
-};
-
 const hasExactDirective = (text, directive, value) => {
   const escaped = value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
   return new RegExp(`^${directive}=${escaped}$`, "mu").test(text);
 };
 
 const directiveCount = (text, directive) => (text.match(new RegExp(`^${directive}=`, "gmu")) ?? []).length;
-const validInventoryLabels = (labels, deployRole = DEFAULT_DEPLOY_ROLE) => {
-  if (!Array.isArray(labels) || new Set(labels).size !== labels.length) return false;
-  const runnerCount = deployRole === "runner" ? labels.length : labels.length - 3;
-  if (runnerCount < 1) return false;
-  try {
-    return JSON.stringify(labels) === JSON.stringify(inventoryForCount(runnerCount, "", deployRole).map(({ label }) => label));
-  } catch { return false; }
-};
 
 /** Validate the subset of unit syntax that protects the activation boundary.
  * systemd-analyze is an optional stronger parser in the test harness; these
  * checks are always available on both operator platforms. */
-export const verifySystemdServiceDefinitions = (
-  definitions,
-  labels = SERVICE_LABELS,
-  deployRole = resolveDeployRole(),
-) => {
-  if (!definitions || !validInventoryLabels(labels, deployRole)) {
+export const verifySystemdServiceDefinitions = (definitions, inventory) => {
+  if (!definitions || !isGeneratedServiceInventory(inventory) || inventory.labels.length === 0) {
     throw new Error("systemd-service-inventory-invalid");
   }
-  for (const label of labels) {
+  for (const label of inventory.labels) {
     const rendered = definitions[label];
     if (typeof rendered !== "string") throw new Error(`systemd-service-definition-missing:${label}`);
     if (/__[A-Z_]+__/u.test(rendered)) throw new Error(`systemd-service-definition-unresolved:${label}`);
@@ -631,7 +611,7 @@ export const verifySystemdAutoDeployDefinitions = ({ service, timer }) => {
     [service, "Wants", "network-online.target"],
     [timer, "OnBootSec", "60"],
     [timer, "OnUnitActiveSec", "300"],
-    [timer, "Unit", `${LABEL}.service`],
+    [timer, "Unit", AUTO_DEPLOY_UNIT],
     [timer, "WantedBy", "timers.target"],
   ];
   for (const [rendered, directive, value] of required) {
@@ -652,15 +632,11 @@ export const verifySystemdAutoDeployDefinitions = ({ service, timer }) => {
  * touched. The checks intentionally inspect the launchd contract itself, not
  * only the source inputs: a plist that still contains a source checkout path
  * or an unresolved placeholder must never reach launchctl. */
-export const verifyServicePlistDefinitions = (
-  definitions,
-  labels = SERVICE_LABELS,
-  deployRole = resolveDeployRole(),
-) => {
-  if (!definitions || !validInventoryLabels(labels, deployRole)) {
+export const verifyServicePlistDefinitions = (definitions, inventory) => {
+  if (!definitions || !isGeneratedServiceInventory(inventory) || inventory.labels.length === 0) {
     throw new Error("launchd-service-inventory-invalid");
   }
-  for (const label of labels) {
+  for (const label of inventory.labels) {
     const rendered = definitions[label];
     if (typeof rendered !== "string") throw new Error(`launchd-service-definition-missing:${label}`);
     if (/__[A-Z_]+__/u.test(rendered)) throw new Error(`launchd-service-definition-unresolved:${label}`);
@@ -810,20 +786,14 @@ const renderMigratedServicePlist = ({ sourcePath, values }) => {
 
 export const renderServicePlists = ({
   template = readFileSync(SERVICE_TEMPLATE, "utf8"),
-  labels,
-  deployRole = resolveDeployRole(),
+  inventory,
   ...values
 } = {}) => {
-  const serviceLabels = labels ?? inventoryForCount(
-    values.runnerCount ?? resolveRunnerCount(),
-    values.runnerIdPrefix ?? resolveRunnerIdPrefix(),
-    deployRole,
-  ).map(({ label }) => label);
-  const rendered = Object.fromEntries(serviceLabels.map((label) => {
-    const serviceValues = servicePlistValues({ label, deployRole, ...values });
-    return [label, renderServiceLaunchdPlist(template, serviceValues)];
-  }));
-  verifyServicePlistDefinitions(rendered, serviceLabels, deployRole);
+  const rendered = Object.fromEntries(inventory.labels.map((label) => [
+    label,
+    renderServiceLaunchdPlist(template, servicePlistValues({ label, inventory, ...values })),
+  ]));
+  verifyServicePlistDefinitions(rendered, inventory);
   return Object.freeze(rendered);
 };
 
@@ -898,31 +868,21 @@ const systemdCommandPath = (name, configured, execute = execFileSync) => {
 
 export const renderSystemdSudoers = ({
   serviceUser,
-  labels,
-  deployRole = resolveDeployRole(),
-  runnerCount = resolveRunnerCount(),
-  runnerIdPrefix = resolveRunnerIdPrefix(),
+  inventory,
   systemctlPath = "/bin/systemctl",
 } = {}) => {
   if (!validAccountName(serviceUser) || serviceUser === "root") throw new Error("systemd-service-user-invalid");
-  const serviceLabels = labels ?? inventoryForCount(runnerCount, runnerIdPrefix, deployRole).map(({ label }) => label);
-  if (!validInventoryLabels(serviceLabels, deployRole)) {
+  if (!isGeneratedServiceInventory(inventory) || inventory.entries.length === 0) {
     throw new Error("systemd-service-inventory-invalid");
   }
   if (typeof systemctlPath !== "string" || systemctlPath === "" || !systemctlPath.startsWith("/")) {
     throw new Error("systemd-command-not-absolute:systemctl");
   }
-  const inventory = inventoryForCount(
-    deployRole === "runner" ? serviceLabels.length : serviceLabels.length - 3,
-    "",
-    deployRole,
-  );
   const rules = [];
-  for (const label of serviceLabels) {
-    const unit = unitNameForLabel(label, inventory);
-    rules.push(`${systemctlPath} restart ${unit}`);
-    rules.push(`${systemctlPath} show -p ExecStart --value ${unit}`);
-    rules.push(`${systemctlPath} is-active ${unit}`);
+  for (const { unitName } of inventory.entries) {
+    rules.push(`${systemctlPath} restart ${unitName}`);
+    rules.push(`${systemctlPath} show -p ExecStart --value ${unitName}`);
+    rules.push(`${systemctlPath} is-active ${unitName}`);
   }
   return `${serviceUser} ALL=(root) NOPASSWD: ${rules.join(", ")}\n`;
 };
@@ -1077,9 +1037,8 @@ const assertExactEntry = (entry, expected, reason = "systemd-service-manifest-in
 };
 
 const validateDropIn = (entry, inventory) => {
-  const label = entry.unit?.replace(/\.service$/u, "");
-  const inventoryEntry = inventory.find((candidate) => candidate.label === label);
-  if (!inventoryEntry || (!inventoryEntry.runnerId && label !== "com.agentos.api")) {
+  const inventoryEntry = inventory.entries.find((candidate) => candidate.unitName === entry.unit);
+  if (!inventoryEntry || (!inventoryEntry.runnerId && inventoryEntry.label !== "com.agentos.api")) {
     throw new Error("systemd-service-manifest-invalid");
   }
   const allowed = new Set(inventoryEntry.runnerId ? [
@@ -1135,7 +1094,13 @@ const readStageEntries = ({
     throw new Error("systemd-runner-id-prefix-manifest-mismatch");
   }
   let inventory;
-  try { inventory = inventoryForCount(runnerCount, recordedRunnerIdPrefix, deployRole); } catch { invalidManifest(reason, manifestPath, "renderInputs"); }
+  try {
+    inventory = generateServiceInventory({
+      runnerCount,
+      runnerIdPrefix: recordedRunnerIdPrefix,
+      deployRole,
+    });
+  } catch { invalidManifest(reason, manifestPath, "renderInputs"); }
   const recordedStageRoot = manifestStringField({ manifest, reason, manifestPath, field: "stagingRoot" });
   manifestStringField({ manifest, reason, manifestPath, field: "unitDirectory" });
   manifestStringField({ manifest, reason, manifestPath, field: "sudoersPath" });
@@ -1156,16 +1121,16 @@ const readStageEntries = ({
       || manifest.unitDirectory !== unitDirectory || manifest.sudoersPath !== sudoersPath
       || manifest.systemctlPath !== "/bin/systemctl"
       || (manifest.reloadPending !== undefined && manifest.reloadPending !== true)
-      || manifest.entries.length !== inventory.length + 1) {
+      || manifest.entries.length !== inventory.entries.length + 1) {
     invalidManifest(reason, manifestPath);
   }
   const account = resolveSystemdServiceUser({ serviceUser, platform: "linux", lookup: userLookup, execute });
   if (account !== manifest.serviceUser) throw new Error("systemd-service-user-manifest-mismatch");
   const wrapper = serviceWrapperPath(root);
   assertContainedPath(wrapper, root);
-  const wrapperStaged = join(stageRoot, "wrapper", "agentos-service-wrapper.mjs");
+  const wrapperStaged = join(stageRoot, "wrapper", SERVICE_WRAPPER_FILE_NAME);
   assertExactEntry(manifest.entries[0], { kind: "wrapper", path: wrapper, stagedPath: wrapperStaged });
-  const expectedServices = inventory.map((item) => ({
+  const expectedServices = inventory.entries.map((item) => ({
     kind: "service",
     label: item.label,
     unit: item.unitName,
@@ -1183,7 +1148,7 @@ const readStageEntries = ({
       if (seenAuxiliary.has("sudoers")) throw new Error("systemd-service-manifest-invalid");
       seenAuxiliary.add("sudoers");
     } else if (entry.kind === "drop-in") {
-      const expectedUnit = inventory.find((item) => item.unitName === entry.unit)?.unitName;
+      const expectedUnit = inventory.entries.find((item) => item.unitName === entry.unit)?.unitName;
       if (!expectedUnit) throw new Error("systemd-service-manifest-invalid");
       assertExactEntry(entry, {
         path: join(unitDirectory, `${expectedUnit}.d`, "os-isolation.conf"),
@@ -1207,8 +1172,8 @@ const readStageEntries = ({
     if (!existsSync(entry.stagedPath) || !lstatSync(entry.stagedPath).isFile()) {
       throw new Error(`systemd-staged-file-missing:${entry.stagedPath}`);
     }
-    const expectedBackupName = entry.kind === "wrapper" ? "agentos-service-wrapper.mjs"
-      : entry.kind === "service" ? `${safeServiceFileName(entry.label)}.service`
+    const expectedBackupName = entry.kind === "wrapper" ? SERVICE_WRAPPER_FILE_NAME
+      : entry.kind === "service" ? unitNameForLabel(safeServiceFileName(entry.label))
         : entry.kind === "sudoers" ? "anneal-service-control"
           : safeServiceFileName(relative(unitDirectory, entry.path));
     if ((!entry.existed && entry.backupPath !== null)
@@ -1249,16 +1214,13 @@ const readStageEntries = ({
   }
   const expectedDefinitions = linuxServiceValues({
     root,
-    labels: inventory.map(({ label }) => label),
+    inventory,
     nodeBinary: renderInputs.nodeBinary,
     path: renderInputs.path,
     serviceUser: account,
     wrapper,
-    runnerCount,
-    runnerIdPrefix: recordedRunnerIdPrefix,
-    deployRole,
   });
-  for (const item of inventory) {
+  for (const item of inventory.entries) {
     const expected = renderServiceSystemdUnit(readFileSync(SYSTEMD_SERVICE_TEMPLATE, "utf8"), expectedDefinitions[item.label]);
     const entry = manifest.entries.find((candidate) => candidate.label === item.label);
     const normalizedExpected = withoutLegacySystemdRunnerCount(expected);
@@ -1277,8 +1239,7 @@ const readStageEntries = ({
   const sudoersEntry = manifest.auxiliaryEntries.find((entry) => entry.kind === "sudoers");
   if (readFileSync(sudoersEntry.stagedPath, "utf8") !== renderSystemdSudoers({
     serviceUser: account,
-    labels: inventory.map(({ label }) => label),
-    deployRole,
+    inventory,
     systemctlPath: manifest.systemctlPath,
   })) throw new Error("systemd-staged-sudoers-invalid");
   for (const entry of manifest.auxiliaryEntries.filter((candidate) => candidate.kind === "drop-in")) validateDropIn(entry, inventory);
@@ -1287,7 +1248,7 @@ const readStageEntries = ({
   if (retiredEntries.length > 0 && (manifest.reinstall !== true || !manifest.previousManifest)) {
     throw new Error("systemd-service-manifest-invalid");
   }
-  const desiredUnits = new Set(inventory.map(({ unitName }) => unitName));
+  const desiredUnits = new Set(inventory.entries.map(({ unitName }) => unitName));
   const previousRetiredCandidates = [
     ...(manifest.previousManifest?.entries ?? []),
     ...(manifest.previousManifest?.retiredEntries ?? []),
@@ -1485,7 +1446,7 @@ const serviceUnitEntry = ({ label, unit, stagedPath, targetPath, stagingRoot }) 
     mode: existed ? statSync(targetPath).mode & 0o777 : 0o644,
     originalUid: originalStatus?.uid ?? null,
     originalGid: originalStatus?.gid ?? null,
-    backupPath: existed ? join(stagingRoot, "backups", `${safeServiceFileName(label)}.service`) : null,
+    backupPath: existed ? join(stagingRoot, "backups", unitNameForLabel(safeServiceFileName(label))) : null,
     originalSha256: existed ? sha256(readFileSync(targetPath)) : null,
     installedSha256: sha256(readFileSync(stagedPath)),
   };
@@ -1506,7 +1467,7 @@ const wrapperEntry = ({ wrapperPath, stagedPath, stagingRoot }) => {
     originalGid: originalStatus?.gid ?? null,
     stagedUid: stagedStatus.uid,
     stagedGid: stagedStatus.gid,
-    backupPath: existed ? join(stagingRoot, "backups", "agentos-service-wrapper.mjs") : null,
+    backupPath: existed ? join(stagingRoot, "backups", SERVICE_WRAPPER_FILE_NAME) : null,
     originalSha256: existed ? sha256(readFileSync(wrapperPath)) : null,
     installedSha256: sha256(readFileSync(stagedPath)),
   };
@@ -1564,10 +1525,11 @@ const auxiliarySystemdEntries = ({ stagingRoot, unitDirectory, sudoersPath }) =>
   return entries;
 };
 
-const linuxServiceValues = ({ root, labels, nodeBinary, path, serviceUser, wrapper, runnerCount, runnerIdPrefix, deployRole }) => Object.freeze(Object.fromEntries(
-  labels.map((label) => {
+const linuxServiceValues = ({ root, inventory, nodeBinary, path, serviceUser, wrapper }) => Object.freeze(Object.fromEntries(
+  inventory.labels.map((label) => {
     const values = servicePlistValues({
       label,
+      inventory,
       nodeBinary,
       repositoryRoot: root,
       sharedRoot: join(root, "shared"),
@@ -1575,9 +1537,6 @@ const linuxServiceValues = ({ root, labels, nodeBinary, path, serviceUser, wrapp
       stderrPath: join(root, "shared", "logs", `${safeServiceFileName(label)}.stderr.log`),
       path,
       wrapperPath: wrapper,
-      runnerCount,
-      runnerIdPrefix,
-      deployRole,
     });
     return [label, Object.freeze({ ...values, serviceUser })];
   }),
@@ -1589,10 +1548,7 @@ const systemdStagePlan = ({
   gitBinary = null,
   path = null,
   serviceUser,
-  runnerCount = resolveRunnerCount(),
-  runnerIdPrefix = resolveRunnerIdPrefix(),
-  deployRole = resolveDeployRole(),
-  labels = inventoryForCount(runnerCount, runnerIdPrefix, deployRole).map(({ label }) => label),
+  inventory,
   stagingRoot,
   unitDirectory = SYSTEMD_UNIT_DIRECTORY,
   sudoersPath = SYSTEMD_SUDOERS_PATH,
@@ -1608,10 +1564,10 @@ const systemdStagePlan = ({
   const resolvedGit = gitBinary ? resolve(gitBinary) : resolvedNode;
   const controlledPath = path ?? controlledLaunchdPath({ nodeBinary: resolvedNode, gitBinary: resolvedGit });
   const account = resolveSystemdServiceUser({ serviceUser, platform: "linux", lookup: userLookup, execute });
-  const inventory = inventoryForCount(runnerCount, runnerIdPrefix, deployRole);
-  if (JSON.stringify(labels) !== JSON.stringify(inventory.map(({ label }) => label))) {
+  if (!Array.isArray(inventory?.entries) || inventory.entries.length === 0) {
     throw new Error("systemd-service-inventory-invalid");
   }
+  const { runnerCount, runnerIdPrefix, deployRole } = inventory;
   const wrapper = serviceWrapperPath(root);
   const resolvedUnitDirectory = resolve(unitDirectory);
   const resolvedSudoersPath = resolve(sudoersPath);
@@ -1651,20 +1607,18 @@ const systemdStagePlan = ({
   }
   const rendered = linuxServiceValues({
     root,
-    labels,
+    inventory,
     nodeBinary: resolvedNode,
     path: controlledPath,
     serviceUser: account,
     wrapper,
-    runnerCount,
-    runnerIdPrefix,
-    deployRole,
   });
-  const unitDefinitions = Object.freeze(Object.fromEntries(labels.map((label) => [
+  const unitDefinitions = Object.freeze(Object.fromEntries(inventory.labels.map((label) => [
     label,
     renderServiceSystemdUnit(readFileSync(SYSTEMD_SERVICE_TEMPLATE, "utf8"), rendered[label]),
   ])));
-  verifySystemdServiceDefinitions(unitDefinitions, labels, deployRole);
+  verifySystemdServiceDefinitions(unitDefinitions, inventory);
+  const unitPaths = inventory.entries.map(({ unitName }) => join(resolvedUnitDirectory, unitName));
   if (!apply) return Object.freeze({
     applied: false,
     reverted: false,
@@ -1674,13 +1628,13 @@ const systemdStagePlan = ({
     runnerIdPrefix,
     deployRole,
     serviceUser: account,
-    units: labels.map((label) => join(resolvedUnitDirectory, unitNameForLabel(label, inventory))),
+    units: unitPaths,
     wrapper,
-    entries: [wrapper, ...labels.map((label) => join(resolvedUnitDirectory, unitNameForLabel(label, inventory)))],
+    entries: [wrapper, ...unitPaths],
     rendered: unitDefinitions,
   });
-  const unitEntries = labels.map((label) => {
-    const target = join(resolvedUnitDirectory, unitNameForLabel(label, inventory));
+  const unitEntries = inventory.entries.map(({ label, unitName }) => {
+    const target = join(resolvedUnitDirectory, unitName);
     const owned = previousByPath.get(target);
     const currentContents = owned ? readFileSync(target, "utf8") : null;
     const matchesCanonical = owned
@@ -1689,7 +1643,7 @@ const systemdStagePlan = ({
     const contents = matchesCanonical ? currentContents : unitDefinitions[label];
     const staged = stageSystemdDefinition({
       stagingRoot: stageRoot,
-      relativePath: `units/${unitNameForLabel(label, inventory)}`,
+      relativePath: `units/${unitName}`,
       contents,
     });
     if (matchesCanonical) return { ...owned, stagedPath: staged, preserved: true };
@@ -1700,14 +1654,13 @@ const systemdStagePlan = ({
       previousInstalledSha256: owned.previousInstalledSha256 ?? owned.installedSha256,
       preserved: false,
     };
-    const entry = serviceUnitEntry({
+    return serviceUnitEntry({
       label,
-      unit: inventory.find((entry) => entry.label === label).unitName,
+      unit: unitName,
       stagedPath: staged,
       targetPath: target,
       stagingRoot: stageRoot,
     });
-    return entry;
   });
   // Stage the wrapper alongside units so a root stage can install the complete
   // manifest atomically. The target is intentionally outside /etc and remains
@@ -1716,7 +1669,7 @@ const systemdStagePlan = ({
   const wrapperTargetExists = existsSync(wrapper);
   const wrapperStagedPath = stageSystemdDefinition({
     stagingRoot: stageRoot,
-    relativePath: "wrapper/agentos-service-wrapper.mjs",
+    relativePath: `wrapper/${SERVICE_WRAPPER_FILE_NAME}`,
     contents: wrapperContents,
     mode: 0o755,
   });
@@ -1737,7 +1690,7 @@ const systemdStagePlan = ({
       && fileDigest(wrapper) !== wrapperManifestEntry.installedSha256 && !replaceExisting) {
     throw new Error(`launchd-service-wrapper-conflict:${wrapper}`);
   }
-  const sudoers = renderSystemdSudoers({ serviceUser: account, labels, deployRole, systemctlPath: "/bin/systemctl" });
+  const sudoers = renderSystemdSudoers({ serviceUser: account, inventory, systemctlPath: "/bin/systemctl" });
   const sudoersStaged = stageSystemdDefinition({
     stagingRoot: stageRoot,
     relativePath: "sudoers/anneal-service-control",
@@ -1845,6 +1798,7 @@ const systemdStagePlan = ({
     unitDirectory: resolvedUnitDirectory,
     serviceUser: account,
     runnerIdPrefix,
+    deployRole,
     units: unitEntries.map((entry) => entry.path),
     wrapper,
     entries: manifest.entries.map((entry) => entry.path),
@@ -1862,7 +1816,7 @@ export const installStagedSystemdServices = ({
   execute = execFileSync,
   serviceUser,
   environment = process.env,
-  deployRole = resolveDeployRole(environment),
+  inventory = resolveServiceInventory(environment),
   userLookup = null,
   visudoPath = null,
   chown = chownSync,
@@ -1882,8 +1836,7 @@ export const installStagedSystemdServices = ({
   const writeServiceManifest = (contents) => writeAtomic(path, contents, manifestMode, manifestOwnership, chown);
   const manifest = readJsonFile(path, "systemd-service-manifest-invalid");
   const recordedDeployRole = manifest?.renderInputs?.deployRole ?? DEFAULT_DEPLOY_ROLE;
-  if (recordedDeployRole !== deployRole) throw new Error("systemd-deploy-role-manifest-mismatch");
-  const runnerIdPrefix = resolveRunnerIdPrefix(environment);
+  if (recordedDeployRole !== inventory.deployRole) throw new Error("systemd-deploy-role-manifest-mismatch");
   const reason = "systemd-service-manifest-invalid";
   const recordedUnitDirectory = manifestStringField({ manifest, reason, manifestPath: path, field: "unitDirectory" });
   const recordedSudoersPath = manifestStringField({ manifest, reason, manifestPath: path, field: "sudoersPath" });
@@ -1896,8 +1849,8 @@ export const installStagedSystemdServices = ({
     unitDirectory: resolvedUnitDirectory,
     sudoersPath: resolvedSudoersPath,
     serviceUser,
-    runnerIdPrefix,
-    deployRole,
+    runnerIdPrefix: inventory.runnerIdPrefix,
+    deployRole: inventory.deployRole,
     userLookup,
     execute,
   });
@@ -1909,7 +1862,7 @@ export const installStagedSystemdServices = ({
     platform: "linux",
     staging: validated.stageRoot,
     unitDirectory: resolvedUnitDirectory,
-    units: validated.inventory.map(({ unitName }) => unitName),
+    units: validated.inventory.entries.map(({ unitName }) => unitName),
     entries: entries.map((entry) => entry.path),
   });
   for (const entry of entries) {
@@ -2070,7 +2023,7 @@ export const installStagedSystemdServices = ({
       unitDirectory: resolvedUnitDirectory,
       runnerIdPrefix: manifest.renderInputs?.runnerIdPrefix ?? "",
       deployRole: manifest.renderInputs?.deployRole ?? DEFAULT_DEPLOY_ROLE,
-      units: validated.inventory.map(({ unitName }) => unitName),
+      units: validated.inventory.entries.map(({ unitName }) => unitName),
       entries: entries.map((entry) => entry.path),
     });
   }
@@ -2122,7 +2075,7 @@ export const installStagedSystemdServices = ({
     platform: "linux",
     staging: validated.stageRoot,
     unitDirectory: resolvedUnitDirectory,
-    units: validated.inventory.map(({ unitName }) => unitName),
+    units: validated.inventory.entries.map(({ unitName }) => unitName),
     entries: entries.map((entry) => entry.path),
   });
 };
@@ -2152,8 +2105,8 @@ const installLinuxServices = (options = {}) => {
       unitDirectory: resolvedUnitDirectory,
       sudoersPath: resolvedSudoersPath,
       serviceUser: options.serviceUser,
-      runnerIdPrefix: resolveRunnerIdPrefix(options.environment ?? process.env),
-      deployRole: resolveDeployRole(options.environment ?? process.env),
+      runnerIdPrefix: options.inventory.runnerIdPrefix,
+      deployRole: options.inventory.deployRole,
       userLookup: options.userLookup,
       execute: options.execute ?? execFileSync,
     });
@@ -2178,9 +2131,9 @@ const installLinuxServices = (options = {}) => {
       platform: "linux",
       staging: validated.stageRoot,
       unitDirectory: resolvedUnitDirectory,
-      runnerIdPrefix: manifest.renderInputs?.runnerIdPrefix ?? "",
-      deployRole: manifest.renderInputs?.deployRole ?? DEFAULT_DEPLOY_ROLE,
-      units: validated.inventory.map(({ unitName }) => unitName),
+      runnerIdPrefix: validated.inventory.runnerIdPrefix,
+      deployRole: validated.inventory.deployRole,
+      units: validated.inventory.entries.map(({ unitName }) => unitName),
       entries: validated.entries.map((entry) => entry.path),
     });
   }
@@ -2221,21 +2174,26 @@ const validateServiceManifest = (manifest, repositoryRoot, manifestPath, deployR
       },
     ],
   });
+  // A manifest without renderInputs was written by the installer only while it
+  // rendered the default inventory, and the entry count is checked against the
+  // regenerated inventory below rather than being decoded from it.
   const renderInputs = validateManifestRenderInputs({
     manifest,
     reason,
     manifestPath,
-    fallbackRunnerCount: manifest.entries.length - 4,
+    fallbackRunnerCount: DEFAULT_RUNNER_COUNT,
   });
   const { runnerCount, runnerIdPrefix } = renderInputs;
   const recordedDeployRole = renderInputs.deployRole ?? DEFAULT_DEPLOY_ROLE;
   if (recordedDeployRole !== deployRole) throw new Error("launchd-deploy-role-manifest-mismatch");
   let inventory;
-  try { inventory = inventoryForCount(runnerCount, runnerIdPrefix, deployRole); } catch { invalidManifest(reason, manifestPath, "renderInputs"); }
-  if (manifest.entries.length !== inventory.length + 1) {
+  try {
+    inventory = generateServiceInventory({ runnerCount, runnerIdPrefix, deployRole });
+  } catch { invalidManifest(reason, manifestPath, "renderInputs"); }
+  if (manifest.entries.length !== inventory.entries.length + 1) {
     invalidManifest(reason, manifestPath, "entries");
   }
-  return { manifest, inventory, runnerCount, runnerIdPrefix, deployRole };
+  return { manifest, inventory };
 };
 
 const launchdServiceIsLoaded = ({ label, target, execute }) => {
@@ -2273,9 +2231,10 @@ export const installLaunchdServices = ({
   environment = process.env,
   execute = execFileSync,
 } = {}) => {
-  const deployRole = resolveDeployRole(environment);
-  const runnerCount = resolveRunnerCount(environment);
-  const runnerIdPrefix = resolveRunnerIdPrefix(environment);
+  // The one inventory this invocation installs, reverts or plans. Every
+  // definition, unit name, plist name and runner id below is read out of it.
+  const inventory = resolveServiceInventory(environment);
+  const { deployRole, runnerCount, runnerIdPrefix } = inventory;
   const platform = resolveServicePlatform();
   if (platform === "linux") return installLinuxServices({
     repositoryRoot,
@@ -2296,9 +2255,7 @@ export const installLaunchdServices = ({
     userLookup,
     effectiveUid,
     environment,
-    deployRole,
-    runnerCount,
-    runnerIdPrefix,
+    inventory,
     execute,
   });
   const callerUid = effectiveUid
@@ -2360,19 +2317,18 @@ export const installLaunchdServices = ({
   const resolvedGit = gitBinary ? resolve(gitBinary) : resolvedNode;
   const controlledPath = path ?? controlledLaunchdPath({ nodeBinary: resolvedNode, gitBinary: resolvedGit });
   const logPath = (label, stream) => join(logs, `${safeServiceFileName(label)}.${stream}.log`);
-  const inventory = inventoryForCount(runnerCount, runnerIdPrefix, deployRole);
-  const labels = inventory.map(({ label }) => label);
   const previous = existsSync(manifestPath)
     ? validateServiceManifest(
         readJsonFile(manifestPath, "launchd-service-manifest-invalid"), root, manifestPath, deployRole,
       )
     : null;
-  if (previous && previous.runnerIdPrefix !== runnerIdPrefix) {
+  if (previous && previous.inventory.runnerIdPrefix !== runnerIdPrefix) {
     throw new Error("launchd-runner-id-prefix-manifest-mismatch");
   }
-  const rendered = Object.freeze(Object.fromEntries(labels.map((label) => {
+  const rendered = Object.freeze(Object.fromEntries(inventory.entries.map(({ label, plistName }) => {
     const values = servicePlistValues({
       label,
+      inventory,
       nodeBinary: resolvedNode,
       repositoryRoot: root,
       sharedRoot,
@@ -2380,16 +2336,13 @@ export const installLaunchdServices = ({
       stderrPath: logPath(label, "stderr"),
       path: controlledPath,
       wrapperPath: wrapper,
-      runnerCount,
-      runnerIdPrefix,
-      deployRole,
     });
-    const destination = join(launchAgents, `${label}.plist`);
+    const destination = join(launchAgents, plistName);
     return [label, existsSync(destination) && replaceExisting
       ? renderMigratedServicePlist({ sourcePath: destination, values })
       : renderServiceLaunchdPlist(readFileSync(SERVICE_TEMPLATE, "utf8"), values)];
   })));
-  verifyServicePlistDefinitions(rendered, labels, deployRole);
+  verifyServicePlistDefinitions(rendered, inventory);
   const previousByPath = new Map(previous?.manifest.entries.map((entry) => [entry.path, entry]) ?? []);
   const wrapperSource = serviceWrapperSource(runnerIdPrefix, deployRole);
   const generatedWrapperEntry = {
@@ -2397,7 +2350,7 @@ export const installLaunchdServices = ({
     existed: existsSync(wrapper),
     mode: existsSync(wrapper) ? statSync(wrapper).mode & 0o777 : 0o755,
     backupPath: existsSync(wrapper)
-      ? join(root, SERVICE_INSTALL_ROOT, "backups", "agentos-service-wrapper.mjs")
+      ? join(root, SERVICE_INSTALL_ROOT, "backups", SERVICE_WRAPPER_FILE_NAME)
       : null,
     originalSha256: existsSync(wrapper) ? sha256(readFileSync(wrapper)) : null,
     installedSha256: sha256(readFileSync(wrapperSource)),
@@ -2414,8 +2367,8 @@ export const installLaunchdServices = ({
       }
     : generatedWrapperEntry];
   const changedOwnedLabels = [];
-  for (const label of labels) {
-    const destination = join(launchAgents, `${label}.plist`);
+  for (const { label, plistName } of inventory.entries) {
+    const destination = join(launchAgents, plistName);
     const owned = previousByPath.get(destination);
     const destinationExists = existsSync(destination);
     const currentContents = owned && destinationExists ? readFileSync(destination, "utf8") : null;
@@ -2504,7 +2457,7 @@ export const installLaunchdServices = ({
     schemaVersion: 1,
     repositoryRoot: root,
     entries: entries.map(({ contents: _contents, ...entry }) => entry),
-    ...((runnerCount === 10 && runnerIdPrefix === "" && deployRole === DEFAULT_DEPLOY_ROLE) ? {} : {
+    ...((runnerCount === DEFAULT_RUNNER_COUNT && runnerIdPrefix === "" && deployRole === DEFAULT_DEPLOY_ROLE) ? {} : {
       renderInputs: {
         nodeBinary: resolvedNode,
         path: controlledPath,
@@ -2716,7 +2669,7 @@ export const installLaunchd = (args, context = {}) => {
   const userHome = homedir();
   const launchAgents = join(userHome, "Library/LaunchAgents");
   const logs = join(userHome, "Library/Logs/Anneal");
-  const destination = join(launchAgents, `${LABEL}.plist`);
+  const destination = join(launchAgents, plistNameForLabel(LABEL));
   const nodeBinary = realpathSync(process.execPath);
   const gitBinary = requiredBinary("git");
   const npmBinary = requiredBinary("npm");
@@ -2880,8 +2833,8 @@ export const planSystemdAutoDeploy = ({
   verifySystemdAutoDeployDefinitions({ service, timer });
   const stage = resolve(stagingRoot ?? join(root, AUTO_DEPLOY_INSTALL_ROOT, "staging"));
   const targetRoot = resolve(unitDirectory);
-  const servicePath = join(targetRoot, `${LABEL}.service`);
-  const timerPath = join(targetRoot, `${LABEL}.timer`);
+  const servicePath = join(targetRoot, AUTO_DEPLOY_UNIT);
+  const timerPath = join(targetRoot, AUTO_DEPLOY_TIMER);
   if (!apply) return Object.freeze({
     applied: false,
     reverted: false,
@@ -2896,24 +2849,24 @@ export const planSystemdAutoDeploy = ({
   });
   const manifestPath = autoDeployManifestPath(root);
   if (existsSync(manifestPath)) throw new Error("systemd-auto-deploy-install-active");
-  stageSystemdDefinition({ stagingRoot: stage, relativePath: `${LABEL}.service`, contents: service });
-  stageSystemdDefinition({ stagingRoot: stage, relativePath: `${LABEL}.timer`, contents: timer });
+  stageSystemdDefinition({ stagingRoot: stage, relativePath: AUTO_DEPLOY_UNIT, contents: service });
+  stageSystemdDefinition({ stagingRoot: stage, relativePath: AUTO_DEPLOY_TIMER, contents: timer });
   const entries = [
     {
       ...autoDeployStageEntry({
         path: servicePath,
-        stagedPath: stagingFile(stage, `${LABEL}.service`),
-        backupPath: join(stage, "backups", `${LABEL}.service`),
+        stagedPath: stagingFile(stage, AUTO_DEPLOY_UNIT),
+        backupPath: join(stage, "backups", AUTO_DEPLOY_UNIT),
       }),
-      unit: `${LABEL}.service`,
+      unit: AUTO_DEPLOY_UNIT,
     },
     {
       ...autoDeployStageEntry({
         path: timerPath,
-        stagedPath: stagingFile(stage, `${LABEL}.timer`),
-        backupPath: join(stage, "backups", `${LABEL}.timer`),
+        stagedPath: stagingFile(stage, AUTO_DEPLOY_TIMER),
+        backupPath: join(stage, "backups", AUTO_DEPLOY_TIMER),
       }),
-      unit: `${LABEL}.timer`,
+      unit: AUTO_DEPLOY_TIMER,
     },
   ];
   for (const entry of entries) {
@@ -2998,8 +2951,8 @@ export const installStagedSystemdAutoDeploy = ({
   const targetSudoers = resolve(sudoersPath ?? manifest.sudoersPath ?? SYSTEMD_SUDOERS_PATH);
   if (entries.length !== 2 || manifest.auxiliaryEntries.length !== 0) throw new Error("systemd-auto-deploy-manifest-invalid");
   const expectedEntries = [
-    { kind: "auto-deploy", unit: `${LABEL}.service`, path: join(targetRoot, `${LABEL}.service`), stagedPath: join(expectedStage, `${LABEL}.service`) },
-    { kind: "auto-deploy", unit: `${LABEL}.timer`, path: join(targetRoot, `${LABEL}.timer`), stagedPath: join(expectedStage, `${LABEL}.timer`) },
+    { kind: "auto-deploy", unit: AUTO_DEPLOY_UNIT, path: join(targetRoot, AUTO_DEPLOY_UNIT), stagedPath: join(expectedStage, AUTO_DEPLOY_UNIT) },
+    { kind: "auto-deploy", unit: AUTO_DEPLOY_TIMER, path: join(targetRoot, AUTO_DEPLOY_TIMER), stagedPath: join(expectedStage, AUTO_DEPLOY_TIMER) },
   ];
   expectedEntries.forEach((expected, index) => assertExactEntry(entries[index], expected, "systemd-auto-deploy-manifest-invalid"));
   for (const entry of entries) {
@@ -3014,8 +2967,8 @@ export const installStagedSystemdAutoDeploy = ({
   const values = autoDeployDefinitionValues({ root, serviceUser: account, deployRole, ...manifest.renderInputs });
   const expectedService = renderAutoDeploySystemdUnit(readFileSync(SYSTEMD_AUTO_DEPLOY_TEMPLATE, "utf8"), values);
   const expectedTimer = renderAutoDeploySystemdTimer(readFileSync(SYSTEMD_AUTO_DEPLOY_TIMER_TEMPLATE, "utf8"));
-  if (readFileSync(entries[0].stagedPath, "utf8") !== expectedService) throw new Error("systemd-staged-unit-invalid:com.agentos.auto-deploy.service");
-  if (readFileSync(entries[1].stagedPath, "utf8") !== expectedTimer) throw new Error("systemd-staged-unit-invalid:com.agentos.auto-deploy.timer");
+  if (readFileSync(entries[0].stagedPath, "utf8") !== expectedService) throw new Error(`systemd-staged-unit-invalid:${AUTO_DEPLOY_UNIT}`);
+  if (readFileSync(entries[1].stagedPath, "utf8") !== expectedTimer) throw new Error(`systemd-staged-unit-invalid:${AUTO_DEPLOY_TIMER}`);
   if (!apply) return Object.freeze({
     applied: false,
     reverted: false,
@@ -3058,7 +3011,7 @@ export const installStagedSystemdAutoDeploy = ({
       chown,
     });
     runSystemctl({ systemctlPath: systemctl, args: ["daemon-reload"], execute });
-    runSystemctl({ systemctlPath: systemctl, args: ["enable", "--now", `${LABEL}.timer`], unit: `${LABEL}.timer`, execute });
+    runSystemctl({ systemctlPath: systemctl, args: ["enable", "--now", AUTO_DEPLOY_TIMER], unit: AUTO_DEPLOY_TIMER, execute });
     return Object.freeze({
       applied: true, reverted: false, platform: "linux", staging: expectedStage,
       unitDirectory: targetRoot, deployRole, units: entries.map((entry) => entry.unit), entries: entries.map((entry) => entry.path),
