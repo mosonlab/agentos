@@ -766,7 +766,7 @@ export const mergeTailRepairAssignee = async (
       templateId: input.templateId,
       templateStep: { outputKind: "fixed-implementation" },
     },
-    select: { assigneeAgent: { select: { id: true, name: true } } },
+    select: { id: true, assigneeAgent: { select: { id: true, name: true } } },
   });
   const bound = fixTask?.assigneeAgent;
   // The chain already staffed this step, so its Agent is addressed by id: a
@@ -775,7 +775,9 @@ export const mergeTailRepairAssignee = async (
     ? { kind: "agent", agentId: bound.id, label: bound.name }
     : {
       kind: "unstaffed",
-      reason: `chain ${input.chainId ?? "(none)"} has no fixed-implementation step to staff the ${input.repairKind} repair`,
+      reason: fixTask
+        ? `chain ${input.chainId ?? "(none)"} fixed-implementation task ${fixTask.id} staffs no Agent for the ${input.repairKind} repair`
+        : `chain ${input.chainId ?? "(none)"} has no fixed-implementation step to staff the ${input.repairKind} repair`,
     };
 };
 

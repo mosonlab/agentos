@@ -114,7 +114,7 @@ const FAST_LANE = profile({
   isDefault: true,
   entries: [
     { outputKind: "implementation", assigneeAgentId: SENIOR.id, include: null },
-    // Saved before the control plane owned that step; the editor drops it.
+    // Saved before the control plane owned that step; the next save must surface the refusal.
     { outputKind: "merge-authorization", assigneeAgentId: SENIOR.id, include: null },
   ],
 });
@@ -414,9 +414,12 @@ for (const locale of ["en", "zh"] as const) {
   });
 }
 
-test("saving sends PUT with the profile name and exactly the entries the operator staffed", async () => {
+test("saving preserves a legacy readiness assignment and shows the refusal", async () => {
   const { page, saves } = await mountEditor("en", {
-    "PUT /staffing-profiles/p-fast": { profile: FAST_LANE, warnings: [] },
+    "PUT /staffing-profiles/p-fast": new Response(
+      JSON.stringify({ code: "staffing_profile_step_control_plane", error: "Step Merge readiness (merge-authorization) is executed by the control plane and staffs no agent; remove its entry from this profile", outputKind: "merge-authorization" }),
+      { status: 400, headers: { "Content-Type": "application/json" } },
+    ),
   });
   try {
     await selectIn(page, rowFor(page, "blind-findings"), SENIOR.id);
@@ -433,9 +436,11 @@ test("saving sends PUT with the profile name and exactly the entries the operato
         // so an omitted kind means "the template's own binding stands".
         { outputKind: "implementation", assigneeAgentId: SENIOR.id, include: null },
         { outputKind: "blind-findings", assigneeAgentId: SENIOR.id, include: false },
+        { outputKind: "merge-authorization", assigneeAgentId: SENIOR.id, include: null },
       ],
     });
-    assert.equal(saves(), 1);
+    assert.equal(saves(), 0);
+    assert.match(page.container.textContent ?? "", /400 Step Merge readiness.*remove its entry/u);
   } finally {
     await page.dispose();
   }

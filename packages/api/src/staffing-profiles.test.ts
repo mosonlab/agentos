@@ -59,3 +59,11 @@ test("the canonical plan states no assignee for a control-plane step", () => {
     ],
   );
 });
+
+test("control-plane ownership takes precedence over HUMAN assignee type", () => {
+  const readiness = { ...READINESS, assigneeType: AssigneeType.HUMAN };
+  const refusal = staffingAssigneeRefusal("agent-1", readiness, AGENTS, CONTEXT);
+  assert.equal(refusal?.code, "staffing_profile_step_control_plane");
+  assert.match(refusal?.message ?? "", /Merge readiness.*remove its entry/u);
+  assert.equal(staffingAssigneeRefusal(null, readiness, AGENTS, CONTEXT), null);
+});

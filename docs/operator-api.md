@@ -1269,7 +1269,9 @@ executes; the message names the step to remove, and an entry with
 merge-execution step binds only `merge-integrator`, and `merge-integrator` binds
 nothing else), and `staffing_profile_compound_implementation` (the compound
 implementation root requires an assignee whose effective runner is Codex and
-whose model is a `gpt-*` one). All nine are `422 Unprocessable Content`.
+whose model is a `gpt-*` one). `staffing_profile_step_control_plane` returns `400 Bad Request` with the same
+`{ error, code, outputKind }` body shape as `staffing_profile_step_not_agent`.
+The other eight return `422 Unprocessable Content`.
 
 A profile saved before `staffing_profile_step_control_plane` existed is not
 migrated: it keeps its stored entry until the next write, which is refused with
@@ -1306,7 +1308,7 @@ curl "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/staffing-profil
 - Returns `201 Created` with `{ "profile": <profile>, "warnings": [...] }`.
 - Refusals: `404 Not Found` with code `staffing_profile_template_not_found`;
   `409 Conflict` with code `staffing_profile_name_taken` when the template
-  already has a profile with that name; and the `422` validation codes above.
+  already has a profile with that name; and the `400` and `422` validation codes above.
 
 ```sh
 curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/staffing-profiles" \
@@ -1324,7 +1326,7 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/staffin
 - Default membership is not part of this body; `PATCH` owns that transition.
 - Returns `200 OK` with `{ "profile": <profile>, "warnings": [...] }`.
 - Refusals: `404 Not Found` with code `staffing_profile_not_found`;
-  `409 Conflict` with code `staffing_profile_name_taken`; and the `422`
+  `409 Conflict` with code `staffing_profile_name_taken`; and the `400` and `422`
   validation codes above.
 
 ```sh
@@ -1701,7 +1703,7 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/chain/resume" \
   - `merge_tail_repair_already_open`: a repair attempt for this recovery
     `sourceRunId` is already present. This takes precedence over the aggregate
     having already moved to `REPAIRING`.
-  - `merge_tail_repair_unstaffed`: the Chain has no fixed-implementation step,
+  - `merge_tail_repair_unstaffed`: the Chain has no fixed-implementation step or that step staffs no Agent,
     so no Agent it staffed owns this repair. Nothing is substituted for the
     missing step.
   - `merge_tail_repair_creation_failed`: the fixed-implementation agent is
@@ -1723,14 +1725,17 @@ is written to the Inbox. Its `failureReason` is exactly one of these shapes:
 - `semantic regression FAIL on chain head <sha> after N automatic repair attempts`
 - `merge gate FAIL on chain head <sha> after N automatic repair attempts`
 - `chain <chainId> has no fixed-implementation step to staff the <review-fix|gate-fix> repair`
+- `chain <chainId> fixed-implementation task <taskId> staffs no Agent for the <review-fix|gate-fix> repair`
 
-The last shape is not a repair ceiling: the Chain's template has no
+The last two shapes are not repair ceilings. For the missing-step shape, the Chain's template has no
 fixed-implementation step, so no Agent it staffed owns the repair. The tail
 stops and writes the stop notice rather than assigning the work to a canonical
 role nobody configured for this Chain. Instantiate the Chain from a template
-that has the step, or carry the branch forward as below.
+that has the step, or carry the branch forward as below. For the unbound-task
+shape, the step exists but its named task staffs no Agent; instantiate with an
+Agent bound to that step, or carry the branch forward as below.
 
-These are the repair ceiling, not an API defect. From this state,
+For a repair ceiling stop,
 `POST /tasks/:taskId/retry` on the regression task opens a Run whose
 `regression-repair-handoff` claim fails at claim time as `handoff-invalid` with
 `regression repair handoff is invalid: no successful review-fix result binds <head> to <base>`

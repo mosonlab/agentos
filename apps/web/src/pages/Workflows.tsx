@@ -83,10 +83,8 @@ export const draftOf = (template: TaskTemplate, profile: StaffingProfile): Draft
  */
 export const entriesOf = (template: TaskTemplate, draft: Draft): StaffingProfileEntryInput[] =>
   template.steps.flatMap((step) => {
-    // A step the control plane runs carries no opinion at all: the writer
-    // refuses one, and a profile saved before that rule would otherwise be
-    // unsaveable from here.
-    if (step.executionOwner === "control-plane") return [];
+    // Preserve legacy assignments so the writer refuses them visibly. Only an
+    // explicit reset may replace them with the canonical null plan.
     const held = draft.entries[step.outputKind];
     const assigneeAgentId = held?.assigneeAgentId ?? "";
     const include = step.optional ? held?.include ?? true : null;
