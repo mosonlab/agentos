@@ -119,8 +119,11 @@ target="$(git ls-remote --exit-code "$DEPLOY_SOURCE_REMOTE" refs/heads/main | aw
 "$DEPLOY_NODE_BINARY" current/scripts/deploy/build-release-artifact.mjs "$target"
 ```
 
-The final line is `RELEASE-ARTIFACT` followed by release name, commit, and
-digest. An existing exact artifact is reverified and reused. Missing output,
+The final line is `RELEASE-ARTIFACT` followed by release name, commit, digest,
+and the number of source clone attempts. A network-shaped clone failure (TLS
+handshake, connection reset, unresolved host) is retried up to three times with
+backoff; any other clone failure, and an exhausted retry, fail as
+`release-artifact-source-unavailable` with no change to escalation. An existing exact artifact is reverified and reused. Missing output,
 wrong stamps, excluded secret-shaped paths, ambiguous identities, and digest
 drift are named failures; the activator has no fallback for them.
 
