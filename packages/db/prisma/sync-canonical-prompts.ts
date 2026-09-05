@@ -40,9 +40,11 @@ import {
 
 const SENIOR_DEV_SOL_AGENT_NAME = "senior-dev-sol";
 const SENIOR_DEV_OPUS_AGENT_NAME = "senior-dev-opus";
+const SENIOR_DEV_ASTRA_LOW_AGENT_NAME = "senior-dev-astra-low";
 
-// Canonical roles that no template step binds, so ordinary synchronization
-// never creates them: each is created once from an active source Agent row.
+// Canonical roles added after the canonical project was seeded, so ordinary
+// synchronization never creates them: each is created once from an active
+// source Agent row (copying its environment, tools, and repo access).
 const SPECIAL_CANONICAL_AGENTS: readonly {
   name: string;
   source: string;
@@ -52,6 +54,7 @@ const SPECIAL_CANONICAL_AGENTS: readonly {
   { name: SPEC_REVALIDATOR_AGENT_NAME, source: "review-coordinator-sol", permissions: RepoPermission.GIT_READ },
   { name: SENIOR_DEV_SOL_AGENT_NAME, source: "senior-dev", permissions: null },
   { name: SENIOR_DEV_OPUS_AGENT_NAME, source: "senior-dev", permissions: null },
+  { name: SENIOR_DEV_ASTRA_LOW_AGENT_NAME, source: "senior-dev", permissions: null },
 ];
 
 const runtimeConfigRefusal = (agent: { model: string; runnerPreference: RunnerPreference }): string | null => {

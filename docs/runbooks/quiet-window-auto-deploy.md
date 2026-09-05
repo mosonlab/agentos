@@ -495,7 +495,33 @@ launchctl kickstart -k "gui/$(id -u)/com.agentos.auto-deploy"
 ```
 
 The second command is valid only after a migration-timeout hold has ended as
-described above. Signals before activation enter the normal `FAILED` path and
+described above.
+
+### Canonical prompt sync refused by an archived Agent
+
+`reason=canonical-prompt-sync-refused` with the detail
+`Agent <name> (<id>) is archived; sync will not resurrect it` means a role
+that main now treats as canonical shares its name with an Agent the operator
+archived earlier in that project. Sync refuses by design: resurrecting an
+archived Agent would silently bring back its old prompt, model, and grants.
+
+Repair through the operator API, not SQL. Rename the archived Agent out of
+the way so that sync creates the canonical one fresh from its source role:
+
+```sh
+curl -X PATCH "$BASE_URL/agents/$AGENT_ID" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"<name>-legacy-<yyyymmdd>"}'
+```
+
+If that PATCH answers `Model <m> requires <runner>, but this Agent stores
+<other>`, the archived row carries a model/runner pair the current catalog
+rejects; include a matching `runnerPreference` in the same request. Do not
+unarchive instead: an archived row whose `title` or runtime configuration
+drifted from the canonical Markdown is refused again one step later as
+`differs from canonical Markdown structure`. Then clear the escalation as
+above; the next tick creates the Agent, logs `createdAgents` for the project,
+and continues to publication. Signals before activation enter the normal `FAILED` path and
 remove the operation workspace. Signals after activation perform pointer
 recovery before releasing the barrier. An uncatchable stale process owner is
 reclaimed once and escalated instead of starting an unrecorded second

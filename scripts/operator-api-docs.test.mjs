@@ -88,7 +88,7 @@ test("POST /projects documents bootstrap rows, canonical roles/template, and slu
     "senior-dev-luna",
     "review-coordinator-sol",
     "review-coordinator-opus",
-    "senior-dev",
+    "senior-dev-astra-low",
   ]) {
     assert.match(text, new RegExp("`" + role + "`", "u"));
   }
@@ -189,7 +189,7 @@ test("Inbox list and summary document shared Project-plus-global scope", () => {
 
 test("the add-project runbook and public links cover A1 pull-request onboarding", () => {
   assert.match(addProjectRunbook, /POST "\$BASE_URL\/projects"/u);
-  assert.match(addProjectRunbook, /`local` Environment[\s\S]*four[\s\S]*`senior-dev-luna`[\s\S]*`review-coordinator-sol`[\s\S]*`review-coordinator-opus`[\s\S]*`senior-dev`/u);
+  assert.match(addProjectRunbook, /`local` Environment[\s\S]*four[\s\S]*`senior-dev-luna`[\s\S]*`review-coordinator-sol`[\s\S]*`review-coordinator-opus`[\s\S]*`senior-dev-astra-low`/u);
   assert.match(addProjectRunbook, /`pr-engineer-workflow`/u);
   assert.match(addProjectRunbook, /POST "\$BASE_URL\/projects\/\$PROJECT_ID\/repos"/u);
   assert.match(addProjectRunbook, /"grantAgents":true/u);

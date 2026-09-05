@@ -72,7 +72,7 @@ const partialRoleNames = [
   "senior-dev-luna",
   "review-coordinator-sol",
   "review-coordinator-opus",
-  "senior-dev",
+  "senior-dev-astra-low",
 ] as const;
 
 type ProjectFixture = {
@@ -261,7 +261,7 @@ test("--project rejects every canonical Agent field drift with project and Agent
       name: "collaborators",
       apply: async (fixture) => {
         const agent = fixture.agents.get("senior-dev-luna")!;
-        const allowed = fixture.agents.get("senior-dev")!;
+        const allowed = fixture.agents.get("senior-dev-astra-low")!;
         await prisma.agentCollaboration.create({
           data: { agentId: agent.id, allowedAgentId: allowed.id, projectId: fixture.id },
         });
@@ -423,7 +423,7 @@ test("--project rejects every canonical template step field with template/step i
     { name: "agent", apply: async (fixture, step) => {
       await prisma.taskTemplateStep.update({
         where: { id: step.id },
-        data: { assigneeAgentId: fixture.agents.get("senior-dev")!.id },
+        data: { assigneeAgentId: fixture.agents.get("senior-dev-astra-low")!.id },
       });
     } },
     { name: "assigneeType", apply: async (_fixture, step) => {
@@ -506,7 +506,7 @@ test("--project refuses the differences canonical sync would adopt", async () =>
 test("default verification keeps the complete-inventory requirement and success sentence", async () => {
   const verified = verify();
   assert.equal(verified.status, 0, verified.output);
-  assert.match(verified.output, /Agent\/template contract verified for 18 active agents and 24 steps across 3 templates\./u);
+  assert.match(verified.output, /Agent\/template contract verified for 19 active agents and 24 steps across 3 templates\./u);
 
   const canonical = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
   const customized = await prisma.agent.findUniqueOrThrow({

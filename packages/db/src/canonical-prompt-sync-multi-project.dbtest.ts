@@ -263,6 +263,12 @@ const downgradeDirectToHistoricalSevenStep = async (projectId: string): Promise<
       },
     });
   }
+  // The retired seven-step graph still bound its review-fix step to senior-dev.
+  const seniorDev = await prisma.agent.findUniqueOrThrow({ where: { projectId_name: { projectId, name: "senior-dev" } } });
+  await prisma.taskTemplateStep.updateMany({
+    where: { taskTemplateId: template.id, outputKind: "fixed-implementation" },
+    data: { assigneeAgentId: seniorDev.id },
+  });
 };
 
 before(async () => {
@@ -955,6 +961,7 @@ test("sync refusal classes include every available Project and object identifier
 test("summary reports every Project, nested canonical keys, lexical slugs, and field-wise totals", async (t) => {
   const active = await createProject(`aaa-a2-summary-${randomBytes(4).toString("hex")}`);
   const activeNames = new Set([
+    "senior-dev",
     ...await templateAssigneeNames("pr-engineer-workflow"),
     ...await templateAssigneeNames("compound-engineer-workflow"),
   ]);

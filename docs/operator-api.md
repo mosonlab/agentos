@@ -168,7 +168,7 @@ curl "$BASE_URL/projects" -H "Authorization: Bearer $OPERATOR_TOKEN"
 - A successful request creates the Project and, in the same transaction, one
   `local` Environment with `networking` `OPEN` and `allowedHosts` `[]`, four
   Agents (`senior-dev-luna`, `review-coordinator-sol`,
-  `review-coordinator-opus`, and `senior-dev`) bound to that Environment, and
+  `review-coordinator-opus`, and `senior-dev-astra-low`) bound to that Environment, and
   the canonical `pr-engineer-workflow` TaskTemplate with its four steps.
   The returned Project read shape includes `specGateDefault`,
   `mergeGateDefault`, and `skipOptionalSteps`, all `false` for a newly created
