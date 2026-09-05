@@ -59,7 +59,7 @@ the CLI vendor.
 
 | Provider runtime | Status | Evidence boundary |
 | --- | --- | --- |
-| Codex CLI | **Verified adapter; model access Pending smoke** | Startup preflight checks the installed version, the exact `exec`/resume flags and stdin/JSON protocol Anneal uses, and login status; its capability report is bound to the starter model `gpt-5.6-sol:medium`. OpenAI publishes no minimum CLI semver for this combination, so compatibility is capability-based rather than an invented version floor; 0.148.0 is the last version recorded as compatible. Entitlement still requires the deterministic smoke task. |
+| Codex CLI | **Verified adapter; model access Pending smoke** | Startup preflight checks the installed version, the exact `exec`/resume flags and stdin/JSON protocol Anneal uses, and login status; its capability report is bound to the starter model `gpt-5.6-sol:medium`. OpenAI publishes no minimum CLI semver for this combination, so compatibility is capability-based rather than an invented version floor; 0.153.4 is the last version recorded as compatible. Entitlement still requires the deterministic smoke task. |
 | Claude Code | **Verified** / **Maintainer-verified** | Adapter and runtime are verified. Claude Pro/Max subscription authentication is maintainer-verified on macOS Apple Silicon. |
 | Pi | **Verified** | Adapter/runtime and subscription authentication path are verified. Pi authenticates through the Codex login. |
 

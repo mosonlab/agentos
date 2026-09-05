@@ -253,7 +253,7 @@ dispatch, and archival. The board columns mean:
 | Done | A finished task or chain step. |
 
 An operator can stop and park a running chain step, returning it to Backlog as
-a parked step. Resume with **Start now** or **Recover parked step**, not ordinary
+a parked step. Resume with **Start next step** or **Recover parked step**, not ordinary
 card dispatch.
 
 The operator owns Backlog and Todo transitions and marking HUMAN tasks Done.

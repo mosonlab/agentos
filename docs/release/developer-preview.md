@@ -245,7 +245,7 @@ path or set `RUNNER_PATH` in `.env`.
 The starter agent uses `gpt-5.6-sol:medium`. A green startup preflight proves
 that the Codex CLI exists, exposes the `exec`/resume flags and stdin/JSON
 protocol Anneal uses, and reports a signed-in session. Its capability report is
-bound to that starter model; version 0.148.0 is the recorded compatible CLI. The
+bound to that starter model; version 0.153.4 is the recorded compatible CLI. The
 preflight does not spend a model turn, so the deterministic smoke task remains
 the first entitlement and end-to-end model-access check.
 

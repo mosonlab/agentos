@@ -7,6 +7,14 @@ const changes = (...entries) => Buffer.from(`${entries.flat().join("\0")}\0`);
 
 test("modified allowlisted prose selects docs-only", () => {
   assert.equal(classifyDiff({ nameStatus: changes("M", "AGENTS.md") }), "docs-only");
+  for (const path of [
+    "SECURITY.md",
+    "THIRD_PARTY_NOTICES.md",
+    "docs/BRIEF-TEMPLATE.md",
+    "docs/public-snapshot.md",
+  ]) {
+    assert.equal(classifyDiff({ nameStatus: changes("M", path) }), "docs-only", path);
+  }
   assert.equal(
     classifyDiff({
       nameStatus: changes(
