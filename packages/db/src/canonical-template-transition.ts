@@ -570,6 +570,23 @@ const registeredGenerations = (canonicalName: string): readonly LegacyTemplateGe
     : null;
 
 /**
+ * Seed-era rename identities predate the closed structural transition contract.
+ * Seed still authenticates those predecessor graphs with its historical
+ * predicates. Register their names here without granting sync new structural
+ * rollover authority or inventing shapes for their retired output protocols.
+ */
+const SEED_LEGACY_TEMPLATE_MARKERS = {
+  "compound-engineer-workflow": ["10", "9", "human-12", "regression-first-13"],
+  "direct-engineer-workflow": ["human-6"],
+  [PR_TEMPLATE_NAME]: [],
+} as const satisfies Readonly<Record<CanonicalTemplateRegistryName, readonly string[]>>;
+
+const registeredMarkers = (canonicalName: CanonicalTemplateRegistryName): readonly string[] => [
+  ...LEGACY_TEMPLATE_GENERATIONS[canonicalName].map(({ marker }) => marker),
+  ...SEED_LEGACY_TEMPLATE_MARKERS[canonicalName],
+];
+
+/**
  * Resolve a current or registered retired canonical template name through the
  * registry. Legacy names include a row id after the generation marker; a bare
  * prefix is not an identity minted by `legacyTemplateName`.
@@ -577,10 +594,10 @@ const registeredGenerations = (canonicalName: string): readonly LegacyTemplateGe
 export const canonicalTemplateIdentity = (templateName: string): CanonicalTemplateIdentity | null => {
   for (const canonicalName of Object.keys(LEGACY_TEMPLATE_GENERATIONS) as CanonicalTemplateRegistryName[]) {
     if (templateName === canonicalName) return { canonicalName, generation: null };
-    for (const generation of LEGACY_TEMPLATE_GENERATIONS[canonicalName]) {
-      const prefix = `${canonicalName}-legacy-${generation.marker}-`;
+    for (const marker of registeredMarkers(canonicalName)) {
+      const prefix = `${canonicalName}-legacy-${marker}-`;
       if (templateName.startsWith(prefix) && templateName.length > prefix.length) {
-        return { canonicalName, generation: generation.marker };
+        return { canonicalName, generation: marker };
       }
     }
   }
@@ -648,8 +665,34 @@ export const legacyGenerationMarkerForTemplateName = (templateName: string): str
  * like `-legacy-v1` are already taken by older graphs, so each retired
  * generation needs an identity of its own to roll over onto.
  */
-export const legacyTemplateName = (templateName: string, marker: string, templateId: string): string =>
-  `${templateName}-legacy-${marker}-${templateId}`;
+export const legacyTemplateName = (templateName: string, marker: string, templateId: string): string => {
+  if (!Object.hasOwn(LEGACY_TEMPLATE_GENERATIONS, templateName)
+    || !registeredMarkers(templateName as CanonicalTemplateRegistryName).includes(marker)) {
+    throw new Error(`Unregistered legacy template generation: ${templateName} / ${marker}`);
+  }
+  if (templateId.length === 0) throw new Error("A legacy template name requires a row id");
+  return `${templateName}-legacy-${marker}-${templateId}`;
+};
+
+/**
+ * Seed rollover keeps the historical template row and its step ids intact so
+ * already-materialized tasks retain their runtime contract. The template id in
+ * this marker makes the rename deterministic and collision-free on retries.
+ */
+export const legacyTenStepTemplateName = (templateId: string): string =>
+  legacyTemplateName("compound-engineer-workflow", "10", templateId);
+
+export const legacyNineStepTemplateName = (templateId: string): string =>
+  legacyTemplateName("compound-engineer-workflow", "9", templateId);
+
+export const legacyHumanTwelveStepTemplateName = (templateId: string): string =>
+  legacyTemplateName("compound-engineer-workflow", "human-12", templateId);
+
+export const legacyRegressionFirstThirteenStepTemplateName = (templateId: string): string =>
+  legacyTemplateName("compound-engineer-workflow", "regression-first-13", templateId);
+
+export const legacyHumanSixStepTemplateName = (templateId: string): string =>
+  legacyTemplateName("direct-engineer-workflow", "human-6", templateId);
 
 /**
  * A quiescent chain may move under a legacy template name without changing any

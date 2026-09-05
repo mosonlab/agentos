@@ -10,8 +10,15 @@
  * them is a second thing to get wrong.
  */
 
-import { legacyTemplateName } from "./canonical-template-transition.js";
 import { stepRole } from "./step-role.js";
+
+// Preserve existing consumers while the transition registry owns name minting.
+export {
+  legacyTenStepTemplateName,
+  legacyNineStepTemplateName,
+  legacyHumanTwelveStepTemplateName,
+  legacyRegressionFirstThirteenStepTemplateName,
+} from "./canonical-template-transition.js";
 
 export { stepGeneration, stepRole, type StepRole, type TemplateStepLike } from "./step-role.js";
 
@@ -54,23 +61,6 @@ export const LEGACY_INTEGRATOR_TEMPLATE_NAME = `${INTEGRATOR_TEMPLATE_NAME}-lega
 export const LEGACY_DIRECT_INTEGRATOR_TEMPLATE_NAME = `${DIRECT_INTEGRATOR_TEMPLATE_NAME}-legacy-v1`;
 /** Sentinel model. `catalogRunnerForModel` returns null for it, so no runner/model assertion fires. */
 export const INTEGRATOR_SENTINEL_MODEL = "mechanical/merge-executor-v1";
-
-/**
- * Seed rollover keeps the historical template row and its step ids intact so
- * already-materialized tasks retain their runtime contract. The template id in
- * this marker makes the rename deterministic and collision-free on retries.
- */
-export const legacyTenStepTemplateName = (templateId: string): string =>
-  legacyTemplateName(INTEGRATOR_TEMPLATE_NAME, "10", templateId);
-
-export const legacyNineStepTemplateName = (templateId: string): string =>
-  legacyTemplateName(INTEGRATOR_TEMPLATE_NAME, "9", templateId);
-
-export const legacyHumanTwelveStepTemplateName = (templateId: string): string =>
-  legacyTemplateName(INTEGRATOR_TEMPLATE_NAME, "human-12", templateId);
-
-export const legacyRegressionFirstThirteenStepTemplateName = (templateId: string): string =>
-  legacyTemplateName(INTEGRATOR_TEMPLATE_NAME, "regression-first-13", templateId);
 
 // ---------------------------------------------------------------------------
 // §D-P4 — the bidirectional binding invariant
