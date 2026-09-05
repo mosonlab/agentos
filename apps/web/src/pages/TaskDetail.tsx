@@ -8,11 +8,11 @@ import { Link } from "../lib/router";
 import { fatal } from "../lib/poll-state";
 import { isRegressionStep } from "../lib/repair-subtimeline";
 import { partitionTaskPrompt } from "../lib/task-prompt";
-import type { Chain, ChainStep, Run, TaskActivity, TaskDetail, TaskStartability, TaskStepOutput, TaskStatus } from "../lib/types";
+import type { Agent, Chain, ChainStep, Run, TaskActivity, TaskDetail, TaskStartability, TaskStepOutput, TaskStatus } from "../lib/types";
 import { supportsCodexServiceTier } from "../lib/models";
 import { cn } from "../lib/utils";
 import { IconArchive, IconArrowLeft, IconChevron, IconRefresh, IconSend } from "../components/icons";
-import { ChainList } from "../components/chain-list";
+import { ChainList, ReassignSelect } from "../components/chain-list";
 import { RunLine } from "../components/run-line";
 import {
   BACK_LINK, COUNT, DETAIL_HEAD, DETAIL_HEAD_H1, MSG_CARD, MSG_HEAD, MSG_TIME, ROW, STACK,
@@ -433,6 +433,9 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
     regressionTaskId === null || regressionTaskId === taskId ? null : `/tasks/${regressionTaskId}/activity`,
   );
   const repairActivities = regressionTaskId === taskId ? activity : auxiliaryRepairActivities;
+  // Staffing choices change on the Agents page, not here, so this rides the
+  // slowest cadence on the page: it exists to fill one picker.
+  const agents = usePoll<Agent[]>(task === null ? null : `/projects/${task.projectId}/agents`, 30_000);
   const [expanded, setExpanded] = useState<string | null>(null);
   // Deliberately not persisted: the collapsed default is the point.
   const [configurationShown, setConfigurationShown] = useState(false);
@@ -502,6 +505,15 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
       }
     });
   };
+  /** Restaffing, for this Task or for any Step of its Chain. The route is the
+   *  authority: it answers 409 while a Run is live, and that refusal reaches the
+   *  operator through the page's existing action-error notice. */
+  const reassign = (targetTaskId: string, assigneeAgentId: string): Promise<boolean> => run(async () => {
+    await api.patch(`/tasks/${targetTaskId}`, { assigneeAgentId });
+    reload();
+    chain.reload();
+    startability.reload();
+  });
   const setArchived = (archived: boolean): void => {
     void run(async () => {
       await api.post(`/tasks/${taskId}/${archived ? "archive" : "unarchive"}`, {});
@@ -524,6 +536,14 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
   const newestBranchUrl = branchUrl(task.repo?.remoteUrl, newestBranch);
   const pullRequestUrl = newest?.pullRequestUrl ?? null;
   const strandedSalvageBranches = task.strandedSalvageBranches;
+  // `ChainStep.reassignable` is the server's own answer, so a Task inside a
+  // Chain reads it rather than recomputing it. A Task outside one has no Step to
+  // read, and the projection carries no equivalent field, so the page derives
+  // the same rule from the runs it already holds: `runLiveness` is the console's
+  // copy of `ACTIVE_RUN_STATUSES` (packages/db/src/chain-activation.ts), applied
+  // across every run rather than the newest, which is how the server counts.
+  const chainStep = chain.data?.steps.find((step) => step.taskId === taskId) ?? null;
+  const reassignable = chainStep?.reassignable ?? !runs.some((item) => runLiveness(item).live);
   const executionOwner = task.executionOwner === "agent"
     ? task.assigneeAgent ? <Link to={`/agents/${task.assigneeAgent.id}`}>{task.assigneeAgent.title}</Link> : t("executionOwner.unassigned")
     : t(`executionOwner.${task.executionOwner}`);
@@ -612,6 +632,23 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
               reaches for when a task has stopped being able to retry. */}
           <KeyValue items={[
             { k: t("taskDetail.details.executionOwner"), v: executionOwner },
+            // Only an agent-owned Task has an assignee to change: a human Task's
+            // owner is a person, and the merge tail's Tasks are bound to the
+            // mechanical sentinel the route refuses to reassign anyway.
+            ...(task.executionOwner === "agent" ? [{
+              k: t("taskDetail.reassign.label"),
+              v: (
+                <ReassignSelect
+                  agents={agents.data ?? []}
+                  current={task.assigneeAgent}
+                  reassignable={reassignable}
+                  pending={pending}
+                  label={t("taskDetail.reassign.label")}
+                  lockedHint={t("taskDetail.reassign.locked")}
+                  onReassign={(assigneeAgentId) => reassign(taskId, assigneeAgentId)}
+                />
+              ),
+            }] : []),
             {
               k: t("taskDetail.details.branch"),
               v: newestBranch === null ? "—"
@@ -688,7 +725,8 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
             ? <ChainList chain={chain.data} taskId={taskId} pending={pending} regressionTaskId={regressionTaskId}
                 repairActivities={repairActivities.data} repairActivitiesLoading={repairActivities.loading}
                 repairActivitiesError={repairActivities.error?.message ?? null} onReloadRepairActivities={repairActivities.reload}
-                onStart={startStep} onControl={controlChain} onToggleGate={toggleGate} />
+                onStart={startStep} onControl={controlChain} onToggleGate={toggleGate}
+                agents={agents.data ?? []} onReassign={reassign} />
             : chain.loading ? <Card title={t("chain.title")}><EmptyState>{t("chain.loading")}</EmptyState></Card>
               : <Card title={t("chain.title")}><ErrorNotice message={chain.error?.message ?? t("chain.error")} onRetry={chain.reload} /></Card>}
 

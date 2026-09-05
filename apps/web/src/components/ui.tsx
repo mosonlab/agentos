@@ -184,8 +184,14 @@ export const InboxPill = ({ status }: { status: InboxStatus }): ReactNode => {
 
 const CHIP = "inline-flex items-center gap-[6px] rounded-full border px-[9px] py-[2px] text-[11.5px] leading-[19px]";
 
+/** What the chip reads off an Agent. A `ChainStep` carries its assignee as a
+ *  four-column projection rather than a whole Agent row, and the chip has to
+ *  accept that shape so a chain row can hand the object over instead of
+ *  flattening it to a title string. */
+export type AgentChipSubject = Pick<Agent, "id" | "title" | "name" | "model">;
+
 /** Agents are first-class everywhere: same violet chip + robot glyph (ui-notes §"要点提炼" 3). */
-export const AgentChip = ({ agent, name }: { agent?: Agent | null; name?: string }): ReactNode => {
+export const AgentChip = ({ agent, name }: { agent?: AgentChipSubject | null; name?: string }): ReactNode => {
   const t = useT();
   const label = agent?.title ?? agent?.name ?? name;
   if (!label) {
