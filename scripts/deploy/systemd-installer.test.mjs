@@ -15,7 +15,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import test from "node:test";
 
 import {
@@ -593,7 +593,6 @@ test("rendered unit syntax is verified by systemd-analyze when available", (t) =
     writeFileSync(autoService, renderAutoDeploySystemdUnit(undefined, autoValues));
     writeFileSync(autoTimer, renderAutoDeploySystemdTimer());
     files.push(autoService, autoTimer);
-    const renderedNames = files.map((file) => file.slice(root.length + 1));
     for (const path of files) {
       const verified = spawnSync("systemd-analyze", ["verify", path], {
         encoding: "utf8",
@@ -601,11 +600,14 @@ test("rendered unit syntax is verified by systemd-analyze when available", (t) =
       });
       const output = `${verified.stdout ?? ""}${verified.stderr ?? ""}`;
       assert.equal(verified.status, 0, output);
-      // systemd-analyze also loads the host's own units and reports on them;
-      // only the lines naming a unit this test rendered are evidence here.
+      // systemd-analyze loads the host's own units alongside the rendered one,
+      // so its output carries diagnostics about units this repository does not
+      // write (a newer key in a distribution unit, an unreadable runtime unit).
+      // Only the lines naming the unit under test are evidence about our
+      // rendering; every unit under test lives under the temporary root.
       const rendered = output
         .split("\n")
-        .filter((line) => line.startsWith(root) || renderedNames.some((name) => line.startsWith(`${name}:`)))
+        .filter((line) => line.includes(root) || line.startsWith(`${basename(path)}:`))
         .join("\n");
       assert.doesNotMatch(rendered, /Unknown|Failed to parse/u);
     }
