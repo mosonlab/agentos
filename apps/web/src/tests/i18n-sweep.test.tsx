@@ -123,11 +123,12 @@ const sourceFiles = (directory: string): string[] => readdirSync(directory).flat
 });
 
 test("the translated UI source has no unapproved user-facing English literals", () => {
-  // Entries 27-30 are the startup gate's own vocabulary: one configuration file
-  // name and three shell commands an operator types verbatim into a terminal.
-  // Translating them would break them, which is the line this cap protects —
-  // prose grows, identifiers are counted.
-  assert.ok(I18N_ALLOWLIST.length <= 32, `i18n allowlist has ${I18N_ALLOWLIST.length} entries (maximum 32)`);
+  // The startup gate's entries (`.env` and the three `npm run …` commands) are
+  // its own vocabulary: a configuration file name and shell commands an operator
+  // types verbatim into a terminal. Translating them would break them, which is
+  // the line this cap protects — prose grows, identifiers are counted. The cap
+  // is the current 23 entries plus two of headroom.
+  assert.ok(I18N_ALLOWLIST.length <= 25, `i18n allowlist has ${I18N_ALLOWLIST.length} entries (maximum 25)`);
   const files = ["pages", "components", "lib"].flatMap((name) => sourceFiles(resolve(sourceRoot, name)));
   const all = files.flatMap((path) => scanSource(relative(sourceRoot, path), readFileSync(path, "utf8")));
   const remaining = all.filter((finding) => !I18N_ALLOWLIST.some((entry) => entry.file === finding.file && entry.text === finding.text));

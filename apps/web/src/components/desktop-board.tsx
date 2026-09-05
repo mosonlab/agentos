@@ -1,9 +1,9 @@
 import { type DragEvent, type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
-import { CARD_PAGE_SIZE, COLUMNS, type BoardEntry, type Edges, type HoldableChain, type ParkedChain, clampScroll, columnStep, edgeState, heldChains, normalizeBoardEntries, parkedChains, sameEdges, scrollKey, storedScroll } from "../lib/board";
+import { CARD_PAGE_SIZE, COLUMNS, type BoardEntry, type Edges, type HoldableChain, type ParkedChain, clampScroll, columnStep, edgeState, heldChains, parkedChains, sameEdges, scrollKey, storedScroll } from "../lib/board";
 import { useT } from "../lib/i18n";
 import { storage } from "../lib/storage";
-import type { BoardTask, TaskStatus } from "../lib/types";
+import type { TaskStatus } from "../lib/types";
 import { cn } from "../lib/utils";
 import { type ChainAggregateActions } from "./chain-aggregate-card";
 import { PaginatedBoardEntries, boardEntryPage } from "./paginated-board-entries";
@@ -66,9 +66,9 @@ export { CARD_PAGE_SIZE };
 /** One board column, extracted so its rules — the head, the two head-action
  *  presence rules and the empty-state drop invitation — can be asserted from
  *  rendered markup rather than from the page's source text. */
-export const BoardColumn = ({ column, tasks, loading, dragOver, onDragOver, onDragLeave, onDrop, onArchiveDone, onActivateAll, onHoldAll, actions, aggregateActions }: {
+export const BoardColumn = ({ column, tasks: entries, loading, dragOver, onDragOver, onDragLeave, onDrop, onArchiveDone, onActivateAll, onHoldAll, actions, aggregateActions }: {
   column: { status: TaskStatus; labelKey: string };
-  tasks: readonly (BoardEntry | BoardTask)[];
+  tasks: readonly BoardEntry[];
   loading: boolean;
   dragOver: TaskStatus | null;
   onDragOver: (status: TaskStatus) => void;
@@ -81,7 +81,6 @@ export const BoardColumn = ({ column, tasks, loading, dragOver, onDragOver, onDr
   aggregateActions?: ChainAggregateActions | undefined;
 }): ReactNode => {
   const t = useT();
-  const entries = normalizeBoardEntries(tasks);
   const [page, setPage] = useState(0);
   const { visibleEntries } = boardEntryPage(entries, page);
   // Todo's counterpart to Done's `Archive All`, under the same rule: a wave of

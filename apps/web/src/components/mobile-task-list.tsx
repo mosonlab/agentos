@@ -1,8 +1,8 @@
 import { type ReactNode, useEffect, useState } from "react";
 
-import { COLUMNS, type BoardEntry, type Counts, normalizeBoardEntries } from "../lib/board";
+import { COLUMNS, type BoardEntry, type Counts } from "../lib/board";
 import { useT } from "../lib/i18n";
-import type { BoardTask, TaskStatus } from "../lib/types";
+import type { TaskStatus } from "../lib/types";
 import { cn } from "../lib/utils";
 import { type ChainAggregateActions } from "./chain-aggregate-card";
 import { PaginatedBoardEntries } from "./paginated-board-entries";
@@ -31,10 +31,10 @@ const LIST = "mt-[14px] grid grid-cols-[minmax(0,1fr)] gap-[10px]";
 const LIST_EMPTY = "px-0 py-[40px] text-center text-[12.5px] text-[color:var(--faint)]";
 const LIST_TOOLBAR = "mt-[14px] flex items-center gap-[10px]";
 
-export const MobileTaskList = ({ tab, counts, tasks, loading, onSelectTab, onArchiveDone, actions, aggregateActions, listRef }: {
+export const MobileTaskList = ({ tab, counts, tasks: entries, loading, onSelectTab, onArchiveDone, actions, aggregateActions, listRef }: {
   tab: TaskStatus;
   counts: Counts;
-  tasks: readonly (BoardEntry | BoardTask)[];
+  tasks: readonly BoardEntry[];
   loading: boolean;
   onSelectTab: (status: TaskStatus) => void;
   onArchiveDone: () => void;
@@ -43,7 +43,6 @@ export const MobileTaskList = ({ tab, counts, tasks, loading, onSelectTab, onArc
   listRef: React.RefObject<HTMLDivElement | null>;
 }): ReactNode => {
   const t = useT();
-  const entries = normalizeBoardEntries(tasks);
   const [page, setPage] = useState(0);
   useEffect(() => setPage(0), [tab]);
   return <>
