@@ -263,11 +263,12 @@ the system-owned staged files to `/etc/systemd/system` as `root:root` with
 mode 0644, independently validates the rendered units and generated
 `/etc/sudoers.d/anneal-service-control` with `visudo -c`, runs
 `systemctl daemon-reload`, and then enables the generated inventory. The
-sudoers grant names only the generated unit names and only the verbs
-`restart`, `show`, and `is-active`. It does not grant `enable`, `disable`, or
-`daemon-reload`; those operations remain in the root install stage. A
-non-root control call uses `sudo -n`, and a denied command is a deployment
-failure rather than a successful no-op.
+sudoers grant is rendered from the control adapter's own description of its
+verbs, so it names only the generated unit names, only `/bin/systemctl`, and
+only the verbs `restart`, `is-active`, and `show -p ExecStart --value`. It
+does not grant `enable`, `disable`, or `daemon-reload`; those operations
+remain in the root install stage. A non-root control call uses `sudo -n`, and
+a denied command is a deployment failure rather than a successful no-op.
 
 Before replacing an existing system file, stage two records its bytes,
 ownership, mode, and enabled/active state in a root-owned mode-0600 transaction
@@ -317,9 +318,9 @@ pointer is activated, the Linux control adapter performs the following checks
 for each generated service label, in inventory order:
 
 ```sh
-sudo -n systemctl restart <label>.service
-sudo -n systemctl is-active <label>.service
-sudo -n systemctl show -p ExecStart --value <label>.service
+sudo -n /bin/systemctl restart <label>.service
+sudo -n /bin/systemctl is-active <label>.service
+sudo -n /bin/systemctl show -p ExecStart --value <label>.service
 ```
 
 `is-active` must return `active`, and the `ExecStart` value must contain both
