@@ -39,6 +39,9 @@ type ReviewTask = {
 };
 
 const FIX_HEAD = "a".repeat(40);
+const IMPLEMENTATION_HEAD = "d".repeat(40);
+const RECORDED_BASE = "e".repeat(40);
+const TYPED_BASE = "f".repeat(40);
 const REVIEW_HEAD = "b".repeat(40);
 const REVIEW_BASE = "c".repeat(40);
 
@@ -427,4 +430,131 @@ test("present review siblings must agree on their reviewed base", async () => {
     persistenceRefusal(result),
     "fixed-implementation sibling reviews disagree on the reviewed base",
   );
+});
+
+/**
+ * The implementing Task persisting its own deliverable. `baseSha` in that body
+ * is informational — the reviewed range is pinned from the Task's Runs — so
+ * persistence records a disagreement instead of refusing one.
+ */
+const persistImplementationOutput = async (input: {
+  bodyBaseSha: string;
+  continuation?: boolean;
+  runs: Array<{ runNumber: number; baseSha: string | null }>;
+}) => {
+  const implementationTask = {
+    id: "implementation-task",
+    projectId: "project-1",
+    chainId: "chain-1",
+    chainIndex: 2,
+    chainLayer: 1,
+    status: "IN_PROGRESS",
+    templateStep: input.continuation ? null : {
+      stepIndex: 2,
+      outputKind: "implementation",
+      taskTemplateId: "direct-template",
+      taskTemplate: { name: "direct-engineer-workflow" },
+    },
+  };
+  const activities: Array<{ taskId: string; body: string; metadata: Record<string, unknown> }> = [];
+  const tx = {
+    $queryRaw: async () => [{ id: "locked" }],
+    run: {
+      findFirst: async (query: Record<string, any>) => {
+        if (query.select && "baseSha" in query.select) {
+          const rows = input.runs
+            .filter((run) => (query.where?.baseSha?.not === null ? run.baseSha !== null : true))
+            .sort((left, right) => left.runNumber - right.runNumber);
+          return rows[0] ?? null;
+        }
+        return query.select && "taskId" in query.select
+          ? { taskId: implementationTask.id }
+          : { task: implementationTask };
+      },
+    },
+    taskActivity: {
+      create: async ({ data }: { data: any }) => {
+        activities.push(data);
+        return data;
+      },
+    },
+    taskStepOutput: {
+      findUnique: async () => null,
+      upsert: async ({ create }: { create: Record<string, unknown> }) => ({
+        id: "implementation-output",
+        ...create,
+        metadata: create.metadata ?? null,
+      }),
+    },
+  } as unknown as Prisma.TransactionClient;
+  const result = await persistSessionTaskOutput(tx, {
+    task: { id: implementationTask.id },
+    fence: {
+      runId: "implementation-run",
+      fencingToken: "fence-token",
+      at: new Date("2026-01-01T00:00:00.000Z"),
+    },
+    kind: "implementation",
+    body: JSON.stringify({
+      schemaVersion: 1,
+      headSha: IMPLEMENTATION_HEAD,
+      baseSha: input.bodyBaseSha,
+      summary: "implemented",
+      testsRun: ["focused"],
+    }),
+    commitSha: IMPLEMENTATION_HEAD,
+  });
+  return { result, activities };
+};
+
+test("an implementation body base that disagrees with the platform base is persisted and recorded", async () => {
+  const { result, activities } = await persistImplementationOutput({
+    bodyBaseSha: TYPED_BASE,
+    runs: [{ runNumber: 1, baseSha: RECORDED_BASE }, { runNumber: 2, baseSha: IMPLEMENTATION_HEAD }],
+  });
+  assert.equal("ok" in result && result.ok, true, "the field no longer decides anything, so it cannot refuse");
+  assert.equal(activities.length, 1);
+  const [activity] = activities;
+  assert.equal(activity?.taskId, "implementation-task");
+  assert.match(activity?.body ?? "", new RegExp(TYPED_BASE, "u"));
+  assert.match(activity?.body ?? "", new RegExp(RECORDED_BASE, "u"));
+  assert.deepEqual(activity?.metadata, {
+    kind: "canonicalTaskOutput.implementationBaseShaMismatch",
+    schemaVersion: 1,
+    runId: "implementation-run",
+    outputKind: "implementation",
+    bodyBaseSha: TYPED_BASE,
+    platformBaseSha: RECORDED_BASE,
+  });
+});
+
+test("an implementation body base that matches the platform base records nothing", async () => {
+  const { result, activities } = await persistImplementationOutput({
+    bodyBaseSha: RECORDED_BASE,
+    runs: [{ runNumber: 1, baseSha: RECORDED_BASE }],
+  });
+  assert.equal("ok" in result && result.ok, true);
+  assert.deepEqual(activities, []);
+});
+
+test("an implementation Task with no recorded Run base records the missing authority", async () => {
+  const { result, activities } = await persistImplementationOutput({
+    bodyBaseSha: TYPED_BASE,
+    runs: [{ runNumber: 1, baseSha: null }],
+  });
+  assert.equal("ok" in result && result.ok, true);
+  assert.equal(activities.length, 1);
+  assert.equal(activities[0]?.metadata.kind, "canonicalTaskOutput.implementationBaseShaMissing");
+  assert.match(activities[0]?.body ?? "", /implementation-task/u);
+  assert.match(activities[0]?.body ?? "", new RegExp(TYPED_BASE, "u"));
+});
+
+test("a noncanonical implementation continuation does not diagnose its unrelated Run base", async () => {
+  const { result, activities } = await persistImplementationOutput({
+    continuation: true,
+    bodyBaseSha: TYPED_BASE,
+    runs: [{ runNumber: 1, baseSha: RECORDED_BASE }],
+  });
+  assert.equal("ok" in result && result.ok, true);
+  assert.deepEqual(activities, []);
 });

@@ -519,43 +519,127 @@ test("a Task without a Repo is born with no publish head at all", async () => {
   assert.equal(creates[0]?.branch, null);
 });
 
-test("a pinned base follows the template Step when conditional tasks use dense chain ordinals", async () => {
-  const headSha = "2".repeat(40);
-  let where: unknown;
-  const range = await pinnedImplementationRange({
+/**
+ * The pinning fake answers the two reads the derivation makes: the referenced
+ * step's canonical output, and the implementation Task's own Runs. The Run read
+ * is emulated from the query it receives — filtered and ordered as Prisma would
+ * — so a test that seeds several Runs proves which one the derivation picks.
+ */
+const pinningTx = (options: {
+  output?: { taskId?: string; kind?: string; commitSha?: string | null; body?: string } | null;
+  runs?: Array<{ runNumber: number; baseSha: string | null }>;
+}) => {
+  const seen: { outputWhere?: unknown; runQuery?: Record<string, any> } = {};
+  const output = options.output === null ? null : {
+    taskId: "implementation-task",
+    kind: "implementation",
+    commitSha: implementationHead,
+    body: JSON.stringify({ schemaVersion: 1, baseSha: bodyBase, headSha: implementationHead }),
+    ...options.output,
+  };
+  const tx = {
     taskStepOutput: {
       findFirst: async (query: { where: unknown }) => {
-        where = query.where;
-        return {
-          kind: "implementation",
-          commitSha: headSha,
-          body: JSON.stringify({
-            schemaVersion: 1,
-            baseSha: "1".repeat(40),
-            headSha,
-          }),
-        };
+        seen.outputWhere = query.where;
+        return output;
       },
     },
-  } as never, {
-    id: "review-task",
-    projectId: "project-1",
-    templateId: "direct-template",
-    chainId: "direct-chain",
-    templateStep: { baseFromStepIndex: 2 },
-  });
+    run: {
+      findFirst: async (query: Record<string, any>) => {
+        seen.runQuery = query;
+        const rows = (options.runs ?? [])
+          .filter(() => query.where?.taskId === output?.taskId)
+          .filter((run) => (query.where?.baseSha?.not === null ? run.baseSha !== null : true))
+          .sort((left, right) => (query.orderBy?.runNumber === "asc"
+            ? left.runNumber - right.runNumber
+            : right.runNumber - left.runNumber));
+        return rows[0] ?? null;
+      },
+    },
+  } as never;
+  return { tx, seen };
+};
+
+const implementationHead = "2".repeat(40);
+const bodyBase = "9".repeat(40);
+const recordedBase = "1".repeat(40);
+
+const reviewTask = {
+  id: "review-task",
+  projectId: "project-1",
+  templateId: "direct-template",
+  chainId: "direct-chain",
+  templateStep: { baseFromStepIndex: 2 },
+};
+
+test("a pinned base follows the template Step when conditional tasks use dense chain ordinals", async () => {
+  const { tx, seen } = pinningTx({ runs: [{ runNumber: 1, baseSha: recordedBase }] });
+  const range = await pinnedImplementationRange(tx, reviewTask);
 
   assert.deepEqual(range, {
-    implementationBaseSha: "1".repeat(40),
-    implementationHeadSha: headSha,
+    implementationBaseSha: recordedBase,
+    implementationHeadSha: implementationHead,
   });
-  assert.deepEqual(where, {
+  assert.deepEqual(seen.outputWhere, {
     task: {
       projectId: "project-1",
       templateId: "direct-template",
       chainId: "direct-chain",
       templateStep: { stepIndex: 2 },
     },
+  });
+  assert.deepEqual(seen.runQuery, {
+    where: { taskId: "implementation-task", baseSha: { not: null } },
+    orderBy: { runNumber: "asc" },
+    select: { baseSha: true },
+  });
+});
+
+test("the pinned base is the Run the platform recorded, not the SHA the implementer typed", async () => {
+  // The 2026-09-05 incident: the body named a commit that never existed, and
+  // every review sibling failed provisioning fetching it.
+  const { tx } = pinningTx({
+    output: { body: JSON.stringify({ schemaVersion: 1, baseSha: bodyBase, headSha: implementationHead }) },
+    runs: [{ runNumber: 1, baseSha: recordedBase }],
+  });
+  const range = await pinnedImplementationRange(tx, reviewTask);
+  assert.equal(range?.implementationBaseSha, recordedBase);
+  assert.notEqual(range?.implementationBaseSha, bodyBase);
+});
+
+test("a recovery Run's own base never moves the pinned range", async () => {
+  const { tx } = pinningTx({
+    runs: [
+      { runNumber: 2, baseSha: implementationHead },
+      { runNumber: 1, baseSha: recordedBase },
+      { runNumber: 3, baseSha: "8".repeat(40) },
+    ],
+  });
+  const range = await pinnedImplementationRange(tx, reviewTask);
+  assert.equal(range?.implementationBaseSha, recordedBase);
+});
+
+test("an implementation Task whose Runs recorded no base refuses instead of trusting the body", async () => {
+  const { tx } = pinningTx({ runs: [{ runNumber: 1, baseSha: null }] });
+  await assert.rejects(
+    () => pinnedImplementationRange(tx, reviewTask),
+    (error: Error) => {
+      assert.equal(error.name, "PinnedBaseCommitError");
+      assert.match(error.message, /implementation task implementation-task has no Run with a recorded baseSha/u);
+      assert.doesNotMatch(error.message, new RegExp(bodyBase, "u"));
+      return true;
+    },
+  );
+});
+
+test("an implementation output body with no baseSha still pins from the platform record", async () => {
+  const { tx } = pinningTx({
+    output: { body: JSON.stringify({ schemaVersion: 1, headSha: implementationHead }) },
+    runs: [{ runNumber: 1, baseSha: recordedBase }],
+  });
+  assert.deepEqual(await pinnedImplementationRange(tx, reviewTask), {
+    implementationBaseSha: recordedBase,
+    implementationHeadSha: implementationHead,
   });
 });
 
