@@ -6,9 +6,10 @@ installation sequence is
 
 ## Start locally
 
-The verified Developer Preview release path targets an Apple Silicon Mac.
-Linux and macOS on Intel are expected to work but are not yet release-verified;
-Windows is unsupported. For this release, use Node.js `22.17.0` from `.nvmrc`.
+The verified Developer Preview release path targets an Apple Silicon Mac or
+Linux (Ubuntu 24.04 LTS, x86_64). macOS on Intel is expected to work but is
+not yet release-verified; Windows is unsupported. For this release, use Node.js
+`22.17.0` from `.nvmrc`.
 Installation enforces Node.js satisfying `^20.19.0 || ^22.13.0 || >=24`, the
 range shared by the locked toolchain; Node 22.12.x and 23 are refused. You also
 need
@@ -19,7 +20,7 @@ need
 - a read-only GitHub token for `GITHUB_READ_TOKEN`; every API process requires
   it at startup, independently of whether Direct or Full Assurance is enabled;
 - the official **Codex CLI, already installed and already signed in**, under the
-  same macOS account that will run the Anneal runner;
+  same user account that will run the Anneal runner;
 - the GitHub CLI (`gh`), installed and authenticated under that account, for
   every GitHub-backed run configured to open a pull request. If `gh` cannot
   record an open pull request, the run fails while preserving its already-pushed
@@ -66,6 +67,24 @@ LaunchDaemon and Linux systemd profiles in the public
 [`docs/runbooks/merge-executor.md`](runbooks/merge-executor.md) runbook.
 Those procedures do not change the platform classifications above or the
 authoritative support matrix.
+
+## Runners on a second machine (experimental)
+
+One installation can run its control plane on one machine and some runners on
+another, for example Codex on Linux and Claude Code on a Mac. This shape is
+experimental: it works, and nothing in Anneal is designed around it.
+
+- The API listens on loopback only, by design. On the runner machine, forward
+  that loopback with `ssh -L 3000:127.0.0.1:3000 <control-plane-host>` and keep
+  `RUNNER_API_URL=http://127.0.0.1:3000`; the runner refuses any other origin.
+- Give every runner its own `RUNNER_ID` and the installation's `RUNNER_TOKEN`.
+  Each machine keeps its own repository mirrors and workspaces; nothing is
+  shared over the network, and delivery is a Git push from the runner machine.
+- Each machine signs in to the provider CLIs its runners use, and its runners
+  set `RUNNER_SERVED_KINDS` to those kinds so a runner never claims work for a
+  CLI that machine does not have.
+- The tunnel's authentication, liveness and reconnection are yours. It adds no
+  identity to Anneal, so the support matrix's remote-access row still stands.
 
 ## Pre-seed a repository mirror
 

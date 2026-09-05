@@ -9,6 +9,13 @@ written.
 
 ## Unreleased
 
+### Documentation
+
+- Linux (Ubuntu 24.04 LTS, x86_64) is now a maintainer-verified platform
+  alongside macOS on Apple Silicon; the install documents drop their
+  macOS-only wording. Running some runners on a second machine over an SSH
+  tunnel is documented as experimental in `docs/install.md`.
+
 ## v0.7.0 — Developer Preview 7
 
 The seventh preview opens Anneal to more than one project: a documented
