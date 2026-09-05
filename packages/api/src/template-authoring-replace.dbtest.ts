@@ -204,7 +204,7 @@ test("replace adds, removes, reorders, and edits every Step field with dense ind
       layer: 2,
     },
     {
-      name: "Code review (Sol)",
+      name: "Code review",
       assigneeType: AssigneeType.AGENT,
       assigneeAgentId: seed.agents[1]!.id,
       prompt: "Review the edited implementation",

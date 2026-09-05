@@ -233,7 +233,7 @@ test("the pull-request workflow source exposes its exact four-step graph and pro
         spawnPolicy: null,
       },
       {
-        name: "Code review (Sol)",
+        name: "Code review",
         stepIndex: 2,
         layer: 2,
         agent: "code-reviewer-sol-high",
@@ -249,7 +249,7 @@ test("the pull-request workflow source exposes its exact four-step graph and pro
         spawnPolicy: null,
       },
       {
-        name: "Code review (Opus blind)",
+        name: "Blind code review",
         stepIndex: 3,
         layer: 2,
         agent: "code-reviewer-opus-high",
