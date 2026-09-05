@@ -447,10 +447,14 @@ test("canonical sync installs the reviewed PR prompt generation while instantiat
       baseFromStepIndex: step.baseFromStepIndex,
     })),
   );
+  // Retired chains keep the old labels; successor labels are checked against source above.
   assert.deepEqual(
-    snapshot.map(({ id: _id, prompt: _prompt, ...shape }) => shape),
+    pinnedTasks.map(({ templateStep }) => templateStep?.name),
+    snapshot.map(({ name }) => name),
+  );
+  assert.deepEqual(
+    snapshot.map(({ id: _id, prompt: _prompt, name: _name, ...shape }) => shape),
     successor.steps.map((step) => ({
-      name: step.name,
       layer: step.layer,
       outputKind: step.outputKind,
       attachmentsFromPrevious: step.attachmentsFromPrevious,
