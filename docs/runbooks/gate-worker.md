@@ -5,7 +5,7 @@
 > bundled with an Anneal installation. Public operators may provision their own
 > SSH-reachable Ubuntu workers and configure them explicitly. The local
 > `scripts/merge-gate.sh` path requires no remote worker. The remote-worker
-> profile is documented but unverified as a public self-hosting path.
+> profile is maintainer-verified on Ubuntu 24.04; see the support matrix.
 
 A merge gate selects its own profile from the exact baseline-to-candidate diff.
 Content-only modifications to the gate's explicit prose allowlist use the
