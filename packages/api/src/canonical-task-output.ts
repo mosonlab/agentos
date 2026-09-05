@@ -579,10 +579,23 @@ export const persistSessionTaskOutput = async (
   // refuses over it, but a body that disagrees with the derived base is the
   // exact typo that once sent every review sibling to a nonexistent commit, so
   // the disagreement is recorded where an operator reads the task.
-  if (input.kind === "implementation") {
+  if (step && isCanonicalAgentStep(step) && step.outputKind === "implementation") {
     const bodyBaseSha = implementationBodyBaseSha(input.body);
     const platformBaseSha = await platformImplementationBaseSha(tx, input.task.id);
-    if (bodyBaseSha && platformBaseSha && bodyBaseSha !== platformBaseSha) {
+    if (!platformBaseSha) {
+      await tx.taskActivity.create({ data: {
+        taskId: input.task.id,
+        actorType: "control-plane",
+        body: `Implementation task ${input.task.id} has no Run with a recorded baseSha; body baseSha ${bodyBaseSha ?? "absent"} is informational and downstream range pinning will refuse`,
+        metadata: {
+          kind: "canonicalTaskOutput.implementationBaseShaMissing",
+          schemaVersion: 1,
+          runId: input.fence.runId,
+          outputKind: input.kind,
+          bodyBaseSha,
+        },
+      } });
+    } else if (bodyBaseSha && bodyBaseSha !== platformBaseSha) {
       await tx.taskActivity.create({ data: {
         taskId: input.task.id,
         actorType: "control-plane",

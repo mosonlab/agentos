@@ -439,6 +439,7 @@ test("present review siblings must agree on their reviewed base", async () => {
  */
 const persistImplementationOutput = async (input: {
   bodyBaseSha: string;
+  continuation?: boolean;
   runs: Array<{ runNumber: number; baseSha: string | null }>;
 }) => {
   const implementationTask = {
@@ -448,7 +449,7 @@ const persistImplementationOutput = async (input: {
     chainIndex: 2,
     chainLayer: 1,
     status: "IN_PROGRESS",
-    templateStep: {
+    templateStep: input.continuation ? null : {
       stepIndex: 2,
       outputKind: "implementation",
       taskTemplateId: "direct-template",
@@ -536,10 +537,23 @@ test("an implementation body base that matches the platform base records nothing
   assert.deepEqual(activities, []);
 });
 
-test("an implementation Task with no recorded Run base records no disagreement", async () => {
+test("an implementation Task with no recorded Run base records the missing authority", async () => {
   const { result, activities } = await persistImplementationOutput({
     bodyBaseSha: TYPED_BASE,
     runs: [{ runNumber: 1, baseSha: null }],
+  });
+  assert.equal("ok" in result && result.ok, true);
+  assert.equal(activities.length, 1);
+  assert.equal(activities[0]?.metadata.kind, "canonicalTaskOutput.implementationBaseShaMissing");
+  assert.match(activities[0]?.body ?? "", /implementation-task/u);
+  assert.match(activities[0]?.body ?? "", new RegExp(TYPED_BASE, "u"));
+});
+
+test("a noncanonical implementation continuation does not diagnose its unrelated Run base", async () => {
+  const { result, activities } = await persistImplementationOutput({
+    continuation: true,
+    bodyBaseSha: TYPED_BASE,
+    runs: [{ runNumber: 1, baseSha: RECORDED_BASE }],
   });
   assert.equal("ok" in result && result.ok, true);
   assert.deepEqual(activities, []);
