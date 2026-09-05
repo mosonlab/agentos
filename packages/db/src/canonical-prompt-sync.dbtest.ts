@@ -122,7 +122,7 @@ const ADJUDICATION_STEPS = {
 /** Every registered legacy generation still bound its review-fix step to
  * senior-dev; a fixture that rebuilds one from current rows restores that. */
 const rebindFixStepToRetiredSeniorDev = async (projectId: string, templateId: string): Promise<void> => {
-  const seniorDev = await prisma.agent.findUniqueOrThrow({ where: { projectId_name: { projectId, name: "senior-dev" } } });
+  const seniorDev = await prisma.agent.findUniqueOrThrow({ where: { projectId_name: { projectId, name: "senior-dev-astra-medium" } } });
   await prisma.taskTemplateStep.updateMany({
     where: { taskTemplateId: templateId, outputKind: "fixed-implementation" },
     data: { assigneeAgentId: seniorDev.id },
@@ -190,7 +190,7 @@ test("sync creates the pull-request template when the pre-existing canonical ins
   });
   assert.deepEqual(created.variables, ["branchName"]);
   assert.deepEqual(created.steps.map(({ assigneeAgent }) => assigneeAgent?.name), [
-    "senior-dev-luna", "review-coordinator-sol", "review-coordinator-opus", "senior-dev-astra-low",
+    "senior-dev-luna-max", "code-reviewer-sol-high", "code-reviewer-opus-high", "senior-dev-astra-low",
   ]);
   assert.equal(JSON.stringify(await prisma.taskTemplate.findMany({
     where: {
@@ -637,7 +637,7 @@ test("sync rolls the exact adjudication-era graphs forward without touching inst
   // The direct adjudication generation predates the revalidation node too.
   await downgradeDirectTemplateToHistoricalSevenStep(project.id);
   const agents = new Map((await prisma.agent.findMany({ where: { projectId: project.id } })).map((agent) => [agent.name, agent]));
-  const source = agents.get("review-coordinator-opus")!;
+  const source = agents.get("code-reviewer-opus-high")!;
   const adjudicator = await prisma.agent.create({ data: {
     projectId: project.id,
     environmentId: source.environmentId,
@@ -711,7 +711,7 @@ test("sync rolls the exact adjudication-era graphs forward without touching inst
       // the template-row preservation proof, so its historical evidence must
       // not hold a foreign key that would prevent the separate Agent-copy
       // fixture from removing the old verifier row.
-      const taskAssigneeId = step.assigneeAgentId === agents.get("regression-verifier")?.id ? source.id : step.assigneeAgentId;
+      const taskAssigneeId = step.assigneeAgentId === agents.get("regression-verifier-luna-xhigh")?.id ? source.id : step.assigneeAgentId;
       const task = await prisma.task.create({ data: {
         projectId: project.id,
         templateId: template.id,
@@ -855,16 +855,16 @@ test("sync rolls the pre-zero-gate compound graph forward and leaves the direct 
 
 test("sync adopts any uncustomized canonical runtime drift", async () => {
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
-  const names = ["review-coordinator", "review-coordinator-sol"];
+  const names = ["review-coordinator-astra-medium", "code-reviewer-sol-high"];
   const driftedCoordinator = { model: "claude-opus-5:medium", runnerPreference: RunnerPreference.CLAUDE };
   const driftedSol = { model: "gpt-5.6-sol:medium", runnerPreference: RunnerPreference.CODEX };
-  const coordinatorSource = canonicalRuntime("review-coordinator");
-  const solSource = canonicalRuntime("review-coordinator-sol");
+  const coordinatorSource = canonicalRuntime("review-coordinator-astra-medium");
+  const solSource = canonicalRuntime("code-reviewer-sol-high");
 
-  await prisma.agent.updateMany({ where: { projectId: project.id, name: "review-coordinator" }, data: driftedCoordinator });
-  await prisma.agent.updateMany({ where: { projectId: project.id, name: "review-coordinator-sol" }, data: driftedSol });
+  await prisma.agent.updateMany({ where: { projectId: project.id, name: "review-coordinator-astra-medium" }, data: driftedCoordinator });
+  await prisma.agent.updateMany({ where: { projectId: project.id, name: "code-reviewer-sol-high" }, data: driftedSol });
   await prisma.agent.updateMany({
-    where: { projectId: project.id, name: "review-coordinator" },
+    where: { projectId: project.id, name: "review-coordinator-astra-medium" },
     data: { title: "Unrelated drift" },
   });
 
@@ -876,19 +876,19 @@ test("sync adopts any uncustomized canonical runtime drift", async () => {
     select: { name: true, model: true, runnerPreference: true },
   });
   assert.equal(rolledBack.length, 2);
-  assert.ok(rolledBack.every((agent) => (agent.name === "review-coordinator"
+  assert.ok(rolledBack.every((agent) => (agent.name === "review-coordinator-astra-medium"
     ? agent.model === driftedCoordinator.model && agent.runnerPreference === driftedCoordinator.runnerPreference
     : agent.model === driftedSol.model && agent.runnerPreference === driftedSol.runnerPreference)));
 
   await prisma.agent.updateMany({
-    where: { projectId: project.id, name: "review-coordinator" },
+    where: { projectId: project.id, name: "review-coordinator-astra-medium" },
     data: { title: "Review Coordinator" },
   });
   const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
   assert.equal(synced.status, 0, synced.output);
   assert.match(synced.output, /"adoptedAgentDefaults":2/u);
-  assert.match(synced.output, runtimeAdoptionPattern("review-coordinator", driftedCoordinator, coordinatorSource));
-  assert.match(synced.output, runtimeAdoptionPattern("review-coordinator-sol", driftedSol, solSource));
+  assert.match(synced.output, runtimeAdoptionPattern("review-coordinator-astra-medium", driftedCoordinator, coordinatorSource));
+  assert.match(synced.output, runtimeAdoptionPattern("code-reviewer-sol-high", driftedSol, solSource));
 
   const upgraded = await prisma.agent.findMany({
     where: { projectId: project.id, name: { in: names } },
@@ -903,13 +903,13 @@ test("sync adopts any uncustomized canonical runtime drift", async () => {
 
 test("sync adopts uncustomized model-only runtime drift", async () => {
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
-  const executionerSource = canonicalRuntime("implementation-plan-executioner");
+  const executionerSource = canonicalRuntime("plan-executor-astra-medium");
   await prisma.agent.update({
-    where: { projectId_name: { projectId: project.id, name: "implementation-plan-executioner" } },
+    where: { projectId_name: { projectId: project.id, name: "plan-executor-astra-medium" } },
     data: {
       model: "gpt-5.6-sol:medium",
       runnerPreference: RunnerPreference.CODEX,
-      runtimeConfigCustomized: false,
+      customizedFields: [],
       runtimeConfigDriftNoticeFingerprint: "stale-runtime-drift",
     },
   });
@@ -922,12 +922,12 @@ test("sync adopts uncustomized model-only runtime drift", async () => {
   assert.match(synced.output, /"adoptedAgentDefaults":1/u);
 
   const executioner = await prisma.agent.findUniqueOrThrow({
-    where: { projectId_name: { projectId: project.id, name: "implementation-plan-executioner" } },
-    select: { model: true, runnerPreference: true, runtimeConfigCustomized: true, runtimeConfigDriftNoticeFingerprint: true },
+    where: { projectId_name: { projectId: project.id, name: "plan-executor-astra-medium" } },
+    select: { model: true, runnerPreference: true, customizedFields: true, runtimeConfigDriftNoticeFingerprint: true },
   });
   assert.deepEqual(executioner, {
     ...executionerSource,
-    runtimeConfigCustomized: false,
+    customizedFields: [],
     runtimeConfigDriftNoticeFingerprint: null,
   });
   assert.equal(await prisma.inboxMessage.count({
@@ -939,14 +939,14 @@ test("sync notifies once per current customized runtime drift without overwritin
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
   const originalProduction = { model: "gpt-5.6-sol:high", runnerPreference: RunnerPreference.CODEX };
   const changedProduction = { model: "gpt-5.6-sol:medium", runnerPreference: RunnerPreference.CODEX };
-  const mergeResolverSource = canonicalRuntime("merge-resolver");
+  const mergeResolverSource = canonicalRuntime("merge-resolver-opus-medium");
   const mergeResolver = await prisma.agent.findUniqueOrThrow({
-    where: { projectId_name: { projectId: project.id, name: "merge-resolver" } },
+    where: { projectId_name: { projectId: project.id, name: "merge-resolver-opus-medium" } },
     select: {
       id: true,
       model: true,
       runnerPreference: true,
-      runtimeConfigCustomized: true,
+      customizedFields: true,
       runtimeConfigDriftNoticeFingerprint: true,
     },
   });
@@ -970,7 +970,7 @@ test("sync notifies once per current customized runtime drift without overwritin
       data: {
         model: mergeResolver.model,
         runnerPreference: mergeResolver.runnerPreference,
-        runtimeConfigCustomized: mergeResolver.runtimeConfigCustomized,
+        customizedFields: mergeResolver.customizedFields,
         runtimeConfigDriftNoticeFingerprint: mergeResolver.runtimeConfigDriftNoticeFingerprint,
       },
     });
@@ -980,7 +980,7 @@ test("sync notifies once per current customized runtime drift without overwritin
   });
   await prisma.agent.update({
     where: { id: mergeResolver.id },
-    data: { ...originalProduction, runtimeConfigCustomized: true },
+    data: { ...originalProduction, customizedFields: ["model", "runnerPreference"] },
   });
 
   const firstSync = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
@@ -988,10 +988,10 @@ test("sync notifies once per current customized runtime drift without overwritin
   assert.match(firstSync.output, /"runtimeDriftNotices":1/u);
 
   const afterFirstSync = await prisma.agent.findUniqueOrThrow({
-    where: { projectId_name: { projectId: project.id, name: "merge-resolver" } },
-    select: { model: true, runnerPreference: true, runtimeConfigCustomized: true },
+    where: { projectId_name: { projectId: project.id, name: "merge-resolver-opus-medium" } },
+    select: { model: true, runnerPreference: true, customizedFields: true },
   });
-  assert.deepEqual(afterFirstSync, { ...originalProduction, runtimeConfigCustomized: true });
+  assert.deepEqual(afterFirstSync, { ...originalProduction, customizedFields: ["model", "runnerPreference"] });
 
   const firstNotice = await prisma.inboxMessage.findMany({
     where: { agentId: mergeResolver.id, body: { startsWith: "Canonical runtime drift detected" } },
@@ -1010,7 +1010,7 @@ test("sync notifies once per current customized runtime drift without overwritin
     "u",
   ));
   assert.match(firstNotice[0]!.body, /Production: model=gpt-5\.6-sol:high, runner=CODEX/u);
-  assert.match(firstNotice[0]!.body, /runtimeConfigCustomized=true/u);
+  assert.match(firstNotice[0]!.body, /customizedFields=model,runnerPreference/u);
 
   const unchangedSync = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
   assert.equal(unchangedSync.status, 0, unchangedSync.output);
@@ -1032,9 +1032,9 @@ test("sync notifies once per current customized runtime drift without overwritin
   assert.match(notices[1]!.body, /Production: model=gpt-5\.6-sol:medium, runner=CODEX/u);
   const afterChangedSync = await prisma.agent.findUniqueOrThrow({
     where: { id: mergeResolver.id },
-    select: { model: true, runnerPreference: true, runtimeConfigCustomized: true },
+    select: { model: true, runnerPreference: true, customizedFields: true },
   });
-  assert.deepEqual(afterChangedSync, { ...changedProduction, runtimeConfigCustomized: true });
+  assert.deepEqual(afterChangedSync, { ...changedProduction, customizedFields: ["model", "runnerPreference"] });
 
   await prisma.agent.update({ where: { id: mergeResolver.id }, data: originalProduction });
   const returnedSync = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
@@ -1068,7 +1068,7 @@ test("sync adopts uncustomized runtime drift without promoting it", async (t) =>
       id: true,
       model: true,
       runnerPreference: true,
-      runtimeConfigCustomized: true,
+      customizedFields: true,
       runtimeConfigDriftNoticeFingerprint: true,
     },
   });
@@ -1087,7 +1087,7 @@ test("sync adopts uncustomized runtime drift without promoting it", async (t) =>
       data: {
         model: agent.model,
         runnerPreference: agent.runnerPreference,
-        runtimeConfigCustomized: agent.runtimeConfigCustomized,
+        customizedFields: agent.customizedFields,
         runtimeConfigDriftNoticeFingerprint: agent.runtimeConfigDriftNoticeFingerprint,
       },
     });
@@ -1095,7 +1095,7 @@ test("sync adopts uncustomized runtime drift without promoting it", async (t) =>
   const production = { model: "claude-opus-5:medium", runnerPreference: RunnerPreference.CLAUDE };
   await prisma.agent.update({
     where: { id: agent.id },
-    data: { ...production, runtimeConfigCustomized: false, runtimeConfigDriftNoticeFingerprint: "stale-runtime-drift" },
+    data: { ...production, customizedFields: [], runtimeConfigDriftNoticeFingerprint: "stale-runtime-drift" },
   });
 
   const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
@@ -1106,10 +1106,10 @@ test("sync adopts uncustomized runtime drift without promoting it", async (t) =>
 
   assert.deepEqual(await prisma.agent.findUniqueOrThrow({
     where: { id: agent.id },
-    select: { model: true, runnerPreference: true, runtimeConfigCustomized: true, runtimeConfigDriftNoticeFingerprint: true },
+    select: { model: true, runnerPreference: true, customizedFields: true, runtimeConfigDriftNoticeFingerprint: true },
   }), {
     ...defaultSource,
-    runtimeConfigCustomized: false,
+    customizedFields: [],
     runtimeConfigDriftNoticeFingerprint: null,
   });
   const notices = await prisma.inboxMessage.findMany({
@@ -1121,12 +1121,12 @@ test("sync adopts uncustomized runtime drift without promoting it", async (t) =>
 
 test("sync recreates a missing regression verifier and restores canonical bindings", async () => {
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
-  const verifierSource = canonicalRuntime("regression-verifier");
+  const verifierSource = canonicalRuntime("regression-verifier-luna-xhigh");
   const source = await prisma.agent.findUniqueOrThrow({
-    where: { projectId_name: { projectId: project.id, name: "review-coordinator-sol" } },
+    where: { projectId_name: { projectId: project.id, name: "code-reviewer-sol-high" } },
   });
   const existingVerifier = await prisma.agent.findUniqueOrThrow({
-    where: { projectId_name: { projectId: project.id, name: "regression-verifier" } },
+    where: { projectId_name: { projectId: project.id, name: "regression-verifier-luna-xhigh" } },
   });
   const regressionSteps = await prisma.taskTemplateStep.findMany({
     where: {
@@ -1147,7 +1147,7 @@ test("sync recreates a missing regression verifier and restores canonical bindin
   assert.match(synced.output, /"adoptedAssignees":2/u);
 
   const verifier = await prisma.agent.findUniqueOrThrow({
-    where: { projectId_name: { projectId: project.id, name: "regression-verifier" } },
+    where: { projectId_name: { projectId: project.id, name: "regression-verifier-luna-xhigh" } },
   });
   assert.equal(verifier.model, verifierSource.model);
   assert.equal(verifier.runnerPreference, verifierSource.runnerPreference);
@@ -1162,10 +1162,10 @@ test("sync recreates a missing regression verifier and restores canonical bindin
 test("sync recreates a missing spec revalidator with read-only repository coverage", async (t) => {
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
   const source = await prisma.agent.findUniqueOrThrow({
-    where: { projectId_name: { projectId: project.id, name: "review-coordinator-sol" } },
+    where: { projectId_name: { projectId: project.id, name: "code-reviewer-sol-high" } },
   });
   const existingRevalidator = await prisma.agent.findUniqueOrThrow({
-    where: { projectId_name: { projectId: project.id, name: "spec-revalidator" } },
+    where: { projectId_name: { projectId: project.id, name: "spec-revalidator-luna-xhigh" } },
   });
   const revalidationSteps = await prisma.taskTemplateStep.findMany({
     where: { outputKind: "revalidation", taskTemplate: { projectId: project.id } },
@@ -1207,7 +1207,7 @@ test("sync recreates a missing spec revalidator with read-only repository covera
   assert.match(synced.output, /"createdAgentRepoGrants":1/u);
 
   const revalidator = await prisma.agent.findUniqueOrThrow({
-    where: { projectId_name: { projectId: project.id, name: "spec-revalidator" } },
+    where: { projectId_name: { projectId: project.id, name: "spec-revalidator-luna-xhigh" } },
   });
   assert.equal(revalidator.model, "gpt-5.6-luna:xhigh");
   assert.equal(revalidator.runnerPreference, RunnerPreference.CODEX);
@@ -1224,12 +1224,12 @@ test("sync recreates a missing spec revalidator with read-only repository covera
 // senior-dev-astra-low is also created through the special-agent table, but
 // every template binds it, so deleting it here would leave a bound step with
 // no assignee; its creation is exercised by the canonical seed instead.
-for (const specialName of ["senior-dev-sol", "senior-dev-opus"] as const) {
+for (const specialName of ["senior-dev-sol-high", "senior-dev-opus-medium"] as const) {
 test(`sync recreates a missing ${specialName} Agent from senior-dev`, async (t) => {
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
   const specialSource = canonicalRuntime(specialName);
   const source = await prisma.agent.findUniqueOrThrow({
-    where: { projectId_name: { projectId: project.id, name: "senior-dev" } },
+    where: { projectId_name: { projectId: project.id, name: "senior-dev-astra-medium" } },
   });
   const existingSol = await prisma.agent.findUniqueOrThrow({
     where: { projectId_name: { projectId: project.id, name: specialName } },
@@ -1271,7 +1271,7 @@ test(`sync recreates a missing ${specialName} Agent from senior-dev`, async (t) 
   assert.equal(sol.runnerPreference, specialSource.runnerPreference);
   assert.equal(sol.inboxAccess, true);
   assert.equal(sol.environmentId, source.environmentId);
-  assert.equal(sol.runtimeConfigCustomized, false);
+  assert.deepEqual(sol.customizedFields, []);
   // The role binds no template step, so the source Agent's write grant is the
   // only way it can reach a repository.
   assert.deepEqual(await prisma.agentRepoAccess.findMany({
@@ -1304,10 +1304,10 @@ test("canonical sync adopts the tolerated differences and refuses every other on
   const regressionStep = step(6);
   assert.equal(regressionStep.outputKind, "regression-verification-v2");
   const retiredReviewer = await prisma.agent.findUniqueOrThrow({
-    where: { projectId_name: { projectId: project.id, name: "review-coordinator-sol" } },
+    where: { projectId_name: { projectId: project.id, name: "code-reviewer-sol-high" } },
   });
   const verifier = await prisma.agent.findUniqueOrThrow({
-    where: { projectId_name: { projectId: project.id, name: "regression-verifier" } },
+    where: { projectId_name: { projectId: project.id, name: "regression-verifier-luna-xhigh" } },
   });
   const provisioning = async (stepId: string): Promise<boolean> => (
     await prisma.taskTemplateStep.findUniqueOrThrow({ where: { id: stepId } })

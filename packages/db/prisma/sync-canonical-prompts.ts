@@ -4,7 +4,6 @@ import {
   PrismaClient,
   RepoPermission,
   RunnerPreference,
-  TaskStatus,
 } from "@prisma/client";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
@@ -38,24 +37,32 @@ import {
   type TemplateStepSource,
 } from "../src/template-sources.js";
 
-const SENIOR_DEV_SOL_AGENT_NAME = "senior-dev-sol";
-const SENIOR_DEV_OPUS_AGENT_NAME = "senior-dev-opus";
-const SENIOR_DEV_ASTRA_LOW_AGENT_NAME = "senior-dev-astra-low";
+const SENIOR_DEV_SOL_ROLE = "senior-dev-sol-high";
+const SENIOR_DEV_OPUS_ROLE = "senior-dev-opus-medium";
+const SENIOR_DEV_ASTRA_LOW_ROLE = "senior-dev-astra-low";
+const SENIOR_DEV_ROLE = "senior-dev-astra-medium";
+const CODE_REVIEWER_SOL_ROLE = "code-reviewer-sol-high";
 
 // Canonical roles added after the canonical project was seeded, so ordinary
 // synchronization never creates them: each is created once from an active
-// source Agent row (copying its environment, tools, and repo access).
+// source Agent row (copying its environment, tools, and repo access). Both keys
+// are canonical roles, not names: the row an operator renamed is still the row
+// this list means.
 const SPECIAL_CANONICAL_AGENTS: readonly {
-  name: string;
+  canonicalRole: string;
   source: string;
   permissions: RepoPermission | null;
 }[] = [
-  { name: REGRESSION_VERIFIER_AGENT_NAME, source: "review-coordinator-sol", permissions: null },
-  { name: SPEC_REVALIDATOR_AGENT_NAME, source: "review-coordinator-sol", permissions: RepoPermission.GIT_READ },
-  { name: SENIOR_DEV_SOL_AGENT_NAME, source: "senior-dev", permissions: null },
-  { name: SENIOR_DEV_OPUS_AGENT_NAME, source: "senior-dev", permissions: null },
-  { name: SENIOR_DEV_ASTRA_LOW_AGENT_NAME, source: "senior-dev", permissions: null },
+  { canonicalRole: REGRESSION_VERIFIER_AGENT_NAME, source: CODE_REVIEWER_SOL_ROLE, permissions: null },
+  { canonicalRole: SPEC_REVALIDATOR_AGENT_NAME, source: CODE_REVIEWER_SOL_ROLE, permissions: RepoPermission.GIT_READ },
+  { canonicalRole: SENIOR_DEV_SOL_ROLE, source: SENIOR_DEV_ROLE, permissions: null },
+  { canonicalRole: SENIOR_DEV_OPUS_ROLE, source: SENIOR_DEV_ROLE, permissions: null },
+  { canonicalRole: SENIOR_DEV_ASTRA_LOW_ROLE, source: SENIOR_DEV_ROLE, permissions: null },
 ];
+
+/** Agent columns canonical sync writes unless the operator edited them (R9). */
+const ADOPTABLE_AGENT_FIELDS = ["name", "title", "model", "runnerPreference"] as const;
+const RUNTIME_AGENT_FIELDS = ["model", "runnerPreference"] as const;
 
 const runtimeConfigRefusal = (agent: { model: string; runnerPreference: RunnerPreference }): string | null => {
   const expected = catalogRunnerForModel(agent.model);
@@ -118,7 +125,7 @@ type FullInstallTarget = ProjectRow & { environmentId: string };
 const preflightFullInstallTarget = async (
   tx: Prisma.TransactionClient,
   requestedId: string,
-  roleNames: readonly string[],
+  roles: readonly string[],
 ): Promise<FullInstallTarget> => {
   const target = await tx.project.findUnique({
     where: { id: requestedId },
@@ -137,7 +144,7 @@ const preflightFullInstallTarget = async (
     throw projectError(project, `Project has ${target.environments.length} Environments; --install-full requires exactly one`);
   }
   const archived = await tx.agent.findFirst({
-    where: { projectId: target.id, name: { in: [...roleNames] }, archivedAt: { not: null } },
+    where: { projectId: target.id, canonicalRole: { in: [...roles] }, archivedAt: { not: null } },
     orderBy: { name: "asc" },
     select: { id: true, name: true },
   });
@@ -152,20 +159,20 @@ const createSpecialCanonicalAgent = async (
   project: ProjectRow,
   sources: AgentSources,
   role: RoleSource,
-  sourceName: string,
+  sourceRole: string,
   permissions: RepoPermission | null,
 ): Promise<{ created: boolean; grants: number }> => {
-  const existing = await tx.agent.findUnique({
-    where: { projectId_name: { projectId: project.id, name: role.name } },
+  const existing = await tx.agent.findFirst({
+    where: { projectId: project.id, canonicalRole: role.canonicalRole },
     select: { id: true, archivedAt: true },
   });
   if (existing?.archivedAt) {
-    throw projectError(project, `Agent ${role.name} (${existing.id}) is archived; sync will not resurrect it`);
+    throw projectError(project, `Agent ${role.canonicalRole} (${existing.id}) is archived; sync will not resurrect it`);
   }
   if (existing) return { created: false, grants: 0 };
 
-  const source = await tx.agent.findUnique({
-    where: { projectId_name: { projectId: project.id, name: sourceName } },
+  const source = await tx.agent.findFirst({
+    where: { projectId: project.id, canonicalRole: sourceRole },
     select: {
       id: true,
       environmentId: true,
@@ -175,11 +182,12 @@ const createSpecialCanonicalAgent = async (
     },
   });
   if (!source || source.archivedAt) {
-    throw projectError(project, `Cannot create ${role.name}: active source Agent ${sourceName} was not found`);
+    throw projectError(project, `Cannot create ${role.canonicalRole}: active source Agent ${sourceRole} was not found`);
   }
   const created = await tx.agent.create({ data: {
     projectId: project.id,
     environmentId: source.environmentId,
+    canonicalRole: role.canonicalRole,
     name: role.name,
     title: role.title,
     model: role.model,
@@ -188,7 +196,7 @@ const createSpecialCanonicalAgent = async (
     disabledTools: source.disabledTools,
     foundationalPrompt: sources.foundationalPrompt,
     rolePrompt: role.rolePrompt,
-    runtimeConfigCustomized: false,
+    customizedFields: [],
     runtimeConfigDriftNoticeFingerprint: null,
     codexServiceTier: CodexServiceTier.DEFAULT,
     archivedAt: null,
@@ -207,12 +215,12 @@ const migrateSpecialCanonicalAgents = async (
   tx: Prisma.TransactionClient,
   canonicalProject: ProjectRow,
   sources: AgentSources,
-  rolesByName: ReadonlyMap<string, RoleSource>,
+  rolesByRole: ReadonlyMap<string, RoleSource>,
   counters: CanonicalSyncCounters,
 ): Promise<void> => {
   for (const special of SPECIAL_CANONICAL_AGENTS) {
-    const role = rolesByName.get(special.name);
-    if (!role) throw projectError(canonicalProject, `Canonical role ${special.name} was not found`);
+    const role = rolesByRole.get(special.canonicalRole);
+    if (!role) throw projectError(canonicalProject, `Canonical role ${special.canonicalRole} was not found`);
     const outcome = await createSpecialCanonicalAgent(
       tx,
       canonicalProject,
@@ -230,23 +238,24 @@ const installMissingAgents = async (
   tx: Prisma.TransactionClient,
   target: FullInstallTarget,
   sources: AgentSources,
-  rolesByName: ReadonlyMap<string, RoleSource>,
-  roleNames: readonly string[],
+  rolesByRole: ReadonlyMap<string, RoleSource>,
+  roles: readonly string[],
   counters: CanonicalSyncCounters,
 ): Promise<void> => {
   const existing = await tx.agent.findMany({
-    where: { projectId: target.id, archivedAt: null, name: { in: [...roleNames] } },
-    select: { id: true, name: true },
+    where: { projectId: target.id, archivedAt: null, canonicalRole: { in: [...roles] } },
+    select: { id: true, canonicalRole: true },
   });
-  const existingNames = new Set(existing.map(({ name }) => name));
-  const createdNames = new Set<string>();
-  for (const name of roleNames) {
-    if (existingNames.has(name)) continue;
-    const role = rolesByName.get(name);
-    if (!role) throw projectError(target, `Canonical role ${name} was not found in sources`);
+  const existingRoles = new Set(existing.map(({ canonicalRole }) => canonicalRole));
+  const createdRoles = new Set<string>();
+  for (const canonicalRole of roles) {
+    if (existingRoles.has(canonicalRole)) continue;
+    const role = rolesByRole.get(canonicalRole);
+    if (!role) throw projectError(target, `Canonical role ${canonicalRole} was not found in sources`);
     await tx.agent.create({ data: {
       projectId: target.id,
       environmentId: target.environmentId,
+      canonicalRole: role.canonicalRole,
       name: role.name,
       title: role.title,
       model: role.model,
@@ -254,30 +263,32 @@ const installMissingAgents = async (
       inboxAccess: role.inboxAccess,
       foundationalPrompt: sources.foundationalPrompt,
       rolePrompt: role.rolePrompt,
-      runtimeConfigCustomized: false,
+      customizedFields: [],
       runtimeConfigDriftNoticeFingerprint: null,
       codexServiceTier: CodexServiceTier.DEFAULT,
       disabledTools: [],
       archivedAt: null,
     } });
-    createdNames.add(name);
+    createdRoles.add(canonicalRole);
     counters.createdAgents += 1;
   }
 
-  if (createdNames.size === 0) return;
+  if (createdRoles.size === 0) return;
   const targetAgents = await tx.agent.findMany({
-    where: { projectId: target.id, archivedAt: null, name: { in: [...roleNames] } },
-    select: { id: true, name: true },
+    where: { projectId: target.id, archivedAt: null, canonicalRole: { in: [...roles] } },
+    select: { id: true, canonicalRole: true },
   });
-  const agentByName = new Map(targetAgents.map((agent) => [agent.name, agent.id]));
-  for (const name of createdNames) {
-    const role = rolesByName.get(name)!;
-    const agentId = agentByName.get(name);
-    if (!agentId) throw projectError(target, `Agent ${name} was not found after installation`);
+  const agentByRole = new Map(targetAgents.flatMap((agent) => (
+    agent.canonicalRole === null ? [] : [[agent.canonicalRole, agent.id] as const]
+  )));
+  for (const canonicalRole of createdRoles) {
+    const role = rolesByRole.get(canonicalRole)!;
+    const agentId = agentByRole.get(canonicalRole);
+    if (!agentId) throw projectError(target, `Agent ${canonicalRole} was not found after installation`);
     for (const collaboratorName of role.collaborators) {
-      const allowedAgentId = agentByName.get(collaboratorName);
+      const allowedAgentId = agentByRole.get(collaboratorName);
       if (!allowedAgentId) {
-        throw projectError(target, `Agent ${name} references unknown collaborator ${collaboratorName}`);
+        throw projectError(target, `Agent ${canonicalRole} references unknown collaborator ${collaboratorName}`);
       }
       await tx.agentCollaboration.create({ data: {
         agentId,
@@ -293,8 +304,8 @@ const synchronizeAgents = async (
   project: ProjectRow,
   requireCompleteInventory: boolean,
   sources: AgentSources,
-  rolesByName: ReadonlyMap<string, RoleSource>,
-  roleNames: readonly string[],
+  rolesByRole: ReadonlyMap<string, RoleSource>,
+  roles: readonly string[],
   counters: CanonicalSyncCounters,
   runtimeConfigAdoptions: Array<{
     name: string;
@@ -302,39 +313,83 @@ const synchronizeAgents = async (
     to: { model: string; runnerPreference: RunnerPreference };
   }>,
 ): Promise<void> => {
+  const agentSelect = {
+    id: true,
+    projectId: true,
+    canonicalRole: true,
+    name: true,
+    archivedAt: true,
+    title: true,
+    model: true,
+    customizedFields: true,
+    runtimeConfigDriftNoticeFingerprint: true,
+    runnerPreference: true,
+    inboxAccess: true,
+    collaborators: { select: { allowedAgent: { select: { name: true } } } },
+  } as const;
+  // Rows are found by canonical role. A row installed before the column existed
+  // carries the role in its name instead, and is adopted once here — unless the
+  // role is already claimed, in which case the same-named row is an operator's
+  // Agent that happens to collide and canonical sync leaves it alone.
   const canonicalAgentRows = await tx.agent.findMany({
-    where: { projectId: project.id, name: { in: [...roleNames] } },
-    select: {
-      id: true,
-      projectId: true,
-      name: true,
-      archivedAt: true,
-      title: true,
-      model: true,
-      runtimeConfigCustomized: true,
-      runtimeConfigDriftNoticeFingerprint: true,
-      runnerPreference: true,
-      inboxAccess: true,
-      collaborators: { select: { allowedAgent: { select: { name: true } } } },
+    where: {
+      projectId: project.id,
+      OR: [{ canonicalRole: { in: [...roles] } }, { canonicalRole: null, name: { in: [...roles] } }],
     },
+    select: agentSelect,
   });
-  const presentAgents = canonicalAgentRows.filter((agent) => agent.archivedAt === null);
+  const claimedRoles = new Set(canonicalAgentRows.flatMap((agent) => (
+    agent.canonicalRole === null ? [] : [agent.canonicalRole]
+  )));
+  const identifiedRows: (typeof canonicalAgentRows[number] & { canonicalRole: string })[] = [];
+  for (const agent of canonicalAgentRows) {
+    if (agent.canonicalRole !== null) {
+      identifiedRows.push({ ...agent, canonicalRole: agent.canonicalRole });
+      continue;
+    }
+    if (claimedRoles.has(agent.name)) continue;
+    const claimed = await tx.agent.updateMany({
+      where: { id: agent.id, canonicalRole: null },
+      data: { canonicalRole: agent.name },
+    });
+    if (claimed.count !== 1) {
+      throw projectError(project, `Agent ${agent.name} (${agent.id}) changed while its canonical role was being recorded`);
+    }
+    claimedRoles.add(agent.name);
+    counters.assignedCanonicalRoles += 1;
+    identifiedRows.push({ ...agent, canonicalRole: agent.name });
+  }
+
+  const presentAgents = identifiedRows.filter((agent) => agent.archivedAt === null);
   if (requireCompleteInventory) {
-    const canonicalNames = new Set(presentAgents.map(({ name }) => name));
-    for (const name of roleNames) {
-      if (canonicalNames.has(name)) continue;
-      const archived = canonicalAgentRows.find((agent) => agent.name === name && agent.archivedAt !== null);
-      if (archived) throw projectError(project, `Agent ${name} (${archived.id}) is archived`);
-      throw projectError(project, `Agent ${name} was not found`);
+    const present = new Set(presentAgents.map(({ canonicalRole }) => canonicalRole));
+    for (const canonicalRole of roles) {
+      if (present.has(canonicalRole)) continue;
+      const archived = identifiedRows.find((agent) => agent.canonicalRole === canonicalRole && agent.archivedAt !== null);
+      if (archived) throw projectError(project, `Agent ${canonicalRole} (${archived.id}) is archived`);
+      throw projectError(project, `Agent ${canonicalRole} was not found`);
     }
   }
 
+  const namesInProject = new Map((await tx.agent.findMany({
+    where: { projectId: project.id },
+    select: { id: true, name: true },
+  })).map(({ name, id }) => [name, id]));
+
   for (const agent of presentAgents) {
-    const role = rolesByName.get(agent.name);
+    const role = rolesByRole.get(agent.canonicalRole);
     if (!role) continue;
+    // R9: prompts always follow canonical; name, title, model and runner follow it
+    // until the operator edits that field. Everything else is still structure the
+    // Markdown owns, and a difference there is a refusal rather than a write.
+    const customized = new Set(agent.customizedFields);
     const differences = roleSourceStructureDifferences(agent, role);
-    const runtimeDifferences = differences.filter((difference) => difference === "model" || difference === "runnerPreference");
-    const structuralDifferences = differences.filter((difference) => difference !== "model" && difference !== "runnerPreference");
+    const adoptable = (field: string): boolean => (ADOPTABLE_AGENT_FIELDS as readonly string[]).includes(field);
+    const structuralDifferences = differences.filter((difference) => !adoptable(difference));
+    const adoptedDifferences = differences.filter((difference) => adoptable(difference) && !customized.has(difference));
+    const runtimeDrift = differences.some((difference) => (
+      (RUNTIME_AGENT_FIELDS as readonly string[]).includes(difference) && customized.has(difference)
+    ));
     const runtimeRefusal = runtimeConfigRefusal(agent);
     if (structuralDifferences.length > 0) {
       throw projectError(project, `Agent ${agent.name} (${agent.id}) differs from canonical Markdown structure: ${structuralDifferences.join(", ")}`);
@@ -342,32 +397,50 @@ const synchronizeAgents = async (
     if (runtimeRefusal) {
       throw projectError(project, `Agent ${agent.name} (${agent.id}) has an invalid runtime configuration: ${runtimeRefusal}`);
     }
-    const adoptsCanonicalDefaults = runtimeDifferences.length > 0 && !agent.runtimeConfigCustomized;
-    if (adoptsCanonicalDefaults) {
+    if (adoptedDifferences.includes("name")) {
+      const holder = namesInProject.get(role.name);
+      if (holder !== undefined && holder !== agent.id) {
+        throw projectError(project, `Agent ${agent.name} (${agent.id}) cannot adopt canonical name ${role.name}: Agent ${holder} already has it`);
+      }
+    }
+    const adoptsRuntime = adoptedDifferences.some((difference) => (RUNTIME_AGENT_FIELDS as readonly string[]).includes(difference));
+    if (adoptedDifferences.length > 0) {
       const adopted = await tx.agent.updateMany({
         where: {
           id: agent.id,
+          name: agent.name,
+          title: agent.title,
           model: agent.model,
           runnerPreference: agent.runnerPreference,
-          runtimeConfigCustomized: false,
         },
         data: {
-          model: role.model,
-          runnerPreference: role.runnerPreference,
-          runtimeConfigDriftNoticeFingerprint: null,
+          ...(adoptedDifferences.includes("name") ? { name: role.name } : {}),
+          ...(adoptedDifferences.includes("title") ? { title: role.title } : {}),
+          ...(adoptedDifferences.includes("model") ? { model: role.model } : {}),
+          ...(adoptedDifferences.includes("runnerPreference") ? { runnerPreference: role.runnerPreference } : {}),
+          ...(adoptsRuntime ? { runtimeConfigDriftNoticeFingerprint: null } : {}),
         },
       });
       if (adopted.count !== 1) {
-        throw projectError(project, `Agent ${agent.name} (${agent.id}) changed while its canonical runtime configuration was being adopted`);
+        throw projectError(project, `Agent ${agent.name} (${agent.id}) changed while its canonical configuration was being adopted`);
       }
-      counters.adoptedAgentDefaults += 1;
-      runtimeConfigAdoptions.push({
-        name: agent.name,
-        from: { model: agent.model, runnerPreference: agent.runnerPreference },
-        to: { model: role.model, runnerPreference: role.runnerPreference },
-      });
+      if (adoptedDifferences.includes("name")) {
+        namesInProject.delete(agent.name);
+        namesInProject.set(role.name, agent.id);
+      }
+      if (adoptsRuntime) {
+        counters.adoptedAgentDefaults += 1;
+        runtimeConfigAdoptions.push({
+          name: agent.name,
+          from: { model: agent.model, runnerPreference: agent.runnerPreference },
+          to: { model: role.model, runnerPreference: role.runnerPreference },
+        });
+      }
+      if (adoptedDifferences.some((difference) => difference === "name" || difference === "title")) {
+        counters.adoptedAgentIdentity += 1;
+      }
     }
-    if (runtimeDifferences.length > 0 && agent.runtimeConfigCustomized) {
+    if (runtimeDrift) {
       const fingerprint = JSON.stringify({
         canonical: { model: role.model, runnerPreference: role.runnerPreference },
         production: { model: agent.model, runnerPreference: agent.runnerPreference },
@@ -378,7 +451,6 @@ const synchronizeAgents = async (
             id: agent.id,
             model: agent.model,
             runnerPreference: agent.runnerPreference,
-            runtimeConfigCustomized: true,
             runtimeConfigDriftNoticeFingerprint: agent.runtimeConfigDriftNoticeFingerprint,
           },
           data: { runtimeConfigDriftNoticeFingerprint: fingerprint },
@@ -397,22 +469,21 @@ const synchronizeAgents = async (
           kind: "TEXT",
           body: [
             "Canonical runtime drift detected",
-            `Agent: ${agent.name}`,
+            `Agent: ${agent.name} (${agent.canonicalRole})`,
             `Canonical: model=${role.model}, runner=${role.runnerPreference}`,
             `Production: model=${agent.model}, runner=${agent.runnerPreference}`,
-            `runtimeConfigCustomized=${agent.runtimeConfigCustomized}`,
+            `customizedFields=${[...customized].sort().join(",")}`,
           ].join("\n"),
           ...(thread ? { threadId: thread.id } : {}),
         } });
         counters.runtimeDriftNotices += 1;
       }
-    } else if (!adoptsCanonicalDefaults && agent.runtimeConfigDriftNoticeFingerprint !== null) {
+    } else if (!adoptsRuntime && agent.runtimeConfigDriftNoticeFingerprint !== null) {
       await tx.agent.updateMany({
         where: {
           id: agent.id,
           model: agent.model,
           runnerPreference: agent.runnerPreference,
-          runtimeConfigCustomized: agent.runtimeConfigCustomized,
           runtimeConfigDriftNoticeFingerprint: agent.runtimeConfigDriftNoticeFingerprint,
         },
         data: { runtimeConfigDriftNoticeFingerprint: null },
@@ -430,19 +501,16 @@ const synchronizeAgents = async (
       },
       data: { foundationalPrompt: sources.foundationalPrompt, rolePrompt: role.rolePrompt },
     });
-    if (promptUpdate.count > 0) recordRolePromptUpdate(counters, role.name, promptUpdate.count);
+    if (promptUpdate.count > 0) recordRolePromptUpdate(counters, role.canonicalRole, promptUpdate.count);
   }
 };
-
-type RegressionStep = { id: string; templateName: CanonicalTemplateName; stepIndex: number; templateId: string };
 
 const syncCanonicalTemplates = async (
   tx: Prisma.TransactionClient,
   project: ProjectRow,
   templateSources: ReadonlyMap<CanonicalTemplateName, readonly TemplateStepSource[]>,
   counters: CanonicalSyncCounters,
-): Promise<RegressionStep[]> => {
-  const regressionSteps: RegressionStep[] = [];
+): Promise<void> => {
   for (const [templateName, steps] of templateSources) {
     const templates = await tx.taskTemplate.findMany({
       where: { projectId: project.id, name: templateName },
@@ -524,14 +592,6 @@ const syncCanonicalTemplates = async (
           }
           counters[adoption.counter] += 1;
         }
-        if (step.agentName === REGRESSION_VERIFIER_AGENT_NAME) {
-          regressionSteps.push({
-            id: persisted.id,
-            templateName,
-            stepIndex: step.stepIndex,
-            templateId: template.id,
-          });
-        }
         if (persisted._count.tasks > 0 && persisted.prompt !== step.prompt) {
           throw projectError(
             project,
@@ -545,86 +605,6 @@ const syncCanonicalTemplates = async (
       }
     }
   }
-  return regressionSteps;
-};
-
-const migrateRegressionTasks = async (
-  tx: Prisma.TransactionClient,
-  project: ProjectRow,
-  regressionSteps: readonly RegressionStep[],
-  counters: CanonicalSyncCounters,
-): Promise<void> => {
-  for (const step of regressionSteps) {
-    const target = await tx.agent.findFirst({
-      where: { projectId: project.id, name: REGRESSION_VERIFIER_AGENT_NAME, archivedAt: null },
-      select: { id: true },
-    });
-    if (!target) {
-      throw projectError(
-        project,
-        `Template ${step.templateName} (${step.templateId}), ${step.templateName} step ${step.stepIndex} (${step.id}) has no active ${REGRESSION_VERIFIER_AGENT_NAME} Agent`,
-      );
-    }
-    const tasks = await tx.task.findMany({
-      where: {
-        templateStepId: step.id,
-        assigneeAgent: { name: { in: ["review-coordinator-opus", "review-coordinator-sol"] } },
-      },
-      select: {
-        id: true,
-        assigneeAgentId: true,
-        status: true,
-        archivedAt: true,
-        _count: { select: { runs: true, sessions: true } },
-        stepOutput: { select: { id: true } },
-      },
-    });
-    for (const task of tasks) {
-      if (task.archivedAt) {
-        counters.preservedTaskAssignments.archived += 1;
-        continue;
-      }
-      if (task.status !== TaskStatus.TODO) {
-        counters.preservedTaskAssignments.nonTodo += 1;
-        continue;
-      }
-      if (task._count.runs > 0 || task._count.sessions > 0) {
-        counters.preservedTaskAssignments.started += 1;
-        continue;
-      }
-      if (task.stepOutput) {
-        counters.preservedTaskAssignments.output += 1;
-        continue;
-      }
-      const adopted = await tx.task.updateMany({
-        where: {
-          id: task.id,
-          assigneeAgentId: task.assigneeAgentId,
-          status: TaskStatus.TODO,
-          archivedAt: null,
-          runs: { none: {} },
-          sessions: { none: {} },
-          stepOutput: { is: null },
-        },
-        data: { assigneeAgentId: target.id },
-      });
-      if (adopted.count !== 1) {
-        throw projectError(project, `Regression task ${task.id} changed while canonical routing was being adopted`);
-      }
-      await tx.taskActivity.create({ data: {
-        taskId: task.id,
-        actorType: "control-plane",
-        body: `Canonical routing reassigned this unstarted regression step to ${REGRESSION_VERIFIER_AGENT_NAME}`,
-        metadata: {
-          kind: "canonicalRouting.regressionVerifier",
-          schemaVersion: 1,
-          fromAgentId: task.assigneeAgentId,
-          toAgentId: target.id,
-        },
-      } });
-      counters.migratedTasks += 1;
-    }
-  }
 };
 
 export const main = async (
@@ -635,8 +615,8 @@ export const main = async (
     ? parseInstallFullProjectId()
     : requestedInstallFullProjectId;
   const [templateSources, sources] = await Promise.all([loadAllTemplateStepSources(), loadAgentSources()]);
-  const rolesByName = new Map(sources.roles.map((role) => [role.name, role]));
-  const roleNames = [...rolesByName.keys()];
+  const rolesByRole = new Map(sources.roles.map((role) => [role.canonicalRole, role]));
+  const roleNames = [...rolesByRole.keys()];
   const reportKeys = { templateSteps: templateSources, roleNames };
 
   const prisma = database ?? new PrismaClient();
@@ -695,14 +675,14 @@ export const main = async (
           }
 
           if (project.id === canonicalProject.id) {
-            await migrateSpecialCanonicalAgents(tx, canonicalProject, sources, rolesByName, projectCounters);
+            await migrateSpecialCanonicalAgents(tx, canonicalProject, sources, rolesByRole, projectCounters);
           }
           await synchronizeAgents(
             tx,
             project,
             project.id === canonicalProject.id,
             sources,
-            rolesByName,
+            rolesByRole,
             roleNames,
             projectCounters,
             transactionAdoptions,
@@ -711,11 +691,10 @@ export const main = async (
           await applyCanonicalInstallation(tx, installationPlan, templateSources, {
             projectLabel: () => project.slug,
           });
-          const regressionSteps = await syncCanonicalTemplates(tx, project, templateSources, projectCounters);
-          await migrateRegressionTasks(tx, project, regressionSteps, projectCounters);
+          await syncCanonicalTemplates(tx, project, templateSources, projectCounters);
 
           if (fullInstallTarget) {
-            await installMissingAgents(tx, fullInstallTarget, sources, rolesByName, roleNames, projectCounters);
+            await installMissingAgents(tx, fullInstallTarget, sources, rolesByRole, roleNames, projectCounters);
             const postSyncRows = await readCanonicalInstallationRows(tx, project.id, templateSources);
             const fullInstallationPlan = planCanonicalInstallation(postSyncRows, templateSources, [project.id]);
             for (const action of fullInstallationPlan) {

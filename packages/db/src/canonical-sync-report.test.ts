@@ -34,11 +34,11 @@ test("an empty report names every canonical step and role at zero", () => {
     adoptedDependencyProvisioning: 0,
     adoptedOptionalSteps: 0,
     renamedSteps: 0,
-    migratedTasks: 0,
     adoptedAgentDefaults: 0,
+    adoptedAgentIdentity: 0,
+    assignedCanonicalRoles: 0,
     runtimeDriftNotices: 0,
     updated: 0,
-    preservedTaskAssignments: { archived: 0, nonTodo: 0, started: 0, output: 0 },
     updatedSteps: { direct: { "0": 0, "1": 0 }, compound: { "0": 0 } },
     updatedRoles: { "senior-dev": 0, reviewer: 0 },
   });
@@ -54,8 +54,7 @@ test("updated sums every write and excludes the templates inspected", () => {
   const counters = empty();
   counters.templates = 4;
   counters.createdAgents = 2;
-  counters.migratedTasks = 1;
-  counters.preservedTaskAssignments.archived = 3;
+  counters.adoptedAgentIdentity = 1;
   recordStepPromptUpdate(counters, "direct", 1, 5);
   recordRolePromptUpdate(counters, "reviewer", 6);
 
@@ -69,14 +68,14 @@ test("totals accumulate every counter across Projects", () => {
   const first = empty();
   first.templates = 2;
   first.adoptedAssignees = 1;
-  first.preservedTaskAssignments.started = 1;
+  first.assignedCanonicalRoles = 1;
   recordStepPromptUpdate(first, "direct", 0, 1);
   recordRolePromptUpdate(first, "senior-dev", 1);
 
   const second = empty();
   second.templates = 3;
   second.adoptedAssignees = 4;
-  second.preservedTaskAssignments.started = 2;
+  second.assignedCanonicalRoles = 2;
   recordStepPromptUpdate(second, "direct", 0, 2);
   recordStepPromptUpdate(second, "compound", 0, 1);
   recordRolePromptUpdate(second, "senior-dev", 3);
@@ -88,10 +87,10 @@ test("totals accumulate every counter across Projects", () => {
 
   assert.equal(summary.totals.templates, 5);
   assert.equal(summary.totals.adoptedAssignees, 5);
-  assert.equal(summary.totals.preservedTaskAssignments.started, 3);
+  assert.equal(summary.totals.assignedCanonicalRoles, 3);
   assert.deepEqual(summary.totals.updatedSteps, { direct: { "0": 3, "1": 0 }, compound: { "0": 1 } });
   assert.deepEqual(summary.totals.updatedRoles, { "senior-dev": 4, reviewer: 0 });
-  assert.equal(summary.totals.updated, 13);
+  assert.equal(summary.totals.updated, 16);
 });
 
 test("summing leaves each Project's own counters alone", () => {

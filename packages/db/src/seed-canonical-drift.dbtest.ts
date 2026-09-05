@@ -91,7 +91,7 @@ test("seed rolls a registered canonical generation over inside its installation 
     });
   }
   // The retired seven-step graph still bound its review-fix step to senior-dev.
-  const seniorDev = await prisma.agent.findUniqueOrThrow({ where: { projectId_name: { projectId: project.id, name: "senior-dev" } } });
+  const seniorDev = await prisma.agent.findUniqueOrThrow({ where: { projectId_name: { projectId: project.id, name: "senior-dev-astra-medium" } } });
   await prisma.taskTemplateStep.updateMany({
     where: { taskTemplateId: outgoing.id, outputKind: "fixed-implementation" },
     data: { assigneeAgentId: seniorDev.id },

@@ -82,6 +82,19 @@ export type Agent<DateTime = string> = {
   projectId: string;
   environmentId: string;
   name: string;
+  /** The role file this Agent was installed from, null for an operator's own Agent. */
+  canonicalRole: string | null;
+  /** Agent columns the operator edited: name, title, model, runnerPreference. */
+  customizedFields: string[];
+  /**
+   * False only for the mechanical merge sentinel, which no operator may assign.
+   * Computed by the Agent routes' serializer rather than stored, and what agent
+   * pickers filter on; `POST /projects/:projectId/tasks` refuses the sentinel
+   * regardless of any client. Optional because a Task carries its assignee as the
+   * raw row (`TaskBase.assigneeAgent`), where assignability is not a question:
+   * that Agent is already assigned.
+   */
+  assignable?: boolean;
   title: string;
   model: string;
   codexServiceTier: CodexServiceTier;

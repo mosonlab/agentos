@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { RunnerPreference } from "@prisma/client";
 
+import {
+  assertCanonicalAgentSources,
+  canonicalRoleSlugSuffix,
+  MODEL_FREE_CANONICAL_ROLES,
+} from "./agent-contract.js";
 import { loadAgentSources, loadStarterAgentSource, PUBLIC_STARTER_ROLE_NAME } from "./agent-sources.js";
 
 /**
@@ -48,6 +53,7 @@ test("the starter's own record agrees with the role the full loader returns", as
   assert.deepEqual(
     { ...starter, foundationalPrompt: undefined },
     {
+      canonicalRole: role.canonicalRole,
       name: role.name,
       title: role.title,
       model: role.model,
@@ -67,17 +73,65 @@ test("the extracted loader still reads the whole contract the internal seed cons
 
 test("the loader exposes the two independent review roles exactly once", async () => {
   const sources = await loadAgentSources();
-  const reviewRoles = sources.roles.filter(({ name }) => (
-    name === "review-coordinator-sol"
-    || name === "review-coordinator-opus"
+  const reviewRoles = sources.roles.filter(({ canonicalRole }) => (
+    canonicalRole === "code-reviewer-sol-high"
+    || canonicalRole === "code-reviewer-opus-high"
   ));
-  assert.deepEqual(reviewRoles.map(({ name }) => name).sort(), [
-    "review-coordinator-opus",
-    "review-coordinator-sol",
+  assert.deepEqual(reviewRoles.map(({ canonicalRole }) => canonicalRole).sort(), [
+    "code-reviewer-opus-high",
+    "code-reviewer-sol-high",
   ]);
   // The adjudication role is archived: the fix step dispositions both reports itself.
-  assert.equal(sources.roles.some(({ name }) => name === "review-adjudicator-opus"), false);
-  const blind = reviewRoles.find(({ name }) => name === "review-coordinator-opus");
+  assert.equal(sources.roles.some(({ canonicalRole }) => canonicalRole === "review-adjudicator-opus"), false);
+  const blind = reviewRoles.find(({ canonicalRole }) => canonicalRole === "code-reviewer-opus-high");
   assert.ok(blind);
   assert.equal(blind.runnerPreference, RunnerPreference.CLAUDE);
+});
+
+/**
+ * Canonical identity is the role file, so the loader has to state it: every role
+ * carries its file name, and the file name is the frontmatter name. Without this,
+ * `canonicalRole` on a persisted Agent could name a role no source file matches.
+ */
+test("every role carries its own file name as its canonical role", async () => {
+  const sources = await loadAgentSources();
+  const roleFiles = (await readdir(`${agentsRoot}roles`))
+    .filter((name) => name.endsWith(".md"))
+    .map((name) => name.slice(0, -3))
+    .sort();
+  assert.deepEqual(sources.roles.map(({ canonicalRole }) => canonicalRole).sort(), roleFiles);
+  for (const role of sources.roles) assert.equal(role.name, role.canonicalRole);
+});
+
+/**
+ * The naming contract itself: a slug states the runtime it binds, a title states
+ * the role. Both are asserted on load, so a rename that moves one and not the
+ * other stops the release rather than reaching a console.
+ */
+test("every canonical slug names its model and effort, and every title names only the role", async () => {
+  const sources = await loadAgentSources();
+  for (const role of sources.roles) {
+    const words = role.title.trim().split(/\s+/u);
+    assert.ok(words.length <= 2, `${role.name} title ${role.title}`);
+    if (MODEL_FREE_CANONICAL_ROLES.includes(role.name as typeof MODEL_FREE_CANONICAL_ROLES[number])) continue;
+    const suffix = canonicalRoleSlugSuffix(role.model);
+    assert.ok(suffix, `${role.name} model ${role.model}`);
+    assert.ok(role.name.endsWith(suffix), `${role.name} does not end with ${suffix}`);
+  }
+});
+
+test("the contract refuses a slug, a title or a file name that drifts from the role", () => {
+  const role = {
+    canonicalRole: "senior-dev-astra-low",
+    name: "senior-dev-astra-low",
+    title: "Senior Dev",
+    model: "gpt-6-astra:low",
+    runnerPreference: RunnerPreference.CODEX,
+  };
+  assert.doesNotThrow(() => assertCanonicalAgentSources([role]));
+  assert.throws(() => assertCanonicalAgentSources([{ ...role, name: "senior-dev", canonicalRole: "senior-dev" }]), /must be named/u);
+  assert.throws(() => assertCanonicalAgentSources([{ ...role, canonicalRole: "senior-dev" }]), /named after the role/u);
+  assert.throws(() => assertCanonicalAgentSources([{ ...role, title: "Senior Developer (Astra low)" }]), /must be one or two capitalised words/u);
+  assert.throws(() => assertCanonicalAgentSources([{ ...role, title: "Astra Dev" }]), /names the runtime/u);
+  assert.throws(() => assertCanonicalAgentSources([{ ...role, title: "Low Dev" }]), /names the runtime/u);
 });

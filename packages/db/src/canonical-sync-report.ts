@@ -27,16 +27,6 @@ export type CanonicalSyncReportKeys = {
   roleNames: readonly string[];
 };
 
-/** Unstarted regression Tasks the sync deliberately did not reassign. */
-export type PreservedTaskAssignmentCounters = {
-  archived: number;
-  nonTodo: number;
-  started: number;
-  output: number;
-};
-
-const PRESERVED_TASK_ASSIGNMENT_FIELDS = ["archived", "nonTodo", "started", "output"] as const;
-
 /**
  * Every counter that records a write. `templates` counts what was inspected
  * rather than what changed, and `updated` is their sum, so neither is here.
@@ -53,8 +43,9 @@ const CANONICAL_SYNC_MUTATION_COUNTERS = [
   "adoptedDependencyProvisioning",
   "adoptedOptionalSteps",
   "renamedSteps",
-  "migratedTasks",
   "adoptedAgentDefaults",
+  "adoptedAgentIdentity",
+  "assignedCanonicalRoles",
   "runtimeDriftNotices",
 ] as const;
 
@@ -69,7 +60,6 @@ export type CanonicalSyncMutationCounter = typeof CANONICAL_SYNC_MUTATION_COUNTE
 export type CanonicalSyncCounters = Record<CanonicalSyncMutationCounter, number> & {
   templates: number;
   updated: number;
-  preservedTaskAssignments: PreservedTaskAssignmentCounters;
   updatedSteps: Record<string, Record<string, number>>;
   updatedRoles: Record<string, number>;
 };
@@ -97,11 +87,11 @@ export const emptyCanonicalSyncCounters = (
   adoptedDependencyProvisioning: 0,
   adoptedOptionalSteps: 0,
   renamedSteps: 0,
-  migratedTasks: 0,
   adoptedAgentDefaults: 0,
+  adoptedAgentIdentity: 0,
+  assignedCanonicalRoles: 0,
   runtimeDriftNotices: 0,
   updated: 0,
-  preservedTaskAssignments: { archived: 0, nonTodo: 0, started: 0, output: 0 },
   updatedSteps: Object.fromEntries([...keys.templateSteps].map(([name, steps]) => [
     name,
     Object.fromEntries(steps.map((step) => [String(step.stepIndex), 0])),
@@ -155,9 +145,6 @@ const sumCounters = (
   for (const counters of perProject) {
     total.templates += counters.templates;
     for (const name of CANONICAL_SYNC_MUTATION_COUNTERS) total[name] += counters[name];
-    for (const field of PRESERVED_TASK_ASSIGNMENT_FIELDS) {
-      total.preservedTaskAssignments[field] += counters.preservedTaskAssignments[field];
-    }
     for (const [templateName, byStep] of Object.entries(counters.updatedSteps)) {
       for (const [stepIndex, count] of Object.entries(byStep)) {
         recordStepPromptUpdate(total, templateName, Number(stepIndex), count);

@@ -28,6 +28,13 @@ import { parseInlineList, parsePromptDocument, requiredFrontmatter } from "./pro
 const agentsRoot = fileURLToPath(new URL("../../../agents/", import.meta.url));
 
 export type RoleSource = {
+  /**
+   * The `agents/roles/<canonicalRole>.md` file name, and the canonical identity of
+   * every Agent installed from it. It equals `name` in the source — a role file's
+   * frontmatter name is its slug — and only an operator edit can move a persisted
+   * row's `name` away from it.
+   */
+  canonicalRole: string;
   name: string;
   title: string;
   model: string;
@@ -39,6 +46,12 @@ export type RoleSource = {
 export type AgentSources = { foundationalPrompt: string; roles: RoleSource[] };
 
 export type PersistedRoleStructure = {
+  /**
+   * Present on rows read by canonical identity. `name` and `title` are now
+   * adoptable rather than structural — an operator may rename an Agent — so the
+   * column that says which role a row is has to be compared as well.
+   */
+  canonicalRole?: string | null;
   name?: string;
   title: string;
   model: string;
@@ -54,6 +67,9 @@ export const roleSourceStructureDifferences = (
   const actualCollaborators = actual.collaborators.map(({ allowedAgent }) => allowedAgent.name).sort();
   const expectedCollaborators = [...expected.collaborators].sort();
   const fields = [
+    ...(actual.canonicalRole === undefined
+      ? []
+      : [["canonicalRole", actual.canonicalRole, expected.canonicalRole] as const]),
     ...(actual.name === undefined ? [] : [["name", actual.name, expected.name] as const]),
     ["title", actual.title, expected.title],
     ["model", actual.model, expected.model],
@@ -83,8 +99,17 @@ export const loadAgentSources = async (): Promise<AgentSources> => {
     const document = parsePromptDocument(await readFile(filePath, "utf8"), filePath);
     const inboxAccess = requiredFrontmatter(document, "inboxAccess", filePath);
     if (inboxAccess !== "true" && inboxAccess !== "false") throw new Error(`${filePath} inboxAccess must be true or false`);
+    // The file name is the canonical identity, so it must not become a second
+    // name a role could drift from: a source whose frontmatter disagrees with its
+    // file name is refused rather than resolved in favour of either.
+    const canonicalRole = filename.slice(0, -".md".length);
+    const name = requiredFrontmatter(document, "name", filePath);
+    if (name !== canonicalRole) {
+      throw new Error(`${filePath} declares name ${name}; a canonical role file is named after the role`);
+    }
     roles.push({
-      name: requiredFrontmatter(document, "name", filePath),
+      canonicalRole,
+      name,
       title: requiredFrontmatter(document, "title", filePath),
       model: requiredFrontmatter(document, "model", filePath),
       runnerPreference: runnerPreference(requiredFrontmatter(document, "runner", filePath), filePath),
@@ -105,6 +130,7 @@ export const loadAgentSources = async (): Promise<AgentSources> => {
 export const PUBLIC_STARTER_ROLE_NAME = "default";
 
 export type StarterAgentSource = {
+  canonicalRole: string;
   name: string;
   title: string;
   model: string;
@@ -137,6 +163,7 @@ export const loadStarterAgentSource = async (): Promise<StarterAgentSource> => {
   if (sources.foundationalPrompt.length === 0) throw new Error("agents/foundational.md has an empty body");
   if (role.rolePrompt.length === 0) throw new Error(`agents/roles/${PUBLIC_STARTER_ROLE_NAME}.md has an empty body`);
   return {
+    canonicalRole: role.canonicalRole,
     name: role.name,
     title: role.title,
     model: role.model,
