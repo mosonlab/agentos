@@ -32,6 +32,9 @@ test("the pull-request template has current identity, prompt history, and explic
     }, {
       marker: "pre-astra-low-review-fix",
       promptDigest: undefined,
+    }, {
+      marker: "pre-salvage-resume",
+      promptDigest: "1c1169bf0586f6bb71f4ed34b3eb6b166828802a9b24c6b07844b2f526b5f8a8",
     }],
   );
   assert.deepEqual(CURRENT_CANONICAL_STEP_ORDINALS[PR_TEMPLATE_NAME], {
