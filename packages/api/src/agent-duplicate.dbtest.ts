@@ -201,3 +201,17 @@ test("duplicate refuses a taken name and refuses the mechanical merge sentinel",
   assert.match(refused.body.error, /mechanical merge sentinel/u);
   assert.equal(await db.agent.count({ where: { projectId: source.project.id, name: "second-integrator" } }), 0);
 });
+
+test("duplicate refuses an unknown body field and writes nothing", async () => {
+  const source = await fixture();
+  const before = await db.agent.count({ where: { projectId: source.project.id } });
+
+  const refused = await call("POST", `/agents/${source.agent.id}/duplicate`, {
+    name: "senior-dev-copy",
+    canonicalRole: "senior-dev-astra-medium",
+  });
+
+  assert.equal(refused.status, 400, JSON.stringify(refused.body));
+  assert.equal(await db.agent.count({ where: { projectId: source.project.id } }), before);
+  assert.equal(await db.agent.count({ where: { projectId: source.project.id, name: "senior-dev-copy" } }), 0);
+});

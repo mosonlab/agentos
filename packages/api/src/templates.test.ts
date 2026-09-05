@@ -102,7 +102,11 @@ test("staffing profile selection reads one line and refuses every near-miss of i
   assert.equal(parseStaffingProfileName("Staffing: a - b"), "a - b");
   assert.equal(parseStaffingProfileName("Staffing: "), null);
   assert.equal(parseStaffingProfileName("Staffing: Weekend crew "), null);
-  assert.equal(parseStaffingProfileName(`Staffing: ${"n".repeat(121)}`), null);
+  // The parser's bound is the profile API's: a name an operator was allowed to
+  // save must stay selectable from a brief.
+  assert.equal(parseStaffingProfileName(`Staffing: ${"n".repeat(200)}`), "n".repeat(200));
+  assert.equal(parseStaffingProfileName(`Staffing: ${"n".repeat(201)}`), null);
+  assert.equal(findMalformedStaffingLine(`Staffing: ${"n".repeat(201)}`), `Staffing: ${"n".repeat(201)}`);
   assert.equal(parseStaffingProfileName(undefined), null);
   assert.equal(findMalformedStaffingLine("Build it\nStaffing: Weekend crew\n"), null);
   assert.equal(findMalformedStaffingLine("Staffing:Weekend crew"), "Staffing:Weekend crew");
