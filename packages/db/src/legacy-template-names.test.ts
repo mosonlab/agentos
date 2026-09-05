@@ -16,12 +16,14 @@ test("every exported legacy template name helper produces a registered identity"
       const source = ts.createSourceFile(entry, await readFile(url, "utf8"), ts.ScriptTarget.Latest, true);
       const names: string[] = [];
       for (const statement of source.statements) {
+        if (ts.isExportDeclaration(statement) && statement.exportClause && ts.isNamedExports(statement.exportClause)) {
+          names.push(...statement.exportClause.elements.map(({ name }) => name.text));
+        }
         if (!ts.canHaveModifiers(statement)
           || !ts.getModifiers(statement)?.some(({ kind }) => kind === ts.SyntaxKind.ExportKeyword)) continue;
         if (ts.isVariableStatement(statement)) {
           for (const declaration of statement.declarationList.declarations) {
-            if (ts.isIdentifier(declaration.name) && declaration.initializer
-              && (ts.isArrowFunction(declaration.initializer) || ts.isFunctionExpression(declaration.initializer))) names.push(declaration.name.text);
+            if (ts.isIdentifier(declaration.name)) names.push(declaration.name.text);
           }
         } else if (ts.isFunctionDeclaration(statement) && statement.name) {
           names.push(statement.name.text);
